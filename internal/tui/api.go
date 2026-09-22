@@ -47,6 +47,9 @@ func (c *apiClient) ListChannels(ctx context.Context, repo, filter string) ([]st
 	if err := json.NewDecoder(resp.Body).Decode(&channels); err != nil {
 		return nil, fmt.Errorf("DAEMON_DOWN: %w", err)
 	}
+	if channels == nil {
+		channels = []store.Channel{}
+	}
 	if filter != "" {
 		channels = filterChannels(channels, filter)
 	}

@@ -213,6 +213,9 @@ func channelListCmd(args []string) int {
 	if code := apiGet(u, "", &list); code != 0 {
 		return code
 	}
+	if list == nil {
+		list = []store.Channel{}
+	}
 	if *jsonOut {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")

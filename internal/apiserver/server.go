@@ -84,7 +84,7 @@ func NewHandler(s *store.Store) http.Handler {
 			}
 			id, err := s.CreateChannel(body.Name, body.RepoAbsPath, body.RepoRemote, body.RepoHeadSHA, body.RepoHeadBranch, body.Orphaned)
 			if err == store.ErrConflict {
-				writeErr(w, 409, "BAD_JSONL", "channel exists")
+				writeErr(w, 409, "CHANNEL_EXISTS", "channel exists")
 				return
 			}
 			if err != nil {
