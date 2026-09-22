@@ -30,6 +30,11 @@ type model struct {
 
 	channels []store.Channel
 	threads  []store.Thread
+
+	// Panel layout
+	treeHeight int
+	chatHeight int
+	width      int
 }
 
 func New(base string) tea.Model {
@@ -121,10 +126,21 @@ func (m *model) renderThreadList(channelID int64, threads []store.Thread) {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.tree.SetSize(msg.Width, msg.Height)
-		m.chat.SetSize(msg.Width, msg.Height)
+		// Reserve 2 lines for shortcuts + status bar
+		panelHeight := msg.Height - 2
+		if panelHeight < 2 {
+			panelHeight = 2
+		}
+		m.width = msg.Width
+		m.treeHeight = panelHeight
+		m.chatHeight = panelHeight
+		m.tree.SetSize(msg.Width, m.treeHeight)
+		m.chat.SetSize(msg.Width, m.chatHeight)
 		m.compose.width = msg.Width
-		m.compose.height = msg.Height
+		m.compose.height = panelHeight / 2
+		if m.compose.height < 3 {
+			m.compose.height = 3
+		}
 
 	case composeSendMsg:
 		return m.handleComposeSend(msg)
@@ -297,9 +313,16 @@ func (m model) View() tea.View {
 			Render(dimmed) + "\n" +
 			center(composeView, m.compose.width)
 	} else {
+		// Side-by-side layout: tree | chat
 		treeView := m.tree.View()
 		chatView := m.chat.View()
-		content = treeView + "\n" + chatView
+		panelStyle := lipgloss.NewStyle().Width(m.width)
+		content = panelStyle.Render(
+			lipgloss.JoinHorizontal(lipgloss.Top,
+				treeStyle.Render(treeView),
+				chatStyle.Width(m.width-28).Render(chatView),
+			),
+		)
 	}
 
 	// Shortcuts bar

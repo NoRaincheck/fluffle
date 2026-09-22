@@ -35,7 +35,6 @@ var (
 var (
 	treeStyle = lipgloss.NewStyle().
 			Width(28).
-			Height(1).
 			Border(lipgloss.NormalBorder(), false, true, false, false).
 			BorderForeground(treeBorder).
 			Background(treeBg).
@@ -54,7 +53,6 @@ var (
 				PaddingLeft(1)
 
 	chatStyle = lipgloss.NewStyle().
-			Height(1).
 			Border(lipgloss.NormalBorder(), false, false, false, false).
 			BorderForeground(chatBorder).
 			Background(chatBg).
