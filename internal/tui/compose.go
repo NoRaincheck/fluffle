@@ -3,6 +3,8 @@ package tui
 import (
 	"charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+
+	"github.com/NoRaincheck/fluffle/internal/store"
 )
 
 type composeMode int
@@ -147,6 +149,23 @@ func (m composeModel) View() string {
 		Padding(0, 2).
 		Width(m.width).
 		Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+}
+
+type channelsFetchedMsg struct {
+	channels []store.Channel
+	err      error
+}
+
+type threadsFetchedMsg struct {
+	channelID int64
+	threads   []store.Thread
+	err       error
+}
+
+type messagesFetchedMsg struct {
+	threadID int64
+	messages []store.Message
+	err      error
 }
 
 type composeSendMsg struct {

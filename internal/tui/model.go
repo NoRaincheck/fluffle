@@ -55,39 +55,21 @@ func (m model) Init() tea.Cmd {
 func (m *model) fetchChannels() tea.Cmd {
 	return func() tea.Msg {
 		channels, err := m.api.ListChannels(nil, "", "")
-		if err != nil {
-			m.status = fmt.Sprintf("error: %v", err)
-			return nil
-		}
-		m.channels = channels
-		m.tree.SetChannels(channels)
-		return nil
+		return channelsFetchedMsg{channels: channels, err: err}
 	}
 }
 
 func (m *model) fetchThreads(channelID int64) tea.Cmd {
 	return func() tea.Msg {
 		threads, err := m.api.ListThreads(nil, channelID)
-		if err != nil {
-			m.status = fmt.Sprintf("error: %v", err)
-			return nil
-		}
-		m.threads = threads
-		m.renderThreadList(channelID, threads)
-		return nil
+		return threadsFetchedMsg{channelID: channelID, threads: threads, err: err}
 	}
 }
 
 func (m *model) fetchMessages(threadID int64) tea.Cmd {
 	return func() tea.Msg {
 		msgs, err := m.api.ListMessages(nil, threadID)
-		if err != nil {
-			m.status = fmt.Sprintf("error: %v", err)
-			return nil
-		}
-		m.chat.SetMessages(msgs)
-		m.chat.selectedThd = threadID
-		return nil
+		return messagesFetchedMsg{threadID: threadID, messages: msgs, err: err}
 	}
 }
 
@@ -125,6 +107,33 @@ func (m *model) renderThreadList(channelID int64, threads []store.Thread) {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case channelsFetchedMsg:
+		if msg.err != nil {
+			m.status = fmt.Sprintf("error: %v", msg.err)
+			return m, nil
+		}
+		m.channels = msg.channels
+		m.tree.SetChannels(msg.channels)
+		return m, nil
+
+	case threadsFetchedMsg:
+		if msg.err != nil {
+			m.status = fmt.Sprintf("error: %v", msg.err)
+			return m, nil
+		}
+		m.threads = msg.threads
+		m.renderThreadList(msg.channelID, msg.threads)
+		return m, nil
+
+	case messagesFetchedMsg:
+		if msg.err != nil {
+			m.status = fmt.Sprintf("error: %v", msg.err)
+			return m, nil
+		}
+		m.chat.SetMessages(msg.messages)
+		m.chat.selectedThd = msg.threadID
+		return m, nil
+
 	case tea.WindowSizeMsg:
 		// Reserve 2 lines for shortcuts + status bar
 		panelHeight := msg.Height - 2
