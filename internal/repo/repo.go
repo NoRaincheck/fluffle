@@ -21,12 +21,10 @@ func Canonicalize(path string) (string, error) {
 
 func InspectGitDir(absPath string) (remote, headSHA string, isGit bool) {
 	fi, err := os.Stat(filepath.Join(absPath, ".git"))
-	if err != nil || (fi != nil && !fi.IsDir() && fi.Size() == 0) {
-		if err != nil {
-			return "", "", false
-		}
+	if err != nil {
+		return "", "", false
 	}
-	if fi == nil {
+	if !fi.IsDir() && fi.Size() == 0 {
 		return "", "", false
 	}
 	out, err := exec.Command("git", "-C", absPath, "remote", "get-url", "origin").Output()
