@@ -41,25 +41,35 @@ func TestArbitraryOrphanChannel(t *testing.T) {
 }
 
 func TestAppendAssignsSeqInOrder(t *testing.T) {
-    s, _ := Open(":memory:")
-    defer s.Close()
-    ch, _ := s.CreateChannel("c", "/r", "", "", false)
-    th, err := s.CreateThread(ch, "Schema migration")
-    if err != nil { t.Fatal(err) }
-    s1, _ := s.AppendMessage(th, "alice", "human", "user", "first")
-    s2, _ := s.AppendMessage(th, "pi-agent", "agent", "assistant", "second")
-    if s1 != 1 || s2 != 2 { t.Fatalf("seqs %d %d", s1, s2) }
-    msgs, _ := s.ListMessages(th, 1)
-    if len(msgs) != 1 || msgs[0].Content != "second" { t.Fatalf("%+v", msgs) }
+	s, _ := Open(":memory:")
+	defer s.Close()
+	ch, _ := s.CreateChannel("c", "/r", "", "", false)
+	th, err := s.CreateThread(ch, "Schema migration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s1, _ := s.AppendMessage(th, "alice", "human", "user", "first")
+	s2, _ := s.AppendMessage(th, "pi-agent", "agent", "assistant", "second")
+	if s1 != 1 || s2 != 2 {
+		t.Fatalf("seqs %d %d", s1, s2)
+	}
+	msgs, _ := s.ListMessages(th, 1)
+	if len(msgs) != 1 || msgs[0].Content != "second" {
+		t.Fatalf("%+v", msgs)
+	}
 }
 
 func TestReactionUniquePerAuthorEmoji(t *testing.T) {
-    s, _ := Open(":memory:")
-    defer s.Close()
-    ch, _ := s.CreateChannel("c", "/r", "", "", false)
-    th, _ := s.CreateThread(ch, "t")
-    s.AppendMessage(th, "a", "human", "user", "hi")
-    msgs, _ := s.ListMessages(th, 10)
-    if err := s.AddReaction(msgs[0].ID, "👀", "bob", "human"); err != nil { t.Fatal(err) }
-    if err := s.AddReaction(msgs[0].ID, "👀", "bob", "human"); err == nil { t.Fatal("expected duplicate error") }
+	s, _ := Open(":memory:")
+	defer s.Close()
+	ch, _ := s.CreateChannel("c", "/r", "", "", false)
+	th, _ := s.CreateThread(ch, "t")
+	s.AppendMessage(th, "a", "human", "user", "hi")
+	msgs, _ := s.ListMessages(th, 10)
+	if err := s.AddReaction(msgs[0].ID, "👀", "bob", "human"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddReaction(msgs[0].ID, "👀", "bob", "human"); err == nil {
+		t.Fatal("expected duplicate error")
+	}
 }
