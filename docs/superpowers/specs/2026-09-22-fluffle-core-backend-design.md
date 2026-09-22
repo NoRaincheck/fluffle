@@ -159,7 +159,8 @@ sets `author_type=agent`; otherwise `human`.
 | `NOT_A_GIT_REPO` | `--repo` without `.git` | exit 1, suggest `--orphaned` |
 | `AGENT_FORBIDDEN` | agent hits human-only endpoint | exit 1, list allowed cmds |
 | `THREAD_NOT_FOUND` / `CHANNEL_NOT_FOUND` | bad ID | exit 1 |
-| `BAD_JSONL` | append/import parse failure (line number included) | exit 1, no partial write |
+| `BAD_JSONL` | append/import parse failure OR channel/thread/reaction conflict or validation failure (409/400) | exit 1, no partial write |
+| `FILE_READ` | local file unreadable (agent append/import) | exit 1 |
 
 ## 9. Testing
 

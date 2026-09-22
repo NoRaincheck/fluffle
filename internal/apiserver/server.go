@@ -54,7 +54,7 @@ func NewHandler(s *store.Store) http.Handler {
 			}
 			id, err := s.CreateChannel(body.Name, body.RepoAbsPath, body.RepoRemote, body.RepoHeadSHA, body.Orphaned)
 			if err == store.ErrConflict {
-				writeErr(w, 409, "CHANNEL_NOT_FOUND", "channel exists")
+				writeErr(w, 409, "BAD_JSONL", "channel exists")
 				return
 			}
 			if err != nil {
@@ -100,7 +100,7 @@ func NewHandler(s *store.Store) http.Handler {
 				return
 			}
 			if err != nil {
-				writeErr(w, 400, "DAEMON_DOWN", err.Error())
+				writeErr(w, 400, "BAD_JSONL", err.Error())
 				return
 			}
 			json.NewEncoder(w).Encode(map[string]any{"id": tid})
@@ -191,7 +191,7 @@ func NewHandler(s *store.Store) http.Handler {
 			author = "unknown"
 		}
 		if err := s.AddReaction(id, body.Emoji, author, authorType); err == store.ErrConflict {
-			writeErr(w, 409, "DAEMON_DOWN", "duplicate reaction")
+			writeErr(w, 409, "BAD_JSONL", "duplicate reaction")
 			return
 		} else if err != nil {
 			writeErr(w, 400, "BAD_JSONL", err.Error())

@@ -65,6 +65,9 @@ func printAPIError(resp *http.Response) int {
 		return 1
 	}
 	fmt.Fprintf(os.Stderr, "%s: %s\n", eb.Code, eb.Message)
+	if eb.Code == "DAEMON_DOWN" {
+		return 2
+	}
 	return 1
 }
 
