@@ -77,6 +77,7 @@ func daemonStop() int {
 	}
 	if err := proc.Kill(); err != nil {
 		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
+		os.Remove(filepath.Join(client.FluffleHome(), "daemon.json"))
 		return 2
 	}
 	os.Remove(filepath.Join(client.FluffleHome(), "daemon.json"))
@@ -86,7 +87,10 @@ func daemonStop() int {
 
 func daemonStart(background bool) int {
 	home := client.FluffleHome()
-	os.MkdirAll(home, 0o755)
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
+		return 2
+	}
 	dbPath := filepath.Join(home, "fluffle.db")
 	s, err := store.Open(dbPath)
 	if err != nil {
@@ -99,8 +103,15 @@ func daemonStart(background bool) int {
 		return 2
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
-	payload, _ := json.Marshal(map[string]any{"port": port, "pid": os.Getpid(), "started_at": time.Now().UTC().Format(time.RFC3339)})
-	os.WriteFile(filepath.Join(home, "daemon.json"), payload, 0o644)
+	payload, err := json.Marshal(map[string]any{"port": port, "pid": os.Getpid(), "started_at": time.Now().UTC().Format(time.RFC3339)})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
+		return 2
+	}
+	if err := os.WriteFile(filepath.Join(home, "daemon.json"), payload, 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
+		return 2
+	}
 	srv := &http.Server{Handler: apiserver.NewHandler(s)}
 	if !background {
 		fmt.Println("fluffle daemon on 127.0.0.1:" + strconv.Itoa(port))

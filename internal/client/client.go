@@ -38,10 +38,13 @@ func DaemonBaseURL() (string, error) {
 	}
 	base := "http://127.0.0.1:" + strconv.Itoa(df.Port)
 	probe, err := http.Get(base + "/v1/health")
-	if err != nil || probe.StatusCode != 200 {
+	if err != nil {
 		return "", errors.New("DAEMON_DOWN: probe failed")
 	}
-	probe.Body.Close()
+	defer probe.Body.Close()
+	if probe.StatusCode != 200 {
+		return "", errors.New("DAEMON_DOWN: probe failed")
+	}
 	return base, nil
 }
 
@@ -60,7 +63,7 @@ func EnsureDaemon() (string, error) {
 	}
 	var last error
 	for i := 0; i < 3; i++ {
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(1 * time.Second)
 		if base, err := DaemonBaseURL(); err == nil {
 			return base, nil
 		} else {
