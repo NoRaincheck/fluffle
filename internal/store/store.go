@@ -76,11 +76,47 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(schema); err != nil {
+	if err := migrate(db, schema); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return &Store{db: db}, nil
+}
+
+func migrate(db *sql.DB, schema string) error {
+	rows, err := db.Query(`PRAGMA table_info(messages)`)
+	if err != nil {
+		// Table doesn't exist yet; just create
+		_, err := db.Exec(schema)
+		return err
+	}
+	found := false
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var dfltValue sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dfltValue, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "parent_id" {
+			found = true
+			break
+		}
+	}
+	rows.Close()
+	if found {
+		// Schema is up to date; just create any missing tables
+		_, err := db.Exec(schema)
+		return err
+	}
+	// parent_id missing: drop all tables and recreate with new schema
+	for _, tbl := range []string{"reactions", "messages", "threads", "channels"} {
+		db.Exec("DROP TABLE IF EXISTS " + tbl)
+	}
+	_, err = db.Exec(schema)
+	return err
 }
 
 func (s *Store) Close() error { return s.db.Close() }

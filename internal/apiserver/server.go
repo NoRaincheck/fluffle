@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/NoRaincheck/fluffle/internal/store"
 )
@@ -21,6 +22,35 @@ func writeErr(w http.ResponseWriter, status int, code, msg string) {
 }
 
 func isAgent(r *http.Request) bool { return r.Header.Get("X-Fluffle-Agent") != "" }
+
+var (
+	shutdownMu sync.Mutex
+	shutdownFn func()
+)
+
+func SetShutdown(fn func()) {
+	shutdownMu.Lock()
+	defer shutdownMu.Unlock()
+	shutdownFn = fn
+}
+
+func shutdownHandler(s *store.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, 405, "METHOD_NOT_ALLOWED", "method not allowed")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{"status": "shutting_down"})
+		shutdownMu.Lock()
+		fn := shutdownFn
+		shutdownMu.Unlock()
+		if fn != nil {
+			go fn()
+		}
+	}
+}
 
 func NewHandler(s *store.Store) http.Handler {
 	mux := http.NewServeMux()
@@ -199,5 +229,6 @@ func NewHandler(s *store.Store) http.Handler {
 		}
 		json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	})
+	mux.HandleFunc("/api/shutdown", shutdownHandler(s))
 	return mux
 }
