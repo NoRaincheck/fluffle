@@ -16,6 +16,7 @@ import (
 
 	"github.com/NoRaincheck/fluffle/internal/apiserver"
 	"github.com/NoRaincheck/fluffle/internal/client"
+	"github.com/NoRaincheck/fluffle/internal/jsonl"
 	"github.com/NoRaincheck/fluffle/internal/repo"
 	"github.com/NoRaincheck/fluffle/internal/store"
 )
@@ -24,7 +25,7 @@ func main() { os.Exit(run(os.Args[1:])) }
 
 func run(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: flf <daemon|init|channel|thread|message|react|tui>")
+		fmt.Fprintln(os.Stderr, "usage: flf <daemon|init|channel|thread|message|react|agent|tui>")
 		return 1
 	}
 	switch args[0] {
@@ -40,11 +41,13 @@ func run(args []string) int {
 		return messageCmd(args[1:])
 	case "react":
 		return reactCmd(args[1:])
+	case "agent":
+		return agentCmd(args[1:])
 	case "tui":
 		fmt.Fprintln(os.Stderr, "backend-only milestone: tui deferred")
 		return 1
 	default:
-		fmt.Fprintln(os.Stderr, "unknown command (backend slice implements daemon + tui stub; rest in Task 7-8)")
+		fmt.Fprintln(os.Stderr, "usage: flf <daemon|init|channel|thread|message|react|agent|tui>")
 		return 1
 	}
 }
@@ -256,7 +259,7 @@ func channelCreateCmd(args []string) int {
 
 func threadCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: flf thread <list|new>")
+		fmt.Fprintln(os.Stderr, "usage: flf thread <list|new|export|import>")
 		return 1
 	}
 	switch args[0] {
@@ -264,8 +267,12 @@ func threadCmd(args []string) int {
 		return threadListCmd(args[1:])
 	case "new":
 		return threadNewCmd(args[1:])
+	case "export":
+		return threadExportCmd(args[1:])
+	case "import":
+		return threadImportCmd(args[1:])
 	default:
-		fmt.Fprintln(os.Stderr, "usage: flf thread <list|new>")
+		fmt.Fprintln(os.Stderr, "usage: flf thread <list|new|export|import>")
 		return 1
 	}
 }
@@ -351,6 +358,236 @@ func threadNewCmd(args []string) int {
 	}
 	body := map[string]any{"Title": *title}
 	if code := apiPost(base+"/v1/channels/"+strconv.FormatInt(id, 10)+"/threads", "", body, &out); code != 0 {
+		return code
+	}
+	fmt.Printf("thread %d\n", out.ID)
+	return 0
+}
+
+func dumpThreadMessages(base string, threadID int64, last int, agentID string) int {
+	u := base + "/v1/threads/" + strconv.FormatInt(threadID, 10) + "/messages"
+	if last > 0 {
+		u += "?last=" + strconv.Itoa(last)
+	}
+	var msgs []store.Message
+	if code := apiGet(u, agentID, &msgs); code != 0 {
+		return code
+	}
+	lines := make([]jsonl.Line, 0, len(msgs))
+	for _, m := range msgs {
+		lines = append(lines, jsonl.Line{
+			Seq:        m.Seq,
+			Role:       m.Role,
+			Author:     m.Author,
+			AuthorType: m.AuthorType,
+			Content:    m.Content,
+			Timestamp:  m.CreatedAt,
+			Metadata:   map[string]any{},
+		})
+	}
+	os.Stdout.Write(jsonl.EncodeLines(lines))
+	return 0
+}
+
+func parseJSONLFile(path string) ([]jsonl.Line, int) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "BAD_JSONL: %s\n", err)
+		return nil, 1
+	}
+	lines, err := jsonl.ParseLines(raw)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return nil, 1
+	}
+	return lines, 0
+}
+
+func postJSONLLines(base string, threadID int64, lines []jsonl.Line, agentID string) int {
+	u := base + "/v1/threads/" + strconv.FormatInt(threadID, 10) + "/messages"
+	for _, l := range lines {
+		role := l.Role
+		if role == "" {
+			role = "user"
+		}
+		body := map[string]any{"Author": l.Author, "Role": role, "Content": l.Content, "AgentID": agentID}
+		var out struct {
+			Seq int64 `json:"seq"`
+		}
+		if code := apiPost(u, agentID, body, &out); code != 0 {
+			return code
+		}
+	}
+	return 0
+}
+
+func agentCmd(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: flf agent <read|append>")
+		return 1
+	}
+	switch args[0] {
+	case "read":
+		return agentReadCmd(args[1:])
+	case "append":
+		return agentAppendCmd(args[1:])
+	default:
+		fmt.Fprintln(os.Stderr, "usage: flf agent <read|append>")
+		return 1
+	}
+}
+
+func agentReadCmd(args []string) int {
+	fs := flag.NewFlagSet("agent read", flag.ContinueOnError)
+	threadID := fs.Int64("thread", 0, "thread id")
+	last := fs.Int("last", 0, "last N messages (0 = all)")
+	agentID := fs.String("agent-id", "", "agent id")
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+	if *threadID == 0 {
+		fmt.Fprintln(os.Stderr, "usage: flf agent read --thread ID [--last N] [--agent-id ID]")
+		return 1
+	}
+	base, err := client.EnsureDaemon()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
+		return 2
+	}
+	return dumpThreadMessages(base, *threadID, *last, *agentID)
+}
+
+func agentAppendCmd(args []string) int {
+	fs := flag.NewFlagSet("agent append", flag.ContinueOnError)
+	threadID := fs.Int64("thread", 0, "thread id")
+	file := fs.String("file", "", "JSONL file to append")
+	agentID := fs.String("agent-id", "", "agent id")
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+	if *threadID == 0 || *file == "" {
+		fmt.Fprintln(os.Stderr, "usage: flf agent append --thread ID --file F [--agent-id ID]")
+		return 1
+	}
+	lines, code := parseJSONLFile(*file)
+	if code != 0 {
+		return code
+	}
+	base, err := client.EnsureDaemon()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
+		return 2
+	}
+	return postJSONLLines(base, *threadID, lines, *agentID)
+}
+
+func threadExportCmd(args []string) int {
+	fs := flag.NewFlagSet("thread export", flag.ContinueOnError)
+	threadID := fs.Int64("thread", 0, "thread id")
+	format := fs.String("format", "jsonl", "export format (only jsonl)")
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+	if *threadID == 0 {
+		fmt.Fprintln(os.Stderr, "usage: flf thread export --thread ID --format jsonl")
+		return 1
+	}
+	if *format != "jsonl" {
+		fmt.Fprintln(os.Stderr, "BAD_JSONL: only jsonl supported")
+		return 1
+	}
+	base, err := client.EnsureDaemon()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
+		return 2
+	}
+	return dumpThreadMessages(base, *threadID, 0, "")
+}
+
+func ensureImportChannel(base, name, repoPath string, orphaned bool) (int64, int) {
+	if orphaned {
+		var list []store.Channel
+		if code := apiGet(base+"/v1/channels?include-orphaned=1", "", &list); code != 0 {
+			return 0, code
+		}
+		for _, c := range list {
+			if c.Name == name && c.IsOrphaned {
+				return c.ID, 0
+			}
+		}
+		var out struct {
+			ID int64 `json:"id"`
+		}
+		body := map[string]any{"Name": name, "Orphaned": true}
+		if code := apiPost(base+"/v1/channels", "", body, &out); code != 0 {
+			return 0, code
+		}
+		return out.ID, 0
+	}
+	abs, err := repo.Canonicalize(repoPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "NOT_A_GIT_REPO: %s\n", repoPath)
+		return 0, 1
+	}
+	var list []store.Channel
+	if code := apiGet(base+"/v1/channels?repo="+url.QueryEscape(abs), "", &list); code != 0 {
+		return 0, code
+	}
+	for _, c := range list {
+		if c.Name == name {
+			return c.ID, 0
+		}
+	}
+	remote, head, isGit := repo.InspectGitDir(abs)
+	if !isGit {
+		fmt.Fprintf(os.Stderr, "NOT_A_GIT_REPO: %s is not a git repo (suggest --orphaned)\n", abs)
+		return 0, 1
+	}
+	var out struct {
+		ID int64 `json:"id"`
+	}
+	body := map[string]any{"Name": name, "RepoAbsPath": abs, "RepoRemote": remote, "RepoHeadSHA": head, "Orphaned": false}
+	if code := apiPost(base+"/v1/channels", "", body, &out); code != 0 {
+		return 0, code
+	}
+	return out.ID, 0
+}
+
+func threadImportCmd(args []string) int {
+	fs := flag.NewFlagSet("thread import", flag.ContinueOnError)
+	file := fs.String("file", "", "JSONL file to import")
+	channel := fs.String("channel", "", "channel name")
+	repoPath := fs.String("repo", "", "repo path")
+	orphaned := fs.Bool("orphaned", false, "import into an orphaned channel")
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+	if *file == "" || *channel == "" || (*repoPath == "" && !*orphaned) {
+		fmt.Fprintln(os.Stderr, "usage: flf thread import --file F --channel NAME (--repo PATH | --orphaned)")
+		return 1
+	}
+	lines, code := parseJSONLFile(*file)
+	if code != 0 {
+		return code
+	}
+	base, err := client.EnsureDaemon()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
+		return 2
+	}
+	chID, code := ensureImportChannel(base, *channel, *repoPath, *orphaned)
+	if code != 0 {
+		return code
+	}
+	var out struct {
+		ID int64 `json:"id"`
+	}
+	title := "import " + filepath.Base(*file)
+	body := map[string]any{"Title": title}
+	if code := apiPost(base+"/v1/channels/"+strconv.FormatInt(chID, 10)+"/threads", "", body, &out); code != 0 {
+		return code
+	}
+	if code := postJSONLLines(base, out.ID, lines, ""); code != 0 {
 		return code
 	}
 	fmt.Printf("thread %d\n", out.ID)
