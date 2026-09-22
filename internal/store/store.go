@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS channels(
   repo_abs_path TEXT,
   repo_remote TEXT,
   repo_head_sha TEXT,
+  repo_head_branch TEXT,
   is_orphaned INTEGER NOT NULL DEFAULT 0 CHECK(is_orphaned IN (0,1)),
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   archived_at TEXT,
@@ -39,6 +40,7 @@ CREATE TABLE IF NOT EXISTS messages(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   thread_id INTEGER NOT NULL REFERENCES threads(id),
   seq INTEGER NOT NULL,
+  parent_id INTEGER REFERENCES messages(id),
   author TEXT NOT NULL CHECK(length(trim(author)) > 0),
   author_type TEXT NOT NULL CHECK(author_type IN ('human','agent')),
   role TEXT NOT NULL CHECK(role IN ('user','assistant','system')),
@@ -46,6 +48,7 @@ CREATE TABLE IF NOT EXISTS messages(
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   UNIQUE(thread_id, seq)
 );
+CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(parent_id);
 CREATE INDEX IF NOT EXISTS idx_messages_thread_seq ON messages(thread_id, seq);
 CREATE TABLE IF NOT EXISTS reactions(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,10 +64,10 @@ CREATE TABLE IF NOT EXISTS reactions(
 type Store struct{ db *sql.DB }
 
 type Channel struct {
-	ID                                                    int64
-	Name, RepoAbsPath, RepoRemote, RepoHeadSHA, CreatedAt string
-	IsOrphaned                                            bool
-	ArchivedAt                                            *string
+	ID                                                                    int64
+	Name, RepoAbsPath, RepoRemote, RepoHeadSHA, RepoHeadBranch, CreatedAt string
+	IsOrphaned                                                            bool
+	ArchivedAt                                                            *string
 }
 
 func Open(path string) (*Store, error) {
@@ -82,7 +85,7 @@ func Open(path string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-func (s *Store) CreateChannel(name, repoAbsPath, repoRemote, repoHeadSHA string, orphaned bool) (int64, error) {
+func (s *Store) CreateChannel(name, repoAbsPath, repoRemote, repoHeadSHA, repoHeadBranch string, orphaned bool) (int64, error) {
 	if strings.TrimSpace(name) == "" {
 		return 0, errors.New("channel name required")
 	}
@@ -100,7 +103,7 @@ func (s *Store) CreateChannel(name, repoAbsPath, repoRemote, repoHeadSHA string,
 		}
 		abs = repoAbsPath
 	}
-	res, err := s.db.Exec(`INSERT INTO channels(name, repo_abs_path, repo_remote, repo_head_sha, is_orphaned) VALUES(?,?,?,?,?)`, name, abs, nullIfEmpty(repoRemote), nullIfEmpty(repoHeadSHA), isOrphan)
+	res, err := s.db.Exec(`INSERT INTO channels(name, repo_abs_path, repo_remote, repo_head_sha, repo_head_branch, is_orphaned) VALUES(?,?,?,?,?,?)`, name, abs, nullIfEmpty(repoRemote), nullIfEmpty(repoHeadSHA), nullIfEmpty(repoHeadBranch), isOrphan)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
 			return 0, ErrConflict
@@ -111,7 +114,7 @@ func (s *Store) CreateChannel(name, repoAbsPath, repoRemote, repoHeadSHA string,
 }
 
 func (s *Store) ListChannels(repoAbsPath string, includeOrphaned bool) ([]Channel, error) {
-	q := `SELECT id, name, COALESCE(repo_abs_path,''), COALESCE(repo_remote,''), COALESCE(repo_head_sha,''), is_orphaned, COALESCE(created_at,''), archived_at FROM channels WHERE archived_at IS NULL`
+	q := `SELECT id, name, COALESCE(repo_abs_path,''), COALESCE(repo_remote,''), COALESCE(repo_head_sha,''), COALESCE(repo_head_branch,''), is_orphaned, COALESCE(created_at,''), archived_at FROM channels WHERE archived_at IS NULL`
 	args := []any{}
 	if repoAbsPath != "" {
 		q += ` AND repo_abs_path = ?`
@@ -130,7 +133,7 @@ func (s *Store) ListChannels(repoAbsPath string, includeOrphaned bool) ([]Channe
 	for rows.Next() {
 		var c Channel
 		var isOrphan int
-		if err := rows.Scan(&c.ID, &c.Name, &c.RepoAbsPath, &c.RepoRemote, &c.RepoHeadSHA, &isOrphan, &c.CreatedAt, &c.ArchivedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.Name, &c.RepoAbsPath, &c.RepoRemote, &c.RepoHeadSHA, &c.RepoHeadBranch, &isOrphan, &c.CreatedAt, &c.ArchivedAt); err != nil {
 			return nil, err
 		}
 		c.IsOrphaned = isOrphan == 1
@@ -154,6 +157,7 @@ type Thread struct {
 
 type Message struct {
 	ID, ThreadID, Seq                            int64
+	ParentID                                     sql.NullInt64
 	Author, AuthorType, Role, Content, CreatedAt string
 }
 
@@ -193,10 +197,18 @@ func (s *Store) ListThreads(channelID int64) ([]Thread, error) {
 }
 
 func (s *Store) AppendMessage(threadID int64, author, authorType, role, content string) (int64, error) {
-	return s.AppendMessageAt(threadID, author, authorType, role, content, "")
+	return s.AppendMessageWithParent(threadID, author, authorType, role, content, 0)
+}
+
+func (s *Store) AppendMessageWithParent(threadID int64, author, authorType, role, content string, parentID int64) (int64, error) {
+	return s.AppendMessageAtWithParent(threadID, author, authorType, role, content, "", parentID)
 }
 
 func (s *Store) AppendMessageAt(threadID int64, author, authorType, role, content, createdAt string) (int64, error) {
+	return s.AppendMessageAtWithParent(threadID, author, authorType, role, content, createdAt, 0)
+}
+
+func (s *Store) AppendMessageAtWithParent(threadID int64, author, authorType, role, content, createdAt string, parentID int64) (int64, error) {
 	if strings.TrimSpace(author) == "" || strings.TrimSpace(content) == "" {
 		return 0, errors.New("author and content required")
 	}
@@ -226,14 +238,23 @@ func (s *Store) AppendMessageAt(threadID int64, author, authorType, role, conten
 	if maxSeq.Valid {
 		seq = maxSeq.Int64 + 1
 	}
+	if parentID > 0 {
+		var parentThreadID int64
+		if err := tx.QueryRow(`SELECT thread_id FROM messages WHERE id = ?`, parentID).Scan(&parentThreadID); err != nil {
+			return 0, ErrNotFound
+		}
+		if parentThreadID != threadID {
+			return 0, errors.New("parent message not in this thread")
+		}
+	}
 	if createdAt != "" {
 		if _, err := time.Parse(time.RFC3339, createdAt); err != nil {
 			return 0, err
 		}
-		if _, err := tx.Exec(`INSERT INTO messages(thread_id, seq, author, author_type, role, content, created_at) VALUES(?,?,?,?,?,?,?)`, threadID, seq, author, authorType, role, content, createdAt); err != nil {
+		if _, err := tx.Exec(`INSERT INTO messages(thread_id, seq, parent_id, author, author_type, role, content, created_at) VALUES(?,?,?,?,?,?,?,?)`, threadID, seq, nullIfInt64(parentID), author, authorType, role, content, createdAt); err != nil {
 			return 0, err
 		}
-	} else if _, err := tx.Exec(`INSERT INTO messages(thread_id, seq, author, author_type, role, content) VALUES(?,?,?,?,?,?)`, threadID, seq, author, authorType, role, content); err != nil {
+	} else if _, err := tx.Exec(`INSERT INTO messages(thread_id, seq, parent_id, author, author_type, role, content) VALUES(?,?,?,?,?,?,?)`, threadID, seq, nullIfInt64(parentID), author, authorType, role, content); err != nil {
 		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -242,8 +263,15 @@ func (s *Store) AppendMessageAt(threadID int64, author, authorType, role, conten
 	return seq, nil
 }
 
+func nullIfInt64(v int64) any {
+	if v == 0 {
+		return nil
+	}
+	return v
+}
+
 func (s *Store) ListMessages(threadID int64, lastN int) ([]Message, error) {
-	q := `SELECT id, thread_id, seq, author, author_type, role, content, COALESCE(created_at,'') FROM messages WHERE thread_id = ? ORDER BY seq ASC`
+	q := `SELECT id, thread_id, seq, parent_id, author, author_type, role, content, COALESCE(created_at,'') FROM messages WHERE thread_id = ? ORDER BY seq ASC`
 	if lastN > 0 {
 		q = `SELECT * FROM (` + q + `) ORDER BY seq DESC LIMIT ?`
 		q = `SELECT * FROM (` + q + `) ORDER BY seq ASC`
@@ -266,12 +294,37 @@ func scanMessages(rows *sql.Rows) ([]Message, error) {
 	var out []Message
 	for rows.Next() {
 		var m Message
-		if err := rows.Scan(&m.ID, &m.ThreadID, &m.Seq, &m.Author, &m.AuthorType, &m.Role, &m.Content, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.ThreadID, &m.Seq, &m.ParentID, &m.Author, &m.AuthorType, &m.Role, &m.Content, &m.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
 	}
 	return out, rows.Err()
+}
+
+func (m Message) ParentIDValue() int64 {
+	if m.ParentID.Valid {
+		return m.ParentID.Int64
+	}
+	return 0
+}
+
+func (s *Store) ListMessagesByParent(threadID int64, parentID int64) ([]Message, error) {
+	q := `SELECT id, thread_id, seq, parent_id, author, author_type, role, content, COALESCE(created_at,'') FROM messages WHERE thread_id = ? AND parent_id = ? ORDER BY seq ASC`
+	rows, err := s.db.Query(q, threadID, parentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanMessages(rows)
+}
+
+func (s *Store) CountReplies(threadID int64, parentID int64) (int, error) {
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE thread_id = ? AND parent_id = ?`, threadID, parentID).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 func (s *Store) AddReaction(messageID int64, emoji, author, authorType string) error {

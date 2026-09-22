@@ -45,14 +45,14 @@ func NewHandler(s *store.Store) http.Handler {
 				return
 			}
 			var body struct {
-				Name, RepoAbsPath, RepoRemote, RepoHeadSHA string
-				Orphaned                                   bool `json:"orphaned"`
+				Name, RepoAbsPath, RepoRemote, RepoHeadSHA, RepoHeadBranch string
+				Orphaned                                                   bool `json:"orphaned"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				writeErr(w, 400, "BAD_JSONL", err.Error())
 				return
 			}
-			id, err := s.CreateChannel(body.Name, body.RepoAbsPath, body.RepoRemote, body.RepoHeadSHA, body.Orphaned)
+			id, err := s.CreateChannel(body.Name, body.RepoAbsPath, body.RepoRemote, body.RepoHeadSHA, body.RepoHeadBranch, body.Orphaned)
 			if err == store.ErrConflict {
 				writeErr(w, 409, "BAD_JSONL", "channel exists")
 				return

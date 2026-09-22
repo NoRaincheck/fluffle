@@ -31,7 +31,7 @@ func TestExportImportRoundTrip(t *testing.T) {
 	s, _ := store.Open(":memory:")
 	defer s.Close()
 	h := NewHandler(s)
-	ch, _ := s.CreateChannel("c", "/r", "", "", false)
+	ch, _ := s.CreateChannel("c", "/r", "", "", "", false)
 	th, _ := s.CreateThread(ch, "t")
 	s.AppendMessage(th, "alice", "human", "user", "hello")
 	req := httptest.NewRequest("GET", fmt.Sprintf("/v1/threads/%d/messages", th), nil)

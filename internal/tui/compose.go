@@ -1,0 +1,172 @@
+package tui
+
+import (
+	"charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+)
+
+type composeMode int
+
+const (
+	composeModeMessage composeMode = iota
+	composeModeReply
+)
+
+type composeState struct {
+	mode     composeMode
+	context  string // thread title or "reply to: ..."
+	text     string
+	cursor   int
+	error    string
+	threadID int64
+	parentID int64
+}
+
+type composeModel struct {
+	state  composeState
+	width  int
+	height int
+}
+
+func (m composeModel) Init() tea.Cmd {
+	return nil
+}
+
+func (m *composeModel) Open(mode composeMode, context string) {
+	m.state = composeState{
+		mode:    mode,
+		context: context,
+		text:    "",
+		cursor:  0,
+		error:   "",
+	}
+	m.width = 60
+	m.height = 6
+}
+
+func (m *composeModel) Close() {
+	m.state = composeState{}
+}
+
+func (m *composeModel) IsActive() bool {
+	return m.state.mode != 0
+}
+
+func (m *composeModel) Text() string {
+	return m.state.text
+}
+
+func (m *composeModel) Update(msg tea.Msg) tea.Cmd {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch key := msg.Key(); key.Code {
+		case tea.KeyEscape:
+			m.Close()
+			return nil
+		case tea.KeyEnter:
+			if m.state.text != "" {
+				return func() tea.Msg {
+					return composeSendMsg{text: m.state.text, mode: m.state.mode, context: m.state.context}
+				}
+			}
+			return nil
+		case tea.KeyBackspace:
+			if m.state.cursor > 0 && len(m.state.text) > 0 {
+				m.state.text = m.state.text[:m.state.cursor-1] + m.state.text[m.state.cursor:]
+				m.state.cursor--
+			}
+		case tea.KeyDelete:
+			if m.state.cursor < len(m.state.text) {
+				m.state.text = m.state.text[:m.state.cursor] + m.state.text[m.state.cursor+1:]
+			}
+		case tea.KeyLeft:
+			if m.state.cursor > 0 {
+				m.state.cursor--
+			}
+		case tea.KeyRight:
+			if m.state.cursor < len(m.state.text) {
+				m.state.cursor++
+			}
+		default:
+			if len(key.Text) == 1 {
+				m.state.text = m.state.text[:m.state.cursor] + key.Text + m.state.text[m.state.cursor:]
+				m.state.cursor++
+			}
+		}
+	}
+	return nil
+}
+
+func (m composeModel) View() string {
+	if !m.IsActive() {
+		return ""
+	}
+
+	lines := make([]string, 0, m.height)
+
+	// Context header
+	lines = append(lines, modalTitleStyle.Render(m.state.context))
+
+	// Input line
+	cursorChar := "│"
+	if m.state.cursor >= len(m.state.text) {
+		cursorChar = "│ "
+	}
+	inputLine := "▸ " + m.state.text + cursorChar
+	lines = append(lines, inputLine)
+
+	// Error if any
+	if m.state.error != "" {
+		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("204")).Render("  "+m.state.error))
+	} else {
+		lines = append(lines, "")
+	}
+
+	// Hints
+	switch m.state.mode {
+	case composeModeMessage:
+		lines = append(lines, modalHintStyle.Render("Enter to send, Esc to cancel"))
+	case composeModeReply:
+		lines = append(lines, modalHintStyle.Render("Enter to reply, Esc to cancel"))
+	}
+
+	// Pad to height
+	for len(lines) < m.height {
+		lines = append(lines, "")
+	}
+
+	return lipgloss.NewStyle().
+		BorderStyle(lipgloss.RoundedBorder()).
+		BorderForeground(modalBorder).
+		Background(modalBg).
+		Foreground(modalFg).
+		Padding(0, 2).
+		Width(m.width).
+		Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+}
+
+type composeSendMsg struct {
+	text    string
+	mode    composeMode
+	context string
+}
+
+func (m *composeModel) SetError(err string) {
+	m.state.error = err
+}
+
+func (m *composeModel) ClearError() {
+	m.state.error = ""
+}
+
+func composeContext(mode composeMode, context string) string {
+	switch mode {
+	case composeModeMessage:
+		return context
+	case composeModeReply:
+		preview := truncate(context, 40)
+		return "Reply to: " + preview
+	default:
+		return ""
+	}
+}

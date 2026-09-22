@@ -2,9 +2,9 @@ package main
 
 import "testing"
 
-func TestTuiStubMessage(t *testing.T) {
-	if got := run([]string{"tui"}); got != 1 {
-		t.Fatalf("want exit 1 got %d", got)
+func TestTuiDaemonRequired(t *testing.T) {
+	if got := run([]string{"tui"}); got != 2 {
+		t.Fatalf("want exit 2 (daemon required) got %d", got)
 	}
 }
 

@@ -19,6 +19,7 @@ import (
 	"github.com/NoRaincheck/fluffle/internal/jsonl"
 	"github.com/NoRaincheck/fluffle/internal/repo"
 	"github.com/NoRaincheck/fluffle/internal/store"
+	"github.com/NoRaincheck/fluffle/internal/tui"
 )
 
 func main() { os.Exit(run(os.Args[1:])) }
@@ -44,8 +45,7 @@ func run(args []string) int {
 	case "agent":
 		return agentCmd(args[1:])
 	case "tui":
-		fmt.Fprintln(os.Stderr, "backend-only milestone: tui deferred")
-		return 1
+		return tui.Run()
 	default:
 		fmt.Fprintln(os.Stderr, "usage: flf <daemon|init|channel|thread|message|react|agent|tui>")
 		return 1
