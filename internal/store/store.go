@@ -143,3 +143,92 @@ func nullIfEmpty(v string) any {
 	}
 	return v
 }
+
+type Thread struct {
+    ID, ChannelID int64
+    Title, CreatedAt string
+    ArchivedAt *string
+}
+
+type Message struct {
+    ID, ThreadID, Seq int64
+    Author, AuthorType, Role, Content, CreatedAt string
+}
+
+func (s *Store) CreateThread(channelID int64, title string) (int64, error) {
+    if strings.TrimSpace(title) == "" { return 0, errors.New("title required") }
+    var n int
+    if err := s.db.QueryRow(`SELECT COUNT(*) FROM channels WHERE id = ? AND archived_at IS NULL`, channelID).Scan(&n); err != nil { return 0, err }
+    if n == 0 { return 0, ErrNotFound }
+    res, err := s.db.Exec(`INSERT INTO threads(channel_id, title) VALUES(?,?)`, channelID, title)
+    if err != nil { return 0, err }
+    return res.LastInsertId()
+}
+
+func (s *Store) ListThreads(channelID int64) ([]Thread, error) {
+    rows, err := s.db.Query(`SELECT id, channel_id, title, COALESCE(created_at,''), archived_at FROM threads WHERE channel_id = ? AND archived_at IS NULL ORDER BY id`, channelID)
+    if err != nil { return nil, err }
+    defer rows.Close()
+    var out []Thread
+    for rows.Next() {
+        var th Thread
+        if err := rows.Scan(&th.ID, &th.ChannelID, &th.Title, &th.CreatedAt, &th.ArchivedAt); err != nil { return nil, err }
+        out = append(out, th)
+    }
+    return out, rows.Err()
+}
+
+func (s *Store) AppendMessage(threadID int64, author, authorType, role, content string) (int64, error) {
+    if strings.TrimSpace(author) == "" || strings.TrimSpace(content) == "" { return 0, errors.New("author and content required") }
+    if authorType != "human" && authorType != "agent" { return 0, errors.New("bad author_type") }
+    if role != "user" && role != "assistant" && role != "system" { return 0, errors.New("bad role") }
+    tx, err := s.db.Begin()
+    if err != nil { return 0, err }
+    defer tx.Rollback()
+    var n int
+    if err := tx.QueryRow(`SELECT COUNT(*) FROM threads WHERE id = ? AND archived_at IS NULL`, threadID).Scan(&n); err != nil { return 0, err }
+    if n == 0 { return 0, ErrNotFound }
+    var maxSeq sql.NullInt64
+    if err := tx.QueryRow(`SELECT MAX(seq) FROM messages WHERE thread_id = ?`, threadID).Scan(&maxSeq); err != nil { return 0, err }
+    seq := int64(1)
+    if maxSeq.Valid { seq = maxSeq.Int64 + 1 }
+    if _, err := tx.Exec(`INSERT INTO messages(thread_id, seq, author, author_type, role, content) VALUES(?,?,?,?,?,?)`, threadID, seq, author, authorType, role, content); err != nil { return 0, err }
+    if err := tx.Commit(); err != nil { return 0, err }
+    return seq, nil
+}
+
+func (s *Store) ListMessages(threadID int64, lastN int) ([]Message, error) {
+    q := `SELECT id, thread_id, seq, author, author_type, role, content, COALESCE(created_at,'') FROM messages WHERE thread_id = ? ORDER BY seq ASC`
+    if lastN > 0 {
+        q = `SELECT * FROM (` + q + `) ORDER BY seq DESC LIMIT ?`
+        q = `SELECT * FROM (` + q + `) ORDER BY seq ASC`
+        rows, err := s.db.Query(q, threadID, lastN)
+        if err != nil { return nil, err }
+        defer rows.Close()
+        return scanMessages(rows)
+    }
+    rows, err := s.db.Query(q, threadID)
+    if err != nil { return nil, err }
+    defer rows.Close()
+    return scanMessages(rows)
+}
+
+func scanMessages(rows *sql.Rows) ([]Message, error) {
+    var out []Message
+    for rows.Next() {
+        var m Message
+        if err := rows.Scan(&m.ID, &m.ThreadID, &m.Seq, &m.Author, &m.AuthorType, &m.Role, &m.Content, &m.CreatedAt); err != nil { return nil, err }
+        out = append(out, m)
+    }
+    return out, rows.Err()
+}
+
+func (s *Store) AddReaction(messageID int64, emoji, author, authorType string) error {
+    if strings.TrimSpace(emoji) == "" || strings.TrimSpace(author) == "" { return errors.New("emoji and author required") }
+    if authorType != "human" && authorType != "agent" { return errors.New("bad author_type") }
+    if _, err := s.db.Exec(`INSERT INTO reactions(message_id, emoji, author, author_type) VALUES(?,?,?,?)`, messageID, emoji, author, authorType); err != nil {
+        if strings.Contains(err.Error(), "UNIQUE") { return ErrConflict }
+        return err
+    }
+    return nil
+}
