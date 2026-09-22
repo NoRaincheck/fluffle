@@ -214,25 +214,25 @@ func (m *model) handleCompose(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// On tree: check if we have a selected thread
 		th := m.tree.SelectedThread()
 		if th != nil {
-			m.compose.Open(composeModeMessage, fmt.Sprintf("# %s > %s", m.chat.channelTitle, th.Title))
+			m.compose.Open(composeModeMessage, fmt.Sprintf("# %s > %s", m.chat.channelTitle, th.Title), m.compose.height)
 			return m, nil
 		}
 		ch := m.tree.SelectedChannel()
 		if ch != nil {
-			m.compose.Open(composeModeMessage, ch.Name)
+			m.compose.Open(composeModeMessage, ch.Name, m.compose.height)
 			return m, nil
 		}
 	case focusChat:
 		msgItem := m.chat.SelectedMessage()
 		if msgItem != nil {
-			m.compose.Open(composeModeReply, "Reply to: "+truncate(msgItem.Content, 40))
+			m.compose.Open(composeModeReply, "Reply to: "+truncate(msgItem.Content, 40), m.compose.height)
 			m.compose.state.threadID = msgItem.ThreadID
 			m.compose.state.parentID = msgItem.ID
 			return m, nil
 		}
 		// No message selected but we have threads
 		if m.chat.selectedThd > 0 {
-			m.compose.Open(composeModeMessage, fmt.Sprintf("# %s > %s", m.chat.channelTitle, m.chat.threadTitle))
+			m.compose.Open(composeModeMessage, fmt.Sprintf("# %s > %s", m.chat.channelTitle, m.chat.threadTitle), m.compose.height)
 			m.compose.state.threadID = m.chat.selectedThd
 			return m, nil
 		}

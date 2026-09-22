@@ -32,7 +32,7 @@ func (m composeModel) Init() tea.Cmd {
 	return nil
 }
 
-func (m *composeModel) Open(mode composeMode, context string) {
+func (m *composeModel) Open(mode composeMode, context string, maxH int) {
 	m.state = composeState{
 		mode:    mode,
 		context: context,
@@ -41,7 +41,11 @@ func (m *composeModel) Open(mode composeMode, context string) {
 		error:   "",
 	}
 	m.width = 60
-	m.height = 6
+	// Minimum 5 lines (header + input + error/hint + padding), scale up to available space
+	m.height = 5
+	if maxH > 5 {
+		m.height = minInt(maxH-2, 12)
+	}
 }
 
 func (m *composeModel) Close() {
@@ -157,6 +161,13 @@ func (m *composeModel) SetError(err string) {
 
 func (m *composeModel) ClearError() {
 	m.state.error = ""
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func composeContext(mode composeMode, context string) string {

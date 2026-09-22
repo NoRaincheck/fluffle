@@ -24,6 +24,9 @@ func (f filterInput) Init() tea.Cmd {
 func (f *filterInput) Update(msg tea.Msg) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if !f.active {
+			return
+		}
 		switch key := msg.Key(); key.Code {
 		case tea.KeyEscape:
 			f.active = false
