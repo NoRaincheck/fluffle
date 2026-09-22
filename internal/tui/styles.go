@@ -103,4 +103,15 @@ var (
 			Background(statusBg).
 			Foreground(statusFg).
 			Padding(0, 1)
+
+	hintStyle = lipgloss.NewStyle().
+			Width(0).
+			Height(1).
+			Background(statusBg).
+			Foreground(dim).
+			Padding(0, 1)
+
+	hintKeyStyle = lipgloss.NewStyle().
+			Foreground(accent).
+			Bold(true)
 )

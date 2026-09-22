@@ -302,6 +302,9 @@ func (m model) View() tea.View {
 		content = treeView + "\n" + chatView
 	}
 
+	// Shortcuts bar
+	content += "\n" + shortcutsView(m.focus)
+
 	// Status bar
 	statusLine := m.status
 	m.status = "" // clear after showing
@@ -312,6 +315,26 @@ func (m model) View() tea.View {
 	}
 
 	return tea.NewView(content)
+}
+
+func shortcutsView(focus focus) string {
+	var parts []string
+
+	parts = append(parts, hintKeyStyle.Render("q")+" quit")
+	parts = append(parts, hintKeyStyle.Render("Tab")+" switch")
+	parts = append(parts, hintKeyStyle.Render("c")+" compose")
+	parts = append(parts, hintKeyStyle.Render("/")+" filter")
+	parts = append(parts, hintKeyStyle.Render("s")+" sort")
+
+	if focus == focusTree {
+		parts = append(parts, hintKeyStyle.Render("↑↓")+" navigate")
+		parts = append(parts, hintKeyStyle.Render("Enter")+" open")
+	} else {
+		parts = append(parts, hintKeyStyle.Render("↑↓")+" navigate")
+		parts = append(parts, hintKeyStyle.Render("Enter")+" compose")
+	}
+
+	return hintStyle.Render(lipgloss.NewStyle().Width(0).Render(lipgloss.JoinHorizontal(lipgloss.Top, parts...)))
 }
 
 func center(s string, width int) string {
