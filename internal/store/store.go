@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -191,6 +192,10 @@ func (s *Store) ListThreads(channelID int64) ([]Thread, error) {
 }
 
 func (s *Store) AppendMessage(threadID int64, author, authorType, role, content string) (int64, error) {
+	return s.AppendMessageAt(threadID, author, authorType, role, content, "")
+}
+
+func (s *Store) AppendMessageAt(threadID int64, author, authorType, role, content, createdAt string) (int64, error) {
 	if strings.TrimSpace(author) == "" || strings.TrimSpace(content) == "" {
 		return 0, errors.New("author and content required")
 	}
@@ -220,7 +225,14 @@ func (s *Store) AppendMessage(threadID int64, author, authorType, role, content 
 	if maxSeq.Valid {
 		seq = maxSeq.Int64 + 1
 	}
-	if _, err := tx.Exec(`INSERT INTO messages(thread_id, seq, author, author_type, role, content) VALUES(?,?,?,?,?,?)`, threadID, seq, author, authorType, role, content); err != nil {
+	if createdAt != "" {
+		if _, err := time.Parse(time.RFC3339, createdAt); err != nil {
+			return 0, err
+		}
+		if _, err := tx.Exec(`INSERT INTO messages(thread_id, seq, author, author_type, role, content, created_at) VALUES(?,?,?,?,?,?,?)`, threadID, seq, author, authorType, role, content, createdAt); err != nil {
+			return 0, err
+		}
+	} else if _, err := tx.Exec(`INSERT INTO messages(thread_id, seq, author, author_type, role, content) VALUES(?,?,?,?,?,?)`, threadID, seq, author, authorType, role, content); err != nil {
 		return 0, err
 	}
 	if err := tx.Commit(); err != nil {

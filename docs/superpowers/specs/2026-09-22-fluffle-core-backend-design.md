@@ -135,7 +135,7 @@ sets `author_type=agent`; otherwise `human`.
   line, ignores incoming `seq`, daemon reassigns `max+1` in a transaction.
 - Thread history is the context: no summarization, no hidden memory, no embeddings.
 - Handoff: `export` = full `read`; `import` creates a new thread and replays lines
-  preserving `role/author/content/timestamp/metadata`. Round-trip invariant:
+  preserving `role/author/content/timestamp` (metadata accepted but not persisted in MVP — no column). Round-trip invariant:
   export → import → export is byte-identical modulo `seq`.
 
 ## 7. Repo-anchoring + orphaned channels

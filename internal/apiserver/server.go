@@ -127,7 +127,7 @@ func NewHandler(s *store.Store) http.Handler {
 			json.NewEncoder(w).Encode(msgs)
 		case "POST":
 			var body struct {
-				Author, Role, Content, AgentID string
+				Author, Role, Content, AgentID, CreatedAt string
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				writeErr(w, 400, "BAD_JSONL", err.Error())
@@ -144,7 +144,13 @@ func NewHandler(s *store.Store) http.Handler {
 			if author == "" {
 				author = "unknown"
 			}
-			seq, err := s.AppendMessage(id, author, authorType, body.Role, body.Content)
+			var seq int64
+			var err error
+			if body.CreatedAt != "" {
+				seq, err = s.AppendMessageAt(id, author, authorType, body.Role, body.Content, body.CreatedAt)
+			} else {
+				seq, err = s.AppendMessage(id, author, authorType, body.Role, body.Content)
+			}
 			if err == store.ErrNotFound {
 				writeErr(w, 404, "THREAD_NOT_FOUND", "no such thread")
 				return

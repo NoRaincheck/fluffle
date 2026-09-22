@@ -73,3 +73,20 @@ func TestReactionUniquePerAuthorEmoji(t *testing.T) {
 		t.Fatal("expected duplicate error")
 	}
 }
+
+func TestAppendMessageAtPreservesTimestamp(t *testing.T) {
+	s, _ := Open(":memory:")
+	defer s.Close()
+	ch, _ := s.CreateChannel("c", "/r", "", "", false)
+	th, _ := s.CreateThread(ch, "t")
+	if _, err := s.AppendMessageAt(th, "a", "human", "user", "hi", "2020-01-02T03:04:05Z"); err != nil {
+		t.Fatal(err)
+	}
+	msgs, _ := s.ListMessages(th, 0)
+	if len(msgs) != 1 {
+		t.Fatalf("%+v", msgs)
+	}
+	if len(msgs[0].CreatedAt) < 10 || msgs[0].CreatedAt[:10] != "2020-01-02" {
+		t.Fatalf("created_at %q", msgs[0].CreatedAt)
+	}
+}

@@ -392,7 +392,7 @@ func dumpThreadMessages(base string, threadID int64, last int, agentID string) i
 func parseJSONLFile(path string) ([]jsonl.Line, int) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "BAD_JSONL: %s\n", err)
+		fmt.Fprintf(os.Stderr, "FILE_READ: %s\n", err)
 		return nil, 1
 	}
 	lines, err := jsonl.ParseLines(raw)
@@ -410,7 +410,7 @@ func postJSONLLines(base string, threadID int64, lines []jsonl.Line, agentID str
 		if role == "" {
 			role = "user"
 		}
-		body := map[string]any{"Author": l.Author, "Role": role, "Content": l.Content, "AgentID": agentID}
+		body := map[string]any{"Author": l.Author, "Role": role, "Content": l.Content, "AgentID": agentID, "CreatedAt": l.Timestamp}
 		var out struct {
 			Seq int64 `json:"seq"`
 		}
