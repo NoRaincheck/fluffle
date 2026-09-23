@@ -286,6 +286,18 @@ func channelCreateCmd(args []string) int {
 		return code
 	}
 	if *jsonOut {
+		var list []store.Channel
+		u := base + "/v1/channels?include-orphaned=1"
+		if code := apiGet(u, "", &list); code == 0 {
+			for _, c := range list {
+				if c.ID == out.ID {
+					enc := json.NewEncoder(os.Stdout)
+					enc.SetIndent("", "  ")
+					enc.Encode(c)
+					return 0
+				}
+			}
+		}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		enc.Encode(out)
@@ -457,7 +469,7 @@ func threadNewCmd(args []string) int {
 	if *jsonOut {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		enc.Encode(out)
+		enc.Encode(map[string]any{"id": out.ID, "title": *title, "channel_id": id, "channel": *channel})
 		return 0
 	}
 	fmt.Printf("thread %d\n", out.ID)
@@ -762,7 +774,7 @@ func messageSendCmd(args []string) int {
 	if *jsonOut {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		enc.Encode(out)
+		enc.Encode(map[string]any{"seq": out.Seq, "thread_id": *threadID, "author": author, "content": *text, "parent_id": *replyTo})
 		return 0
 	}
 	fmt.Printf("seq %d\n", out.Seq)

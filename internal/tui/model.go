@@ -504,7 +504,11 @@ func (m model) renderList() string {
 		}
 	}
 	header := chatHeaderStyle.Render(title)
-	sep := chatHeaderStyle.Render(strings.Repeat("─", min(m.width-4, 60)))
+	sepLen := min(max(0, m.width-4), 60)
+	if sepLen < 0 {
+		sepLen = 0
+	}
+	sep := chatHeaderStyle.Render(strings.Repeat("─", sepLen))
 	lines := []string{header, sep}
 	lines = append(lines, items...)
 	for len(lines) < h {

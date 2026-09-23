@@ -936,12 +936,16 @@ func TestE2E_ThreadReply(t *testing.T) {
 
 	// Orphan channel + thread
 	out := runCLI(t, env, bin, "channel", "create", "--name", "reply-demo", "--orphaned", "--json")
-	var ch struct{ ID int64 `json:"id"` }
+	var ch struct {
+		ID int64 `json:"id"`
+	}
 	if err := json.Unmarshal([]byte(out), &ch); err != nil {
 		t.Fatalf("invalid JSON: %v\n%s", err, out)
 	}
 	out = runCLI(t, env, bin, "thread", "new", "--channel", "reply-demo", "--orphaned", "--title", "topic", "--json")
-	var th struct{ ID int64 `json:"id"` }
+	var th struct {
+		ID int64 `json:"id"`
+	}
 	if err := json.Unmarshal([]byte(out), &th); err != nil {
 		t.Fatalf("invalid JSON: %v\n%s", err, out)
 	}
@@ -949,7 +953,9 @@ func TestE2E_ThreadReply(t *testing.T) {
 
 	// Parent message
 	out = runCLI(t, env, bin, "message", "send", "--thread", tid, "--text", "parent", "--as", "alice", "--json")
-	var m1 struct{ Seq int64 `json:"seq"` }
+	var m1 struct {
+		Seq int64 `json:"seq"`
+	}
 	if err := json.Unmarshal([]byte(out), &m1); err != nil {
 		t.Fatalf("invalid JSON: %v\n%s", err, out)
 	}
@@ -976,7 +982,9 @@ func TestE2E_ThreadReply(t *testing.T) {
 
 	// Reply
 	out = runCLI(t, env, bin, "message", "send", "--thread", tid, "--text", "child reply", "--as", "bob", "--reply-to", parentID, "--json")
-	var m2 struct{ Seq int64 `json:"seq"` }
+	var m2 struct {
+		Seq int64 `json:"seq"`
+	}
 	if err := json.Unmarshal([]byte(out), &m2); err != nil {
 		t.Fatalf("invalid JSON: %v\n%s", err, out)
 	}
