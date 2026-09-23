@@ -8,7 +8,7 @@ func TestCreateAndListAnchoredChannel(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	id, err := s.CreateChannel("auth-refactor", "/tmp/proj", "git@x:y.git", "abc123", false)
+	id, err := s.CreateChannel("auth-refactor", "/tmp/proj", "git@x:y.git", "abc123", "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,7 +27,7 @@ func TestCreateAndListAnchoredChannel(t *testing.T) {
 func TestArbitraryOrphanChannel(t *testing.T) {
 	s, _ := Open(":memory:")
 	defer s.Close()
-	if _, err := s.CreateChannel("scratch", "", "", "", true); err != nil {
+	if _, err := s.CreateChannel("scratch", "", "", "", "", true); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := s.ListChannels("", false)
@@ -43,7 +43,7 @@ func TestArbitraryOrphanChannel(t *testing.T) {
 func TestAppendAssignsSeqInOrder(t *testing.T) {
 	s, _ := Open(":memory:")
 	defer s.Close()
-	ch, _ := s.CreateChannel("c", "/r", "", "", false)
+	ch, _ := s.CreateChannel("c", "/r", "", "", "", false)
 	th, err := s.CreateThread(ch, "Schema migration")
 	if err != nil {
 		t.Fatal(err)
@@ -62,7 +62,7 @@ func TestAppendAssignsSeqInOrder(t *testing.T) {
 func TestReactionUniquePerAuthorEmoji(t *testing.T) {
 	s, _ := Open(":memory:")
 	defer s.Close()
-	ch, _ := s.CreateChannel("c", "/r", "", "", false)
+	ch, _ := s.CreateChannel("c", "/r", "", "", "", false)
 	th, _ := s.CreateThread(ch, "t")
 	s.AppendMessage(th, "a", "human", "user", "hi")
 	msgs, _ := s.ListMessages(th, 10)
@@ -77,7 +77,7 @@ func TestReactionUniquePerAuthorEmoji(t *testing.T) {
 func TestAppendMessageAtPreservesTimestamp(t *testing.T) {
 	s, _ := Open(":memory:")
 	defer s.Close()
-	ch, _ := s.CreateChannel("c", "/r", "", "", false)
+	ch, _ := s.CreateChannel("c", "/r", "", "", "", false)
 	th, _ := s.CreateThread(ch, "t")
 	if _, err := s.AppendMessageAt(th, "a", "human", "user", "hi", "2020-01-02T03:04:05Z"); err != nil {
 		t.Fatal(err)

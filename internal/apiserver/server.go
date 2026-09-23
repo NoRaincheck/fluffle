@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/NoRaincheck/fluffle/internal/store"
 )
@@ -22,6 +23,35 @@ func writeErr(w http.ResponseWriter, status int, code, msg string) {
 
 func isAgent(r *http.Request) bool { return r.Header.Get("X-Fluffle-Agent") != "" }
 
+var (
+	shutdownMu sync.Mutex
+	shutdownFn func()
+)
+
+func SetShutdown(fn func()) {
+	shutdownMu.Lock()
+	defer shutdownMu.Unlock()
+	shutdownFn = fn
+}
+
+func shutdownHandler(s *store.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, 405, "METHOD_NOT_ALLOWED", "method not allowed")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{"status": "shutting_down"})
+		shutdownMu.Lock()
+		fn := shutdownFn
+		shutdownMu.Unlock()
+		if fn != nil {
+			go fn()
+		}
+	}
+}
+
 func NewHandler(s *store.Store) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/health", func(w http.ResponseWriter, r *http.Request) {
@@ -38,6 +68,10 @@ func NewHandler(s *store.Store) http.Handler {
 				writeErr(w, 500, "DAEMON_DOWN", err.Error())
 				return
 			}
+			if list == nil {
+				list = []store.Channel{}
+			}
+			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(list)
 		case "POST":
 			if isAgent(r) {
@@ -45,16 +79,16 @@ func NewHandler(s *store.Store) http.Handler {
 				return
 			}
 			var body struct {
-				Name, RepoAbsPath, RepoRemote, RepoHeadSHA string
-				Orphaned                                   bool `json:"orphaned"`
+				Name, RepoAbsPath, RepoRemote, RepoHeadSHA, RepoHeadBranch string
+				Orphaned                                                   bool `json:"orphaned"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				writeErr(w, 400, "BAD_JSONL", err.Error())
 				return
 			}
-			id, err := s.CreateChannel(body.Name, body.RepoAbsPath, body.RepoRemote, body.RepoHeadSHA, body.Orphaned)
+			id, err := s.CreateChannel(body.Name, body.RepoAbsPath, body.RepoRemote, body.RepoHeadSHA, body.RepoHeadBranch, body.Orphaned)
 			if err == store.ErrConflict {
-				writeErr(w, 409, "BAD_JSONL", "channel exists")
+				writeErr(w, 409, "CHANNEL_EXISTS", "channel exists")
 				return
 			}
 			if err != nil {
@@ -81,6 +115,10 @@ func NewHandler(s *store.Store) http.Handler {
 				writeErr(w, 500, "DAEMON_DOWN", err.Error())
 				return
 			}
+			if list == nil {
+				list = []store.Thread{}
+			}
+			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(list)
 		case "POST":
 			if isAgent(r) {
@@ -124,14 +162,36 @@ func NewHandler(s *store.Store) http.Handler {
 				writeErr(w, 500, "DAEMON_DOWN", err.Error())
 				return
 			}
+			if msgs == nil {
+				msgs = []store.Message{}
+			}
+			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(msgs)
 		case "POST":
-			var body struct {
-				Author, Role, Content, AgentID, CreatedAt string
-			}
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			var raw map[string]json.RawMessage
+			if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 				writeErr(w, 400, "BAD_JSONL", err.Error())
 				return
+			}
+			var body struct {
+				Author, Role, Content, AgentID, CreatedAt string
+				ParentID                                  int64
+			}
+			for k, v := range raw {
+				switch k {
+				case "Author", "author":
+					json.Unmarshal(v, &body.Author)
+				case "Role", "role":
+					json.Unmarshal(v, &body.Role)
+				case "Content", "content":
+					json.Unmarshal(v, &body.Content)
+				case "AgentID", "agent_id":
+					json.Unmarshal(v, &body.AgentID)
+				case "CreatedAt", "created_at":
+					json.Unmarshal(v, &body.CreatedAt)
+				case "ParentID", "parent_id", "parentId":
+					json.Unmarshal(v, &body.ParentID)
+				}
 			}
 			authorType := "human"
 			if body.AgentID != "" || isAgent(r) {
@@ -147,7 +207,9 @@ func NewHandler(s *store.Store) http.Handler {
 			var seq int64
 			var err error
 			if body.CreatedAt != "" {
-				seq, err = s.AppendMessageAt(id, author, authorType, body.Role, body.Content, body.CreatedAt)
+				seq, err = s.AppendMessageAtWithParent(id, author, authorType, body.Role, body.Content, body.CreatedAt, body.ParentID)
+			} else if body.ParentID != 0 {
+				seq, err = s.AppendMessageWithParent(id, author, authorType, body.Role, body.Content, body.ParentID)
 			} else {
 				seq, err = s.AppendMessage(id, author, authorType, body.Role, body.Content)
 			}
@@ -199,5 +261,6 @@ func NewHandler(s *store.Store) http.Handler {
 		}
 		json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	})
+	mux.HandleFunc("/api/shutdown", shutdownHandler(s))
 	return mux
 }
