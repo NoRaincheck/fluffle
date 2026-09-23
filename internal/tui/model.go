@@ -721,11 +721,8 @@ func (m model) renderListWithWidth(w int) string {
 		if len(m.messages) == 0 {
 			items = []string{"  (no messages — press c to post, r to reply (appends to end))"}
 		} else {
-			// Table-style layout with responsive column widths
 			timeWidth := 8
 			senderWidth := 15
-
-			// Calculate content width based on terminal width
 			contentWidth := max(minContentWidth, w-timeWidth-senderWidth-10)
 
 			for i, msg := range m.messages {
@@ -735,17 +732,12 @@ func (m model) renderListWithWidth(w int) string {
 				}
 
 				tStr := formatTime(msg.CreatedAt)
-				// Right-align time in fixed width
 				tStr = fmt.Sprintf("%*s", timeWidth, tStr)
-
-				// Color-code author by type
 				authorStyle := getAuthorStyle(msg.AuthorType)
 				author := truncate(msg.Author, senderWidth)
 				authorRendered := authorStyle.Render(author)
 
 				content := truncate(msg.Content, contentWidth)
-
-				// Build the line with table-like structure
 				line := fmt.Sprintf("%s%s  %s  %s", prefix, tStr, authorRendered, content)
 
 				if i == m.cursor {

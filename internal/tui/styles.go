@@ -28,13 +28,11 @@ var (
 	statusBg = color.RGBA{24, 24, 37, 255}
 	statusFg = color.RGBA{137, 180, 250, 255}
 
-	accent = color.RGBA{137, 180, 250, 255}
-	dim    = color.RGBA{100, 100, 120, 255}
-
-	// Author type colors
-	humanColor  = color.RGBA{137, 180, 250, 255} // Blue for humans
-	agentColor  = color.RGBA{183, 180, 250, 255} // Purple/Cyan for agents
-	systemColor = color.RGBA{100, 100, 120, 255} // Gray for system
+	accent      = color.RGBA{137, 180, 250, 255}
+	dim         = color.RGBA{100, 100, 120, 255}
+	humanColor  = color.RGBA{137, 180, 250, 255}
+	agentColor  = color.RGBA{183, 180, 250, 255}
+	systemColor = color.RGBA{100, 100, 120, 255}
 )
 
 var (
@@ -117,14 +115,11 @@ var (
 	hintKeyStyle = lipgloss.NewStyle().
 			Foreground(accent).
 			Bold(true)
-
-	// Author type styles
 	humanAuthorStyle  = lipgloss.NewStyle().Foreground(humanColor)
 	agentAuthorStyle  = lipgloss.NewStyle().Foreground(agentColor)
 	systemAuthorStyle = lipgloss.NewStyle().Foreground(systemColor)
 )
 
-// getAuthorStyle returns the appropriate style based on author type
 func getAuthorStyle(authorType string) lipgloss.Style {
 	switch authorType {
 	case "human":
