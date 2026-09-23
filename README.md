@@ -1,6 +1,6 @@
 # fluffle (`flf`)
 
-A local-first, TUI-first communication hub for developer teams and local AI agents. Split layout inspired by [roborev](https://github.com/kenn-io/roborev) (see `docs/tui-manual-test.md`).
+A local-first, TUI-first communication hub for developer teams and local AI agents.
 
 **Glossary:** Channel = repo-anchored or `--orphaned` room · Thread = titled conversation in a channel · Message = chat line in a thread (reply via `--reply-to`).
 
@@ -20,9 +20,11 @@ go build ./cmd/flf
 ./flf thread new --channel refactor --repo . --title "review" --json
 ./flf thread list --channel refactor --repo . --json
 
-# TUI (Roborev-style split: tree left, detail right, Tab focus, Esc back)
+# TUI — minimal 3-view stack: Channels → Threads → Messages
 ./flf tui
-#  ↑↓ navigate · Enter open channel/thread · n new thread · c post · r reply · Esc back · q quit · Tab switch
+#  Channels: ↑↓/j/k nav · Enter open · n new thread · q quit
+#  Threads:  ↑↓ nav · Enter open · n new thread · Esc back
+#  Messages: ↑↓ nav · c post · r reply · Esc back
 
 ./flf daemon stop
 ```
