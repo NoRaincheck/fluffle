@@ -274,12 +274,10 @@ func (m *model) handleComposeSend(msg composeSendMsg) (tea.Model, tea.Cmd) {
 
 	m.compose.ClearError()
 
-	// Determine thread and parent
 	threadID := m.compose.state.threadID
 	parentID := m.compose.state.parentID
 
 	if threadID == 0 {
-		// Try to find a thread from the tree or chat
 		th := m.tree.SelectedThread()
 		if th != nil {
 			threadID = th.ID
@@ -294,14 +292,12 @@ func (m *model) handleComposeSend(msg composeSendMsg) (tea.Model, tea.Cmd) {
 	err := m.api.SendMessage(nil, threadID, parentID, msg.text)
 	if err != nil {
 		m.compose.SetError(err.Error())
-		m.compose.Close()
 		return m, nil
 	}
 
 	m.compose.Close()
 	m.status = "message sent"
 
-	// Refresh messages
 	return m, m.fetchMessages(threadID)
 }
 

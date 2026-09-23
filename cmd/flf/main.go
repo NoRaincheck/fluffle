@@ -365,6 +365,9 @@ func threadListCmd(args []string) int {
 	if code := apiGet(base+"/v1/channels/"+strconv.FormatInt(id, 10)+"/threads", "", &list); code != 0 {
 		return code
 	}
+	if list == nil {
+		list = []store.Thread{}
+	}
 	if *jsonOut {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")

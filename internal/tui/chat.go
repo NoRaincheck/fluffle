@@ -115,9 +115,7 @@ func (m chatModel) renderMessage(msg store.Message, idx int) string {
 
 func (m chatModel) SelectedMessage() *store.Message {
 	if m.cursor >= 0 && m.cursor < len(m.messages) {
-		msg := &m.messages[m.cursor]
-		m.selectedMsg = msg.ID
-		return msg
+		return &m.messages[m.cursor]
 	}
 	return nil
 }

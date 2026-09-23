@@ -48,3 +48,57 @@ func TestExportImportRoundTrip(t *testing.T) {
 		t.Fatalf("%+v", msgs)
 	}
 }
+
+func TestListChannelsEmptyReturnsArray(t *testing.T) {
+	s, _ := store.Open(":memory:")
+	defer s.Close()
+	h := NewHandler(s)
+	req := httptest.NewRequest("GET", "/v1/channels?include-orphaned=1", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("want 200 got %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("want application/json got %q", ct)
+	}
+	body := strings.TrimSpace(rec.Body.String())
+	if body != "[]" {
+		t.Fatalf("want [] got %q", body)
+	}
+}
+
+func TestListThreadsEmptyReturnsArray(t *testing.T) {
+	s, _ := store.Open(":memory:")
+	defer s.Close()
+	h := NewHandler(s)
+	ch, _ := s.CreateChannel("c", "/r", "", "", "", false)
+	req := httptest.NewRequest("GET", fmt.Sprintf("/v1/channels/%d/threads", ch), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("want 200 got %d", rec.Code)
+	}
+	body := strings.TrimSpace(rec.Body.String())
+	if body != "[]" {
+		t.Fatalf("want [] got %q", body)
+	}
+}
+
+func TestListMessagesEmptyReturnsArray(t *testing.T) {
+	s, _ := store.Open(":memory:")
+	defer s.Close()
+	h := NewHandler(s)
+	ch, _ := s.CreateChannel("c", "/r", "", "", "", false)
+	th, _ := s.CreateThread(ch, "t")
+	req := httptest.NewRequest("GET", fmt.Sprintf("/v1/threads/%d/messages", th), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("want 200 got %d", rec.Code)
+	}
+	body := strings.TrimSpace(rec.Body.String())
+	if body != "[]" {
+		t.Fatalf("want [] got %q", body)
+	}
+}

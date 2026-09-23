@@ -79,6 +79,9 @@ func (c *apiClient) ListThreads(ctx context.Context, channelID int64) ([]store.T
 	if err := json.NewDecoder(resp.Body).Decode(&threads); err != nil {
 		return nil, fmt.Errorf("DAEMON_DOWN: %w", err)
 	}
+	if threads == nil {
+		threads = []store.Thread{}
+	}
 	return threads, nil
 }
 
@@ -99,6 +102,9 @@ func (c *apiClient) ListMessages(ctx context.Context, threadID int64) ([]store.M
 	var msgs []store.Message
 	if err := json.NewDecoder(resp.Body).Decode(&msgs); err != nil {
 		return nil, fmt.Errorf("DAEMON_DOWN: %w", err)
+	}
+	if msgs == nil {
+		msgs = []store.Message{}
 	}
 	return msgs, nil
 }

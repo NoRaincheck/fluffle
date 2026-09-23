@@ -68,6 +68,10 @@ func NewHandler(s *store.Store) http.Handler {
 				writeErr(w, 500, "DAEMON_DOWN", err.Error())
 				return
 			}
+			if list == nil {
+				list = []store.Channel{}
+			}
+			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(list)
 		case "POST":
 			if isAgent(r) {
@@ -111,6 +115,10 @@ func NewHandler(s *store.Store) http.Handler {
 				writeErr(w, 500, "DAEMON_DOWN", err.Error())
 				return
 			}
+			if list == nil {
+				list = []store.Thread{}
+			}
+			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(list)
 		case "POST":
 			if isAgent(r) {
@@ -154,6 +162,10 @@ func NewHandler(s *store.Store) http.Handler {
 				writeErr(w, 500, "DAEMON_DOWN", err.Error())
 				return
 			}
+			if msgs == nil {
+				msgs = []store.Message{}
+			}
+			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(msgs)
 		case "POST":
 			var body struct {

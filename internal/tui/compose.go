@@ -26,6 +26,7 @@ type composeState struct {
 
 type composeModel struct {
 	state  composeState
+	active bool
 	width  int
 	height int
 }
@@ -35,6 +36,7 @@ func (m composeModel) Init() tea.Cmd {
 }
 
 func (m *composeModel) Open(mode composeMode, context string, maxH int) {
+	m.active = true
 	m.state = composeState{
 		mode:    mode,
 		context: context,
@@ -51,11 +53,12 @@ func (m *composeModel) Open(mode composeMode, context string, maxH int) {
 }
 
 func (m *composeModel) Close() {
+	m.active = false
 	m.state = composeState{}
 }
 
 func (m *composeModel) IsActive() bool {
-	return m.state.mode != 0
+	return m.active
 }
 
 func (m *composeModel) Text() string {
