@@ -90,3 +90,38 @@ func TestAppendMessageAtPreservesTimestamp(t *testing.T) {
 		t.Fatalf("created_at %q", msgs[0].CreatedAt)
 	}
 }
+
+func TestListInbox(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ch1, _ := s.CreateChannel("general", "", "", "", "", true)
+	ch2, _ := s.CreateChannel("random", "", "", "", "", true)
+	th1, _ := s.CreateThread(ch1, "hello")
+	th2, _ := s.CreateThread(ch2, "world")
+	_, _ = s.AppendMessageAt(th1, "alice", "human", "user", "first", "2026-09-23T10:00:00Z")
+	_, _ = s.AppendMessageAt(th2, "bob", "human", "user", "second", "2026-09-23T11:00:00Z")
+	_, _ = s.AppendMessageAt(th1, "alice", "human", "user", "third", "2026-09-23T12:00:00Z")
+	msgs, err := s.ListInbox(10)
+	if err != nil {
+		t.Fatalf("ListInbox: %v", err)
+	}
+	if len(msgs) != 3 {
+		t.Fatalf("want 3 got %d", len(msgs))
+	}
+	if msgs[0].Content != "first" || msgs[1].Content != "second" || msgs[2].Content != "third" {
+		t.Fatalf("order wrong: %+v", msgs)
+	}
+	if msgs[0].ChannelName != "general" || msgs[0].ThreadTitle != "hello" {
+		t.Fatalf("enrichment wrong: %+v", msgs[0])
+	}
+	msgs2, _ := s.ListInbox(1)
+	if len(msgs2) != 1 {
+		t.Fatalf("limit 1: got %d", len(msgs2))
+	}
+	if msgs2[0].Content != "third" {
+		t.Fatalf("limit should return newest last when reversed to ASC, got %q", msgs2[0].Content)
+	}
+}
