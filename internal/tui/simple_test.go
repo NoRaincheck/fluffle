@@ -149,3 +149,41 @@ func TestAdaptivePreviewTruncation(t *testing.T) {
 		t.Fatalf("header missing %q", tbl)
 	}
 }
+
+func TestInboxKeybindings(t *testing.T) {
+	m := toModel(New("http://127.0.0.1:0"))
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+	m = toModel(nm)
+	inbox := []store.InboxMessage{{Message: store.Message{ID: 1, ThreadID: 10, Content: "hi"}, ChannelName: "general", ThreadTitle: "hello", ChannelID: 5}}
+	nm, _ = m.Update(inboxFetchedMsg{inbox: inbox})
+	m = toModel(nm)
+	nm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = toModel(nm)
+	if !m.compose.IsActive() {
+		t.Fatalf("Enter should open reply")
+	}
+	m.compose.Close()
+	nm, _ = m.Update(tea.KeyPressMsg{Text: "c", Code: 'c'})
+	m = toModel(nm)
+	if !m.compose.IsActive() {
+		t.Fatalf("c should open compose")
+	}
+	m.compose.Close()
+	nm, _ = m.Update(tea.KeyPressMsg{Text: "r", Code: 'r'})
+	m = toModel(nm)
+	if !m.compose.IsActive() {
+		t.Fatalf("r should open compose")
+	}
+	m.compose.Close()
+	had := m.preview
+	nm, _ = m.Update(tea.KeyPressMsg{Text: "L", Code: 'L'})
+	m = toModel(nm)
+	if m.preview == had {
+		t.Fatalf("L toggle failed")
+	}
+	nm, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = toModel(nm)
+	if m.view != viewInbox {
+		t.Fatalf("Esc should be no-op in inbox")
+	}
+}

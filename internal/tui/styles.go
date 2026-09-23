@@ -32,9 +32,9 @@ var (
 	dim    = color.RGBA{100, 100, 120, 255}
 
 	// Author type colors
-	humanColor = color.RGBA{137, 180, 250, 255}   // Blue for humans
-	agentColor = color.RGBA{183, 180, 250, 255}   // Purple/Cyan for agents
-	systemColor = color.RGBA{100, 100, 120, 255}  // Gray for system
+	humanColor  = color.RGBA{137, 180, 250, 255} // Blue for humans
+	agentColor  = color.RGBA{183, 180, 250, 255} // Purple/Cyan for agents
+	systemColor = color.RGBA{100, 100, 120, 255} // Gray for system
 )
 
 var (
@@ -119,8 +119,8 @@ var (
 			Bold(true)
 
 	// Author type styles
-	humanAuthorStyle = lipgloss.NewStyle().Foreground(humanColor)
-	agentAuthorStyle = lipgloss.NewStyle().Foreground(agentColor)
+	humanAuthorStyle  = lipgloss.NewStyle().Foreground(humanColor)
+	agentAuthorStyle  = lipgloss.NewStyle().Foreground(agentColor)
 	systemAuthorStyle = lipgloss.NewStyle().Foreground(systemColor)
 )
 

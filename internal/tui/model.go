@@ -284,6 +284,8 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.maybeFetchPreview()
 	case tea.KeyEnter:
 		switch m.view {
+		case viewInbox:
+			return m.handleInboxReply()
 		case viewChannels:
 			if len(m.channels) == 0 || m.cursor < 0 || m.cursor >= len(m.channels) {
 				return m, nil
@@ -303,6 +305,8 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case tea.KeyEscape:
 		switch m.view {
+		case viewInbox:
+			return m, nil
 		case viewMessages:
 			m.view = viewThreads
 			m.cursor = 0
@@ -352,8 +356,11 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.maybeFetchPreview()
 	case "n":
-		return m.handleNewThread()
+		return m.handleNewThreadInbox()
 	case "c":
+		if m.view == viewInbox {
+			return m.handleInboxReply()
+		}
 		return m.handlePost()
 	case "r":
 		return m.handleInboxReply()
@@ -391,6 +398,34 @@ func (m *model) handleNewThread() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.compose.Open(composeModeNewThread, fmt.Sprintf("New thread in #%s", ch.Name), m.height)
+	m.compose.state.threadID = ch.ID
+	m.compose.state.parentID = 0
+	return m, nil
+}
+
+func (m *model) handleNewThreadInbox() (tea.Model, tea.Cmd) {
+	if m.view != viewInbox {
+		return m.handleNewThread()
+	}
+	if len(m.channels) == 0 {
+		return m, m.fetchChannels()
+	}
+	var ch *store.Channel
+	if len(m.inbox) > 0 && m.cursor >= 0 && m.cursor < len(m.inbox) {
+		im := m.inbox[m.cursor]
+		for i := range m.channels {
+			if m.channels[i].ID == im.ChannelID {
+				c := m.channels[i]
+				ch = &c
+				break
+			}
+		}
+	}
+	if ch == nil {
+		c := m.channels[0]
+		ch = &c
+	}
+	m.compose.Open(composeModeNewThread, fmt.Sprintf("New thread in #%s — type title", ch.Name), m.height)
 	m.compose.state.threadID = ch.ID
 	m.compose.state.parentID = 0
 	return m, nil
@@ -453,7 +488,7 @@ func (m *model) handleInboxReply() (tea.Model, tea.Cmd) {
 	im := m.inbox[m.cursor]
 	m.compose.Open(composeModeMessage, fmt.Sprintf("Reply in #%s › %s", im.ChannelName, im.ThreadTitle), m.height)
 	m.compose.state.threadID = im.ThreadID
-	m.compose.state.parentID = 0
+	m.compose.state.parentID = im.ID
 	return m, nil
 }
 
@@ -523,6 +558,9 @@ func (m *model) handleComposeSend(msg composeSendMsg) (tea.Model, tea.Cmd) {
 		}
 		m.compose.Close()
 		m.status = fmt.Sprintf("thread %q created", title)
+		if m.view == viewInbox {
+			return m, m.fetchInbox()
+		}
 		return m, m.fetchThreads(channelID)
 	}
 	threadID := m.compose.state.threadID
@@ -540,6 +578,9 @@ func (m *model) handleComposeSend(msg composeSendMsg) (tea.Model, tea.Cmd) {
 	}
 	m.compose.Close()
 	m.status = "sent"
+	if m.view == viewInbox {
+		return m, m.fetchInbox()
+	}
 	return m, m.fetchMessages(threadID)
 }
 
@@ -774,14 +815,14 @@ func (m model) renderInboxWithWidth(w int) string {
 		if row == table.HeaderRow {
 			return lipgloss.NewStyle().Foreground(chatHeaderFg).Bold(true)
 		}
+		if row == m.cursor {
+			return chatMsgSelectedStyle
+		}
 		if col == 3 {
 			idx := row
 			if idx >= 0 && idx < len(m.inbox) {
 				return getAuthorStyle(m.inbox[idx].AuthorType)
 			}
-		}
-		if row == m.cursor {
-			return chatMsgSelectedStyle
 		}
 		return chatMsgStyle
 	})
@@ -842,7 +883,7 @@ func (m model) renderPreview(w int) string {
 				items = append(items, chatMsgStyle.Render(fmt.Sprintf("  ... (+%d lines)", remaining)))
 			}
 			items = append(items, chatMsgStyle.Render(strings.Repeat("─", min(w-4, 40))))
-			replies := lastNPreviewMessages(m.previewMessages, im.ThreadID, im.Seq, 5)
+			replies := lastNPreviewMessagesWithParent(m.previewMessages, im.ThreadID, im.Seq, im.ID, 5)
 			if len(replies) == 0 {
 				items = append(items, chatMsgStyle.Render("  (no replies)"))
 			} else {
@@ -927,7 +968,27 @@ func (m model) renderPreview(w int) string {
 }
 
 func lastNPreviewMessages(msgs []store.Message, threadID int64, seq int64, n int) []store.Message {
+	return lastNPreviewMessagesWithParent(msgs, threadID, seq, 0, n)
+}
+
+func lastNPreviewMessagesWithParent(msgs []store.Message, threadID int64, seq int64, parentID int64, n int) []store.Message {
 	var filtered []store.Message
+	if parentID != 0 {
+		for _, msg := range msgs {
+			if msg.ThreadID != threadID {
+				continue
+			}
+			if msg.ParentID.Valid && msg.ParentID.Int64 == parentID {
+				filtered = append(filtered, msg)
+			}
+		}
+		if len(filtered) > 0 {
+			if len(filtered) <= n {
+				return filtered
+			}
+			return filtered[len(filtered)-n:]
+		}
+	}
 	for _, msg := range msgs {
 		if msg.ThreadID != threadID {
 			continue
