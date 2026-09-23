@@ -58,6 +58,25 @@ func NewHandler(s *store.Store) http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"ok":true}`))
 	})
+	mux.HandleFunc("/v1/inbox", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeErr(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
+			return
+		}
+		limit := 100
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				limit = n
+			}
+		}
+		msgs, err := s.ListInbox(limit)
+		if err != nil {
+			writeErr(w, 500, "DAEMON_ERROR", err.Error())
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(msgs)
+	})
 	mux.HandleFunc("/v1/channels", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case "GET":
