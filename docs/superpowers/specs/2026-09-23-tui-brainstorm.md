@@ -97,10 +97,12 @@ The current TUI has a **3-view stack** (Channels → Threads → Messages) with 
 │ CHANNELS     │ # general                     │ THREAD PREVIEW  │
 │              │                               │                 │
 │ ▸ general    │ ────────────────────────────  │ Selected Thread │
-│   random     │ [Today]                       │                 │
-│   builds     │                               │ # Design Review │
-│   PRs        │ [👤 alice] 10:30              │                 │
-│              │   hey team                    │ [👤 bob] 11:00  │
+│   random     │                               │                 │
+│   builds     │ [Today]                       │                 │
+│   PRs        │                               │ # Design Review │
+│              │                               │                 │
+│              │ [👤 alice] 10:30              │ [👤 bob] 11:00  │
+│              │   hey team                    │                 │
 │              │                               │   here's the    │
 │              │ [🤖 ci-bot] 10:45             │   mockup        │
 │              │   ✅ build passed             │                 │
@@ -201,13 +203,14 @@ The current TUI has a **3-view stack** (Channels → Threads → Messages) with 
 │                   │                                              │
 │ ▸ API Discussion  │ ───────────────────────────────────────────  │
 │   Bug Reports     │                                              │
-│   Feature Ideas   │ [👤 alice]  Today 10:30                      │
-│   Random          │ │  hey team                                  │
-│                   │ │                                            │
-│ Last Active       │ [👤 bob]  Today 10:45                        │
-│ ▸ PR #42          │ │  reviewing now                             │
-│   Deploy Issues   │ │                                            │
-│   Sprint Planning │ │  [🤖 ci-bot] 10:50                         │
+│   Feature Ideas   │                                              │
+│   Random          │ [👤 alice]  Today 10:30                      │
+│                   │ │  hey team                                  │
+│ Last Active       │                                              │
+│ ▸ PR #42          │ [👤 bob]  Today 10:45                        │
+│   Deploy Issues   │ │  reviewing now                             │
+│   Sprint Planning │ │                                            │
+│                   │ │  [🤖 ci-bot] 10:50                         │
 │                   │ │  │  automated comment:                      │
 │                   │ │  │  coverage dropped 2%                     │
 │                   │ │                                            │
@@ -390,5 +393,3 @@ This gives you the best of all worlds: dense information, clear sender identity,
 4. **Add relative timestamp formatting**
 5. **Create toggle for density modes**
 6. **Iterate based on real usage feedback**
-
-Would you like me to implement any of these layouts or dive deeper into specific features?

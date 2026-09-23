@@ -9,6 +9,7 @@
 **Tech Stack:** Go 1.22+, SQLite (modernc.org/sqlite), Bubble Tea v2, Lipgloss v2 table, net/http
 
 **Spec:** `docs/superpowers/specs/2026-09-23-inbox-preview-design.md`
+**Brainstorm:** `docs/superpowers/specs/2026-09-23-tui-brainstorm.md` (layout alternatives, gaps, visual enhancements)
 
 ## Global Constraints
 
