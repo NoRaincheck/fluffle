@@ -70,9 +70,9 @@ curl -s -X POST http://127.0.0.1:$PORT/api/shutdown | jq .
 
 **Why rich JSON?** `channel create --json` used to return `{"id":1}` only — now returns the full `Channel` (with `ID`, `Name`, `IsOrphaned`, `RepoAbsPath`, `CreatedAt`) so scripts can avoid a second fetch. Same for `thread new` (`id` + `title` + `channel`) and `message send` (`seq` + `thread_id` + `author` + `content` + `parent_id`). List commands already returned full arrays.
 
-## Interactive TUI — Simple 3-view stack (Channels → Threads → Messages)
+## Interactive TUI — Simple 3-view stack + preview (Roborev-inspired)
 
-Design is intentionally minimal (no split panes). One list at a time, `Esc` backs up the stack. Panic on width 0 fixed via `max(0, width)` guards.
+Design is minimal: one list at a time, `Esc` backs up the stack, `L` toggles preview panel (based on window size, ≥80 cols shows side-by-side). Preview shows the next screen for the highlighted item. Panic on width 0 fixed via `max(0, width)` guards. Compose box expands to full screen width.
 
 ### Start (isolated, copy-pasteable)
 
@@ -98,10 +98,11 @@ go run ./cmd/flf tui
 
 - [ ] **Channels view** (first screen): title `Channels  · last now` (or `01/02`), list shows `demo  (orphaned)  · now` and `repo-demo  [main]  repo  · 2h`. Each channel line shows its `CreatedAt` as last activity. Cursor `▸` follows `↑↓` / `j/k`. Status: "1 channels — ↑↓ nav · Enter open · n new thread · q quit". If empty, status hints `flf channel create --orphaned --name demo`. Header updates last event across all channels.
 - [ ] **Enter on channel** `demo`: switches to `Threads in #demo  · last now`, list shows `# hello  · now` (or "(no threads — press n)"). Each thread line shows its `CreatedAt`. Status: "#demo — 1 threads · ↑↓ nav · Enter open · n new · Esc back".
-- [ ] **Enter on thread** `# hello`: switches to `#demo › hello  · last now`, messages show `[now] alice: hi` (each message shows its own time) or "(no messages — press c to post, r to reply (appends to end))". Header's `· last now` is time of newest message. Status: "#demo › hello — 1 messages · ↑↓ nav · c/r post (appends) · Esc back".
-- [ ] **c (post)** in messages view: full-width modal `... › hello` (expands to screen width minus border) opens, type `first!`, `Enter` → status "sent", list refreshes with new line at end (`▸` on new message). Both `c` and `r` append to end — `r` is just an alias that makes it clear reply adds to end, not to a specific message.
-- [ ] **r (reply)** in messages view: press `r` → modal `Reply in #demo › hello — appends to end` (not "Reply to: …"), type `ack`, `Enter` → list appends to end with no per-message `↳` threading (reply just adds to end, plain list).
+- [ ] **Enter on thread** `# hello`: switches to `#demo › hello  · last now`, messages show `[now] alice: hi` (each message shows its own time) or "(no messages — press c to post)". Header's `· last now` is time of newest message. Status: "#demo › hello — 1 messages · ↑↓ nav · c post · Esc back".
+- [ ] **c (post)** in messages view: full-width modal `Reply in #demo › hello — appends to end` (expands to screen width minus border) opens, type `first!`, `Enter` → status "sent", list refreshes with new line at end (`▸` on new message). `c` always appends to end of thread — there is no per-message `r`; just `c` for comment. `Enter` in messages also posts.
 - [ ] **n (new thread)** in channels or threads view: with channel selected, press `n` → full-width modal "New thread in #demo" (expands), type `second topic`, `Enter` → thread list refreshes (now 2) with `· now` on new thread.
+- [ ] **L (layout)** toggle preview: on wide terminal (≥80 cols, auto-on at ≥100 cols) press `L` to show/hide right preview panel. Preview shows next screen for highlighted item: in Channels, preview shows threads of highlighted channel; in Threads, preview shows messages of highlighted thread; in Messages, preview shows full content of highlighted message. Status shows "preview on — L to hide" / "preview off — L to show".
+- [ ] **Preview auto (window size)**: narrow (<80 cols) preview forced off (single pane); wide (≥80) respects `L` toggle; ≥100 cols auto-enables preview on start. Resize triggers preview fetch for new cursor.
 - [ ] **Esc back**: from messages → threads; again → channels. Each Esc resets cursor to 0 and clears selection.
 - [ ] **q / ctrl+c**: quit, returns to shell.
 

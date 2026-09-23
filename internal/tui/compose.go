@@ -176,6 +176,18 @@ type messagesFetchedMsg struct {
 	err      error
 }
 
+type previewThreadsFetchedMsg struct {
+	channelID int64
+	threads   []store.Thread
+	err       error
+}
+
+type previewMessagesFetchedMsg struct {
+	threadID int64
+	messages []store.Message
+	err      error
+}
+
 type composeSendMsg struct {
 	text    string
 	mode    composeMode
