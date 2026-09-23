@@ -86,7 +86,6 @@ func Open(path string) (*Store, error) {
 func migrate(db *sql.DB, schema string) error {
 	rows, err := db.Query(`PRAGMA table_info(messages)`)
 	if err != nil {
-		// Table doesn't exist yet; just create
 		_, err := db.Exec(schema)
 		return err
 	}
@@ -107,11 +106,9 @@ func migrate(db *sql.DB, schema string) error {
 	}
 	rows.Close()
 	if found {
-		// Schema is up to date; just create any missing tables
 		_, err := db.Exec(schema)
 		return err
 	}
-	// parent_id missing: drop all tables and recreate with new schema
 	for _, tbl := range []string{"reactions", "messages", "threads", "channels"} {
 		db.Exec("DROP TABLE IF EXISTS " + tbl)
 	}
