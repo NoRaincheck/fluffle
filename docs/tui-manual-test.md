@@ -96,12 +96,12 @@ go run ./cmd/flf tui
 
 ### Navigation (human checklist)
 
-- [ ] **Channels view** (first screen): title `Channels`, list shows `demo  (orphaned)` and `repo-demo  [main]  repo`. Cursor `▸` follows `↑↓` / `j/k`. Status: "1 channels — ↑↓ nav · Enter open · n new thread · q quit". If empty, status hints `flf channel create --orphaned --name demo`.
-- [ ] **Enter on channel** `demo`: switches to `Threads in #demo`, list shows `# hello` (or "(no threads — press n)"). Status: "#demo — 1 threads · ↑↓ nav · Enter open · n new · Esc back".
-- [ ] **Enter on thread** `# hello`: switches to `#demo › hello`, messages show `[now] alice: hi` or "(no messages — press c)". Status: "#demo › hello — 1 messages · ↑↓ nav · c post · r reply · Esc back".
-- [ ] **c (post)** in messages view: modal `... › hello` opens, type `first!`, `Enter` → status "sent", list refreshes with new line (selected `▸`).
-- [ ] **r (reply)**: with a message selected (`▸`), press `r` → modal `Reply to: first!`, type `ack`, `Enter` → list shows ` ↳` indicator on reply.
-- [ ] **n (new thread)** in channels or threads view: with channel selected, press `n` → modal "New thread in #demo", type `second topic`, `Enter` → thread list refreshes (now 2).
+- [ ] **Channels view** (first screen): title `Channels  · last now` (or `01/02`), list shows `demo  (orphaned)  · now` and `repo-demo  [main]  repo  · 2h`. Each channel line shows its `CreatedAt` as last activity. Cursor `▸` follows `↑↓` / `j/k`. Status: "1 channels — ↑↓ nav · Enter open · n new thread · q quit". If empty, status hints `flf channel create --orphaned --name demo`. Header updates last event across all channels.
+- [ ] **Enter on channel** `demo`: switches to `Threads in #demo  · last now`, list shows `# hello  · now` (or "(no threads — press n)"). Each thread line shows its `CreatedAt`. Status: "#demo — 1 threads · ↑↓ nav · Enter open · n new · Esc back".
+- [ ] **Enter on thread** `# hello`: switches to `#demo › hello  · last now`, messages show `[now] alice: hi` (each message shows its own time) or "(no messages — press c to post, r to reply (appends to end))". Header's `· last now` is time of newest message. Status: "#demo › hello — 1 messages · ↑↓ nav · c/r post (appends) · Esc back".
+- [ ] **c (post)** in messages view: full-width modal `... › hello` (expands to screen width minus border) opens, type `first!`, `Enter` → status "sent", list refreshes with new line at end (`▸` on new message). Both `c` and `r` append to end — `r` is just an alias that makes it clear reply adds to end, not to a specific message.
+- [ ] **r (reply)** in messages view: press `r` → modal `Reply in #demo › hello — appends to end` (not "Reply to: …"), type `ack`, `Enter` → list appends to end with no per-message `↳` threading (reply just adds to end, plain list).
+- [ ] **n (new thread)** in channels or threads view: with channel selected, press `n` → full-width modal "New thread in #demo" (expands), type `second topic`, `Enter` → thread list refreshes (now 2) with `· now` on new thread.
 - [ ] **Esc back**: from messages → threads; again → channels. Each Esc resets cursor to 0 and clears selection.
 - [ ] **q / ctrl+c**: quit, returns to shell.
 

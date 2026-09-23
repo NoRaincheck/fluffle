@@ -149,7 +149,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.compose.width = msg.Width
+		m.compose.width = max(30, msg.Width-4)
 		m.compose.height = msg.Height/2 - 2
 		if m.compose.height < 5 {
 			m.compose.height = 5
@@ -322,16 +322,20 @@ func (m *model) handlePost() (tea.Model, tea.Cmd) {
 }
 
 func (m *model) handleReply() (tea.Model, tea.Cmd) {
-	if m.view != viewMessages || len(m.messages) == 0 {
+	if m.view != viewMessages {
 		return m.handlePost()
 	}
-	if m.cursor < 0 || m.cursor >= len(m.messages) {
+	if m.selectedThread == nil {
+		m.status = "no thread — Esc back, n new thread"
 		return m, nil
 	}
-	msgItem := m.messages[m.cursor]
-	m.compose.Open(composeModeReply, "Reply to: "+truncate(msgItem.Content, 40), m.height)
-	m.compose.state.threadID = msgItem.ThreadID
-	m.compose.state.parentID = msgItem.ID
+	chName := ""
+	if m.selectedChannel != nil {
+		chName = m.selectedChannel.Name
+	}
+	m.compose.Open(composeModeMessage, fmt.Sprintf("Reply in #%s › %s — appends to end", chName, m.selectedThread.Title), m.height)
+	m.compose.state.threadID = m.selectedThread.ID
+	m.compose.state.parentID = 0
 	return m, nil
 }
 
@@ -412,7 +416,12 @@ func (m model) renderList() string {
 	var items []string
 	switch m.view {
 	case viewChannels:
-		title = "Channels"
+		last := latestChannelTime(m.channels)
+		lastStr := ""
+		if last != "" {
+			lastStr = fmt.Sprintf("  · last %s", formatTime(last))
+		}
+		title = "Channels" + lastStr
 		if len(m.channels) == 0 {
 			items = []string{"  (no channels — press n after selecting, or run: flf channel create --orphaned --name demo)"}
 		} else {
@@ -436,6 +445,7 @@ func (m model) renderList() string {
 						label += fmt.Sprintf("  %s", short)
 					}
 				}
+				label += fmt.Sprintf("  · %s", formatTime(ch.CreatedAt))
 				line := prefix + label
 				if i == m.cursor {
 					line = treeItemSelectedStyle.Render(line)
@@ -450,7 +460,12 @@ func (m model) renderList() string {
 		if m.selectedChannel != nil {
 			chName = m.selectedChannel.Name
 		}
-		title = fmt.Sprintf("Threads in #%s", chName)
+		last := latestThreadTime(m.threads)
+		lastStr := ""
+		if last != "" {
+			lastStr = fmt.Sprintf("  · last %s", formatTime(last))
+		}
+		title = fmt.Sprintf("Threads in #%s%s", chName, lastStr)
 		if len(m.threads) == 0 {
 			items = []string{"  (no threads — press n to create)"}
 		} else {
@@ -459,7 +474,7 @@ func (m model) renderList() string {
 				if i == m.cursor {
 					prefix = "▸ "
 				}
-				line := prefix + fmt.Sprintf("# %s", th.Title)
+				line := prefix + fmt.Sprintf("# %s  · %s", th.Title, formatTime(th.CreatedAt))
 				if i == m.cursor {
 					line = treeItemSelectedStyle.Render(line)
 				} else {
@@ -477,9 +492,14 @@ func (m model) renderList() string {
 		if m.selectedThread != nil {
 			thName = m.selectedThread.Title
 		}
-		title = fmt.Sprintf("#%s › %s", chName, thName)
+		last := latestMessageTime(m.messages)
+		lastStr := ""
+		if last != "" {
+			lastStr = fmt.Sprintf("  · last %s", formatTime(last))
+		}
+		title = fmt.Sprintf("#%s › %s%s", chName, thName, lastStr)
 		if len(m.messages) == 0 {
-			items = []string{"  (no messages — press c to post)"}
+			items = []string{"  (no messages — press c to post, r to reply (appends to end))"}
 		} else {
 			for i, msg := range m.messages {
 				prefix := "  "
@@ -529,7 +549,7 @@ func (m model) helpView() string {
 	case viewThreads:
 		parts = []string{hintKeyStyle.Render("↑↓") + " nav", hintKeyStyle.Render("Enter") + " open", hintKeyStyle.Render("n") + " new thread", hintKeyStyle.Render("Esc") + " back", hintKeyStyle.Render("q") + " quit"}
 	case viewMessages:
-		parts = []string{hintKeyStyle.Render("↑↓") + " nav", hintKeyStyle.Render("c") + " post", hintKeyStyle.Render("r") + " reply", hintKeyStyle.Render("Esc") + " back", hintKeyStyle.Render("q") + " quit"}
+		parts = []string{hintKeyStyle.Render("↑↓") + " nav", hintKeyStyle.Render("c/r") + " post (appends)", hintKeyStyle.Render("Esc") + " back", hintKeyStyle.Render("q") + " quit"}
 	}
 	return hintStyle.Render(strings.Join(parts, "  "))
 }
@@ -591,4 +611,46 @@ func formatTime(t string) string {
 		return fmt.Sprintf("%dh", int(diff.Hours()))
 	}
 	return parsed.Format("01/02")
+}
+
+func latestChannelTime(channels []store.Channel) string {
+	var latest time.Time
+	var out string
+	for _, ch := range channels {
+		if t, err := time.Parse(time.RFC3339, ch.CreatedAt); err == nil {
+			if t.After(latest) {
+				latest = t
+				out = ch.CreatedAt
+			}
+		}
+	}
+	return out
+}
+
+func latestThreadTime(threads []store.Thread) string {
+	var latest time.Time
+	var out string
+	for _, th := range threads {
+		if t, err := time.Parse(time.RFC3339, th.CreatedAt); err == nil {
+			if t.After(latest) {
+				latest = t
+				out = th.CreatedAt
+			}
+		}
+	}
+	return out
+}
+
+func latestMessageTime(msgs []store.Message) string {
+	var latest time.Time
+	var out string
+	for _, m := range msgs {
+		if t, err := time.Parse(time.RFC3339, m.CreatedAt); err == nil {
+			if t.After(latest) {
+				latest = t
+				out = m.CreatedAt
+			}
+		}
+	}
+	return out
 }

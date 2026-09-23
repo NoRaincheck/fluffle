@@ -45,7 +45,9 @@ func (m *composeModel) Open(mode composeMode, context string, maxH int) {
 		cursor:  0,
 		error:   "",
 	}
-	m.width = 60
+	if m.width < 30 {
+		m.width = 60
+	}
 	// Minimum 5 lines (header + input + error/hint + padding), scale up to available space
 	m.height = 5
 	if maxH > 5 {
