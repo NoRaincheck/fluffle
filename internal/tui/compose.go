@@ -12,6 +12,7 @@ type composeMode int
 const (
 	composeModeMessage composeMode = iota
 	composeModeReply
+	composeModeNewThread
 )
 
 type composeState struct {
@@ -137,6 +138,8 @@ func (m composeModel) View() string {
 		lines = append(lines, modalHintStyle.Render("Enter to send, Esc to cancel"))
 	case composeModeReply:
 		lines = append(lines, modalHintStyle.Render("Enter to reply, Esc to cancel"))
+	case composeModeNewThread:
+		lines = append(lines, modalHintStyle.Render("Enter to create thread, Esc to cancel"))
 	}
 
 	// Pad to height
@@ -175,6 +178,13 @@ type composeSendMsg struct {
 	text    string
 	mode    composeMode
 	context string
+}
+
+type threadCreatedMsg struct {
+	channelID int64
+	threadID  int64
+	title     string
+	err       error
 }
 
 func (m *composeModel) SetError(err string) {

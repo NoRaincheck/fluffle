@@ -133,14 +133,11 @@ func sortChannels(channels []store.Channel, sortBy treeSort) []store.Channel {
 }
 
 func (m *treeModel) filterAndSort(channels []store.Channel) []treeItem {
-	// Apply filter
 	if m.filter != "" {
 		channels = filterChannels(channels, m.filter)
 	}
-	// Apply sort
 	channels = sortChannels(channels, m.sortBy)
-	// Rebuild tree
-	return buildTree(channels)
+	return buildTree(channels, m.threadsByChannel, m.channelExpanded)
 }
 
 func truncate(s string, maxLen int) string {

@@ -920,3 +920,88 @@ func TestE2E_ChannelCreateValidation(t *testing.T) {
 	// HTTP shutdown
 	_, _ = http.Post("http://127.0.0.1:"+strconv.Itoa(port)+"/api/shutdown", "application/json", nil)
 }
+
+// TestE2E_ThreadReply exercises orphan channel thread + message + reply via --json and --reply-to.
+func TestE2E_ThreadReply(t *testing.T) {
+	tmpDir := t.TempDir()
+	home := filepath.Join(tmpDir, "fluffle")
+	bin := buildTestBinary(t, tmpDir)
+
+	env := []string{"FLUFFLE_HOME=" + home}
+	cmd := startDaemon(t, bin, home)
+	_ = cmd
+
+	port := waitForDaemonReady(t, home, 10*time.Second)
+	_ = port
+
+	// Orphan channel + thread
+	out := runCLI(t, env, bin, "channel", "create", "--name", "reply-demo", "--orphaned", "--json")
+	var ch struct{ ID int64 `json:"id"` }
+	if err := json.Unmarshal([]byte(out), &ch); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, out)
+	}
+	out = runCLI(t, env, bin, "thread", "new", "--channel", "reply-demo", "--orphaned", "--title", "topic", "--json")
+	var th struct{ ID int64 `json:"id"` }
+	if err := json.Unmarshal([]byte(out), &th); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, out)
+	}
+	tid := strconv.FormatInt(th.ID, 10)
+
+	// Parent message
+	out = runCLI(t, env, bin, "message", "send", "--thread", tid, "--text", "parent", "--as", "alice", "--json")
+	var m1 struct{ Seq int64 `json:"seq"` }
+	if err := json.Unmarshal([]byte(out), &m1); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, out)
+	}
+	if m1.Seq != 1 {
+		t.Fatalf("want seq 1 got %d", m1.Seq)
+	}
+
+	// Need parent message ID (not seq) for reply — fetch via HTTP
+	resp, err := http.Get("http://127.0.0.1:" + strconv.Itoa(port) + "/v1/threads/" + tid + "/messages")
+	if err != nil {
+		t.Fatalf("fetch messages: %v", err)
+	}
+	var msgs []struct {
+		ID int64 `json:"ID"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&msgs); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	resp.Body.Close()
+	if len(msgs) != 1 {
+		t.Fatalf("want 1 msg got %d", len(msgs))
+	}
+	parentID := strconv.FormatInt(msgs[0].ID, 10)
+
+	// Reply
+	out = runCLI(t, env, bin, "message", "send", "--thread", tid, "--text", "child reply", "--as", "bob", "--reply-to", parentID, "--json")
+	var m2 struct{ Seq int64 `json:"seq"` }
+	if err := json.Unmarshal([]byte(out), &m2); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, out)
+	}
+	if m2.Seq != 2 {
+		t.Fatalf("want seq 2 got %d", m2.Seq)
+	}
+
+	// Verify via HTTP that second message has parent
+	resp, err = http.Get("http://127.0.0.1:" + strconv.Itoa(port) + "/v1/threads/" + tid + "/messages")
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	defer resp.Body.Close()
+	var full []struct {
+		ParentID struct {
+			Int64 int64 `json:"Int64"`
+			Valid bool  `json:"Valid"`
+		} `json:"ParentID"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&full); err != nil {
+		t.Fatalf("decode full: %v", err)
+	}
+	if len(full) != 2 || !full[1].ParentID.Valid || full[1].ParentID.Int64 == 0 {
+		t.Fatalf("want reply with parent, got %+v", full)
+	}
+
+	_, _ = http.Post("http://127.0.0.1:"+strconv.Itoa(port)+"/api/shutdown", "application/json", nil)
+}

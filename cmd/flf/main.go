@@ -29,6 +29,9 @@ func main() { os.Exit(run(os.Args[1:])) }
 func run(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: flf <daemon|init|channel|thread|message|react|agent|tui>")
+		fmt.Fprintln(os.Stderr, "  Channel: repo-anchored or --orphaned room (e.g. general)")
+		fmt.Fprintln(os.Stderr, "  Thread: titled conversation inside a channel")
+		fmt.Fprintln(os.Stderr, "  Message: chat line inside a thread (use --thread ID)")
 		return 1
 	}
 	switch args[0] {
@@ -166,6 +169,7 @@ func initCmd(args []string) int {
 func channelCmd(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: flf channel <list|create>")
+		fmt.Fprintln(os.Stderr, "  Channel: repo-anchored room or --orphaned (no git)")
 		return 1
 	}
 	switch args[0] {
@@ -311,14 +315,19 @@ func threadCmd(args []string) int {
 	}
 }
 
-func resolveChannelID(base, abs, name string) (int64, int) {
+func resolveChannelID(base, abs, name string, orphaned bool) (int64, int) {
 	var list []store.Channel
-	u := base + "/v1/channels?repo=" + url.QueryEscape(abs)
+	var u string
+	if orphaned {
+		u = base + "/v1/channels?include-orphaned=1"
+	} else {
+		u = base + "/v1/channels?repo=" + url.QueryEscape(abs)
+	}
 	if code := apiGet(u, "", &list); code != 0 {
 		return 0, code
 	}
 	for _, c := range list {
-		if c.Name == name {
+		if c.Name == name && c.IsOrphaned == orphaned {
 			return c.ID, 0
 		}
 	}
@@ -326,38 +335,51 @@ func resolveChannelID(base, abs, name string) (int64, int) {
 	return 0, 1
 }
 
+func resolveChannelIDLegacy(base, abs, name string) (int64, int) {
+	return resolveChannelID(base, abs, name, false)
+}
+
 func threadListCmd(args []string) int {
 	fs := flag.NewFlagSet("thread list", flag.ContinueOnError)
 	channel := fs.String("channel", "", "channel name")
 	repoPath := fs.String("repo", "", "repo path (default: cwd)")
+	orphaned := fs.Bool("orphaned", false, "list threads in orphaned channel")
 	jsonOut := fs.Bool("json", false, "JSON output")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
 	if *channel == "" {
-		fmt.Fprintln(os.Stderr, "usage: flf thread list --channel NAME [--repo PATH]")
+		fmt.Fprintln(os.Stderr, "usage: flf thread list --channel NAME [--repo PATH | --orphaned] [--json]")
 		return 1
 	}
-	abs := *repoPath
-	if abs == "" {
+	if *orphaned && *repoPath != "" {
+		fmt.Fprintln(os.Stderr, "usage: flf thread list --channel NAME [--repo PATH | --orphaned]")
+		return 1
+	}
+	var abs string
+	if !*orphaned {
+		abs = *repoPath
+		if abs == "" {
+			var err error
+			abs, err = os.Getwd()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "CWD_ERROR:", err)
+				return 1
+			}
+		}
 		var err error
-		abs, err = os.Getwd()
+		abs, err = repo.Canonicalize(abs)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "CWD_ERROR:", err)
+			fmt.Fprintf(os.Stderr, "NOT_A_GIT_REPO: %s\n", abs)
 			return 1
 		}
-	}
-	abs, err := repo.Canonicalize(abs)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "NOT_A_GIT_REPO: %s\n", abs)
-		return 1
 	}
 	base, err := client.EnsureDaemon()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
 		return 2
 	}
-	id, code := resolveChannelID(base, abs, *channel)
+	id, code := resolveChannelID(base, abs, *channel, *orphaned)
 	if code != 0 {
 		return code
 	}
@@ -384,35 +406,44 @@ func threadNewCmd(args []string) int {
 	fs := flag.NewFlagSet("thread new", flag.ContinueOnError)
 	channel := fs.String("channel", "", "channel name")
 	repoPath := fs.String("repo", "", "repo path (default: cwd)")
+	orphaned := fs.Bool("orphaned", false, "create thread in orphaned channel")
 	title := fs.String("title", "", "thread title")
 	jsonOut := fs.Bool("json", false, "JSON output")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
 	if *channel == "" || *title == "" {
-		fmt.Fprintln(os.Stderr, "usage: flf thread new --channel NAME --title T [--repo PATH]")
+		fmt.Fprintln(os.Stderr, "usage: flf thread new --channel NAME --title T [--repo PATH | --orphaned] [--json]")
 		return 1
 	}
-	abs := *repoPath
-	if abs == "" {
+	if *orphaned && *repoPath != "" {
+		fmt.Fprintln(os.Stderr, "usage: flf thread new --channel NAME --title T [--repo PATH | --orphaned]")
+		return 1
+	}
+	var abs string
+	if !*orphaned {
+		abs = *repoPath
+		if abs == "" {
+			var err error
+			abs, err = os.Getwd()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "CWD_ERROR:", err)
+				return 1
+			}
+		}
 		var err error
-		abs, err = os.Getwd()
+		abs, err = repo.Canonicalize(abs)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "CWD_ERROR:", err)
+			fmt.Fprintf(os.Stderr, "NOT_A_GIT_REPO: %s\n", abs)
 			return 1
 		}
-	}
-	abs, err := repo.Canonicalize(abs)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "NOT_A_GIT_REPO: %s\n", abs)
-		return 1
 	}
 	base, err := client.EnsureDaemon()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
 		return 2
 	}
-	id, code := resolveChannelID(base, abs, *channel)
+	id, code := resolveChannelID(base, abs, *channel, *orphaned)
 	if code != 0 {
 		return code
 	}
@@ -702,12 +733,13 @@ func messageSendCmd(args []string) int {
 	text := fs.String("text", "", "message text")
 	as := fs.String("as", "", "author name (default $USER)")
 	agentID := fs.String("agent-id", "", "agent id")
+	replyTo := fs.Int64("reply-to", 0, "parent message id for threaded reply")
 	jsonOut := fs.Bool("json", false, "JSON output")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
 	if *threadID == 0 || *text == "" {
-		fmt.Fprintln(os.Stderr, "usage: flf message send --thread ID --text T [--as NAME] [--agent-id ID]")
+		fmt.Fprintln(os.Stderr, "usage: flf message send --thread ID --text T [--as NAME] [--agent-id ID] [--reply-to ID] [--json]")
 		return 1
 	}
 	base, err := client.EnsureDaemon()
@@ -717,6 +749,9 @@ func messageSendCmd(args []string) int {
 	}
 	author := defaultAuthor(*as)
 	body := map[string]any{"Author": author, "Role": "user", "Content": *text, "AgentID": *agentID}
+	if *replyTo != 0 {
+		body["ParentID"] = *replyTo
+	}
 	var out struct {
 		Seq int64 `json:"seq"`
 	}

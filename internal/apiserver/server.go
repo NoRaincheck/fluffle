@@ -168,12 +168,30 @@ func NewHandler(s *store.Store) http.Handler {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(msgs)
 		case "POST":
-			var body struct {
-				Author, Role, Content, AgentID, CreatedAt string
-			}
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			var raw map[string]json.RawMessage
+			if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 				writeErr(w, 400, "BAD_JSONL", err.Error())
 				return
+			}
+			var body struct {
+				Author, Role, Content, AgentID, CreatedAt string
+				ParentID                                  int64
+			}
+			for k, v := range raw {
+				switch k {
+				case "Author", "author":
+					json.Unmarshal(v, &body.Author)
+				case "Role", "role":
+					json.Unmarshal(v, &body.Role)
+				case "Content", "content":
+					json.Unmarshal(v, &body.Content)
+				case "AgentID", "agent_id":
+					json.Unmarshal(v, &body.AgentID)
+				case "CreatedAt", "created_at":
+					json.Unmarshal(v, &body.CreatedAt)
+				case "ParentID", "parent_id", "parentId":
+					json.Unmarshal(v, &body.ParentID)
+				}
 			}
 			authorType := "human"
 			if body.AgentID != "" || isAgent(r) {
@@ -189,7 +207,9 @@ func NewHandler(s *store.Store) http.Handler {
 			var seq int64
 			var err error
 			if body.CreatedAt != "" {
-				seq, err = s.AppendMessageAt(id, author, authorType, body.Role, body.Content, body.CreatedAt)
+				seq, err = s.AppendMessageAtWithParent(id, author, authorType, body.Role, body.Content, body.CreatedAt, body.ParentID)
+			} else if body.ParentID != 0 {
+				seq, err = s.AppendMessageWithParent(id, author, authorType, body.Role, body.Content, body.ParentID)
 			} else {
 				seq, err = s.AppendMessage(id, author, authorType, body.Role, body.Content)
 			}
