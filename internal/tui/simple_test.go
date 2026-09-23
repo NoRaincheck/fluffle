@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -114,5 +116,36 @@ func TestInboxFlow(t *testing.T) {
 	}
 	if m.compose.state.threadID != 11 {
 		t.Fatalf("threadID %d", m.compose.state.threadID)
+	}
+}
+
+func TestAdaptivePreviewTruncation(t *testing.T) {
+	m := toModel(New("http://127.0.0.1:0"))
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+	m = toModel(nm)
+	long := strings.Repeat("line\n", 20)
+	inbox := []store.InboxMessage{{Message: store.Message{ID: 1, ThreadID: 10, Content: long, Author: "alice", AuthorType: "human", CreatedAt: "2026-09-23T10:00:00Z"}, ChannelName: "general", ThreadTitle: "hello"}}
+	previewMsgs := make([]store.Message, 10)
+	for i := 0; i < 10; i++ {
+		previewMsgs[i] = store.Message{ID: int64(2 + i), ThreadID: 10, Seq: int64(2 + i), Author: "bob", Content: fmt.Sprintf("reply %d", i), CreatedAt: "2026-09-23T11:00:00Z"}
+	}
+	nm, _ = m.Update(inboxFetchedMsg{inbox: inbox})
+	m = toModel(nm)
+	nm, _ = m.Update(previewMessagesFetchedMsg{threadID: 10, messages: previewMsgs})
+	m = toModel(nm)
+	m.preview = true
+	m.width = 120
+	m.height = 24
+	m.cursor = 0
+	rendered := m.renderPreview(50)
+	if !strings.Contains(rendered, "(+") {
+		t.Fatalf("expected truncation marker, got %q", rendered)
+	}
+	if strings.Count(rendered, "reply") > 5 {
+		t.Fatalf("should show at most 5 replies")
+	}
+	tbl := m.renderInboxWithWidth(100)
+	if !strings.Contains(tbl, "CHANNEL") || !strings.Contains(tbl, "CONTENT") {
+		t.Fatalf("header missing %q", tbl)
 	}
 }

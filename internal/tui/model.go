@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"charm.land/lipgloss/v2/table"
 
 	"github.com/NoRaincheck/fluffle/internal/store"
 )
@@ -461,6 +462,15 @@ func (m *model) maybeFetchPreview() tea.Cmd {
 		return nil
 	}
 	switch m.view {
+	case viewInbox:
+		if len(m.inbox) == 0 || m.cursor < 0 || m.cursor >= len(m.inbox) {
+			return nil
+		}
+		im := m.inbox[m.cursor]
+		if im.ThreadID == m.previewThreadID {
+			return nil
+		}
+		return m.fetchPreviewMessages(im.ThreadID)
 	case viewChannels:
 		if len(m.channels) == 0 || m.cursor < 0 || m.cursor >= len(m.channels) {
 			return nil
@@ -729,11 +739,11 @@ func (m model) renderInboxWithWidth(w int) string {
 	if h < 5 {
 		h = 5
 	}
-	title := "Inbox"
+	title := fmt.Sprintf("Inbox — %d messages", len(m.inbox))
 	if len(m.inbox) == 0 {
 		header := chatHeaderStyle.Render(title)
 		sep := chatHeaderStyle.Render(strings.Repeat("─", min(max(0, w-4), 60)))
-		lines := []string{header, sep, "  (no messages — inbox empty)"}
+		lines := []string{header, sep, "  (no messages — press n for new thread)"}
 		for len(lines) < h {
 			lines = append(lines, "")
 		}
@@ -742,23 +752,40 @@ func (m model) renderInboxWithWidth(w int) string {
 		}
 		return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(treeBorder).Padding(0, 1).Width(max(20, w-4)).Render(strings.Join(lines, "\n"))
 	}
-	items := make([]string, 0, len(m.inbox))
+	timeW := 8
+	chanW := 12
+	threadW := 16
+	senderW := 12
+	contentW := max(minContentWidth, w-timeW-chanW-threadW-senderW-14)
+	rows := make([][]string, 0, len(m.inbox))
 	for i, im := range m.inbox {
 		prefix := "  "
 		if i == m.cursor {
 			prefix = "▸ "
 		}
-		tStr := formatTime(im.CreatedAt)
-		author := truncate(im.Author, 12)
-		excerpt := truncate(strings.ReplaceAll(im.Content, "\n", " "), max(10, w-40))
-		line := fmt.Sprintf("%s[%s] %s @#%s › %s: %s", prefix, tStr, author, im.ChannelName, im.ThreadTitle, excerpt)
-		if i == m.cursor {
-			line = chatMsgSelectedStyle.Render(line)
-		} else {
-			line = chatMsgStyle.Render(line)
-		}
-		items = append(items, line)
+		tStr := fmt.Sprintf("%*s", timeW, formatTime(im.CreatedAt))
+		chanS := truncate(im.ChannelName, chanW)
+		thrS := truncate(im.ThreadTitle, threadW)
+		author := truncate(im.Author, senderW)
+		content := truncate(strings.ReplaceAll(im.Content, "\n", " "), contentW)
+		rows = append(rows, []string{prefix + tStr, chanS, thrS, author, content})
 	}
+	tbl := table.New().BorderTop(false).BorderBottom(false).BorderLeft(false).BorderRight(false).BorderColumn(false).BorderRow(false).BorderHeader(true).Border(lipgloss.Border{Top: "─", Bottom: "─", Middle: "─"}).Width(w).Wrap(false).Headers("TIME", "CHANNEL", "THREAD", "SENDER", "CONTENT").Rows(rows...).StyleFunc(func(row, col int) lipgloss.Style {
+		if row == table.HeaderRow {
+			return lipgloss.NewStyle().Foreground(chatHeaderFg).Bold(true)
+		}
+		if col == 3 {
+			idx := row
+			if idx >= 0 && idx < len(m.inbox) {
+				return getAuthorStyle(m.inbox[idx].AuthorType)
+			}
+		}
+		if row == m.cursor {
+			return chatMsgSelectedStyle
+		}
+		return chatMsgStyle
+	})
+	items := []string{tbl.String()}
 	header := chatHeaderStyle.Render(title)
 	sep := chatHeaderStyle.Render(strings.Repeat("─", min(max(0, w-4), 60)))
 	lines := []string{header, sep}
@@ -786,9 +813,45 @@ func (m model) renderPreview(w int) string {
 			items = []string{"  (no message)"}
 		} else {
 			im := m.inbox[m.cursor]
-			title = fmt.Sprintf("Preview: %s @#%s", truncate(im.Author, 20), im.ChannelName)
-			full := truncate(strings.ReplaceAll(im.Content, "\n", " "), w-4)
-			items = []string{chatMsgStyle.Render("  " + full), "", chatMsgStyle.Render(fmt.Sprintf("  · %s  · %s › %s", formatTime(im.CreatedAt), im.ChannelName, im.ThreadTitle))}
+			title = fmt.Sprintf("Preview: #%s › %s · %s", im.ChannelName, im.ThreadTitle, truncate(im.Author, 20))
+			hPreview := m.height - 4
+			if hPreview < 5 {
+				hPreview = 5
+			}
+			hAvail := hPreview - 4
+			Y := hAvail - 5*2 - 2
+			if Y < 3 {
+				Y = 3
+			}
+			if Y > 20 {
+				Y = 20
+			}
+			split := strings.Split(im.Content, "\n")
+			display := split
+			remaining := 0
+			truncated := false
+			if len(split) > Y {
+				display = split[:Y]
+				remaining = len(split) - Y
+				truncated = true
+			}
+			for _, l := range display {
+				items = append(items, chatMsgStyle.Render("  "+truncate(l, max(minContentWidth, w-4))))
+			}
+			if truncated {
+				items = append(items, chatMsgStyle.Render(fmt.Sprintf("  ... (+%d lines)", remaining)))
+			}
+			items = append(items, chatMsgStyle.Render(strings.Repeat("─", min(w-4, 40))))
+			replies := lastNPreviewMessages(m.previewMessages, im.ThreadID, im.Seq, 5)
+			if len(replies) == 0 {
+				items = append(items, chatMsgStyle.Render("  (no replies)"))
+			} else {
+				for _, r := range replies {
+					line := fmt.Sprintf("  [%s] %s: %s", formatTime(r.CreatedAt), truncate(r.Author, 12), truncate(r.Content, max(minContentWidth, w-20)))
+					items = append(items, chatMsgStyle.Render(line))
+				}
+			}
+			items = append(items, chatMsgStyle.Render(fmt.Sprintf("  · %s  · %s › %s", formatTime(im.CreatedAt), im.ChannelName, im.ThreadTitle)))
 		}
 	case viewChannels:
 		if len(m.channels) == 0 || m.cursor < 0 || m.cursor >= len(m.channels) {
@@ -863,6 +926,33 @@ func (m model) renderPreview(w int) string {
 	return box
 }
 
+func lastNPreviewMessages(msgs []store.Message, threadID int64, seq int64, n int) []store.Message {
+	var filtered []store.Message
+	for _, msg := range msgs {
+		if msg.ThreadID != threadID {
+			continue
+		}
+		if seq != 0 && msg.Seq <= seq {
+			continue
+		}
+		filtered = append(filtered, msg)
+	}
+	if len(filtered) == 0 {
+		for _, msg := range msgs {
+			if msg.ThreadID == threadID {
+				filtered = append(filtered, msg)
+			}
+		}
+		if len(filtered) == 0 {
+			return nil
+		}
+	}
+	if len(filtered) <= n {
+		return filtered
+	}
+	return filtered[len(filtered)-n:]
+}
+
 func (m model) helpView() string {
 	var parts []string
 	previewHint := hintKeyStyle.Render("L") + " preview"
@@ -871,7 +961,7 @@ func (m model) helpView() string {
 	}
 	switch m.view {
 	case viewInbox:
-		parts = []string{hintKeyStyle.Render("↑↓/j/k") + " nav", hintKeyStyle.Render("r") + " reply", previewHint, hintKeyStyle.Render("q") + " quit"}
+		parts = []string{hintKeyStyle.Render("↑↓/j/k") + " nav", hintKeyStyle.Render("r") + " reply", hintKeyStyle.Render("c") + " post", hintKeyStyle.Render("n") + " new thread", previewHint}
 	case viewChannels:
 		parts = []string{hintKeyStyle.Render("↑↓/j/k") + " nav", hintKeyStyle.Render("Enter") + " open", hintKeyStyle.Render("n") + " new thread", previewHint, hintKeyStyle.Render("q") + " quit"}
 	case viewThreads:
