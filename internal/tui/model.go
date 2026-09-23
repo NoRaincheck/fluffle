@@ -14,7 +14,8 @@ import (
 type viewKind int
 
 const (
-	viewChannels viewKind = iota
+	viewInbox viewKind = iota
+	viewChannels
 	viewThreads
 	viewMessages
 )
@@ -35,6 +36,7 @@ type model struct {
 	channels         []store.Channel
 	threads          []store.Thread
 	messages         []store.Message
+	inbox            []store.InboxMessage
 	selectedChannel  *store.Channel
 	selectedThread   *store.Thread
 	compose          composeModel
@@ -54,7 +56,19 @@ func New(base string) tea.Model {
 	return m
 }
 
-func (m model) Init() tea.Cmd { return m.fetchChannels() }
+func (m model) Init() tea.Cmd { return m.fetchInbox() }
+
+type inboxFetchedMsg struct {
+	inbox []store.InboxMessage
+	err   error
+}
+
+func (m *model) fetchInbox() tea.Cmd {
+	return func() tea.Msg {
+		msgs, err := m.api.ListInbox(nil, 100)
+		return inboxFetchedMsg{inbox: msgs, err: err}
+	}
+}
 
 func (m *model) fetchChannels() tea.Cmd {
 	return func() tea.Msg {
@@ -93,6 +107,20 @@ func (m *model) fetchPreviewMessages(threadID int64) tea.Cmd {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case inboxFetchedMsg:
+		if msg.err != nil {
+			m.status = fmt.Sprintf("error: %v", msg.err)
+			return m, nil
+		}
+		m.inbox = msg.inbox
+		m.cursor = 0
+		m.view = viewInbox
+		if len(msg.inbox) == 0 {
+			m.status = "inbox — no messages · q quit"
+		} else {
+			m.status = fmt.Sprintf("inbox — %d messages · ↑↓/j/k nav · r reply · q quit", len(msg.inbox))
+		}
+		return m, m.maybeFetchPreview()
 	case channelsFetchedMsg:
 		if msg.err != nil {
 			m.status = fmt.Sprintf("error: %v", msg.err)
@@ -240,6 +268,8 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyDown:
 		max := 0
 		switch m.view {
+		case viewInbox:
+			max = len(m.inbox) - 1
 		case viewChannels:
 			max = len(m.channels) - 1
 		case viewThreads:
@@ -307,6 +337,8 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "j":
 		max := 0
 		switch m.view {
+		case viewInbox:
+			max = len(m.inbox) - 1
 		case viewChannels:
 			max = len(m.channels) - 1
 		case viewThreads:
@@ -322,6 +354,8 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleNewThread()
 	case "c":
 		return m.handlePost()
+	case "r":
+		return m.handleInboxReply()
 	case "L":
 		m.preview = !m.preview
 		if m.preview {
@@ -403,6 +437,21 @@ func (m *model) handleReply() (tea.Model, tea.Cmd) {
 	}
 	m.compose.Open(composeModeMessage, fmt.Sprintf("Reply in #%s › %s — appends to end", chName, m.selectedThread.Title), m.height)
 	m.compose.state.threadID = m.selectedThread.ID
+	m.compose.state.parentID = 0
+	return m, nil
+}
+
+func (m *model) handleInboxReply() (tea.Model, tea.Cmd) {
+	if m.view != viewInbox {
+		return m.handleReply()
+	}
+	if len(m.inbox) == 0 || m.cursor < 0 || m.cursor >= len(m.inbox) {
+		m.status = "no message — inbox empty"
+		return m, nil
+	}
+	im := m.inbox[m.cursor]
+	m.compose.Open(composeModeMessage, fmt.Sprintf("Reply in #%s › %s", im.ChannelName, im.ThreadTitle), m.height)
+	m.compose.state.threadID = im.ThreadID
 	m.compose.state.parentID = 0
 	return m, nil
 }
@@ -533,6 +582,8 @@ func (m model) renderListWithWidth(w int) string {
 	var title string
 	var items []string
 	switch m.view {
+	case viewInbox:
+		return m.renderInboxWithWidth(w)
 	case viewChannels:
 		last := latestChannelTime(m.channels)
 		lastStr := ""
@@ -622,30 +673,30 @@ func (m model) renderListWithWidth(w int) string {
 			// Table-style layout with responsive column widths
 			timeWidth := 8
 			senderWidth := 15
-			
+
 			// Calculate content width based on terminal width
 			contentWidth := max(minContentWidth, w-timeWidth-senderWidth-10)
-			
+
 			for i, msg := range m.messages {
 				prefix := "  "
 				if i == m.cursor {
 					prefix = "▸ "
 				}
-				
+
 				tStr := formatTime(msg.CreatedAt)
 				// Right-align time in fixed width
 				tStr = fmt.Sprintf("%*s", timeWidth, tStr)
-				
+
 				// Color-code author by type
 				authorStyle := getAuthorStyle(msg.AuthorType)
 				author := truncate(msg.Author, senderWidth)
 				authorRendered := authorStyle.Render(author)
-				
+
 				content := truncate(msg.Content, contentWidth)
-				
+
 				// Build the line with table-like structure
 				line := fmt.Sprintf("%s%s  %s  %s", prefix, tStr, authorRendered, content)
-				
+
 				if i == m.cursor {
 					line = chatMsgSelectedStyle.Render(line)
 				} else {
@@ -673,6 +724,54 @@ func (m model) renderListWithWidth(w int) string {
 	return box
 }
 
+func (m model) renderInboxWithWidth(w int) string {
+	h := m.height - 4
+	if h < 5 {
+		h = 5
+	}
+	title := "Inbox"
+	if len(m.inbox) == 0 {
+		header := chatHeaderStyle.Render(title)
+		sep := chatHeaderStyle.Render(strings.Repeat("─", min(max(0, w-4), 60)))
+		lines := []string{header, sep, "  (no messages — inbox empty)"}
+		for len(lines) < h {
+			lines = append(lines, "")
+		}
+		if len(lines) > h {
+			lines = lines[:h]
+		}
+		return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(treeBorder).Padding(0, 1).Width(max(20, w-4)).Render(strings.Join(lines, "\n"))
+	}
+	items := make([]string, 0, len(m.inbox))
+	for i, im := range m.inbox {
+		prefix := "  "
+		if i == m.cursor {
+			prefix = "▸ "
+		}
+		tStr := formatTime(im.CreatedAt)
+		author := truncate(im.Author, 12)
+		excerpt := truncate(strings.ReplaceAll(im.Content, "\n", " "), max(10, w-40))
+		line := fmt.Sprintf("%s[%s] %s @#%s › %s: %s", prefix, tStr, author, im.ChannelName, im.ThreadTitle, excerpt)
+		if i == m.cursor {
+			line = chatMsgSelectedStyle.Render(line)
+		} else {
+			line = chatMsgStyle.Render(line)
+		}
+		items = append(items, line)
+	}
+	header := chatHeaderStyle.Render(title)
+	sep := chatHeaderStyle.Render(strings.Repeat("─", min(max(0, w-4), 60)))
+	lines := []string{header, sep}
+	lines = append(lines, items...)
+	for len(lines) < h {
+		lines = append(lines, "")
+	}
+	if len(lines) > h {
+		lines = lines[:h]
+	}
+	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(treeBorder).Padding(0, 1).Width(max(20, w-4)).Render(strings.Join(lines, "\n"))
+}
+
 func (m model) renderPreview(w int) string {
 	h := m.height - 4
 	if h < 5 {
@@ -681,6 +780,16 @@ func (m model) renderPreview(w int) string {
 	var title string
 	var items []string
 	switch m.view {
+	case viewInbox:
+		if len(m.inbox) == 0 || m.cursor < 0 || m.cursor >= len(m.inbox) {
+			title = "Preview"
+			items = []string{"  (no message)"}
+		} else {
+			im := m.inbox[m.cursor]
+			title = fmt.Sprintf("Preview: %s @#%s", truncate(im.Author, 20), im.ChannelName)
+			full := truncate(strings.ReplaceAll(im.Content, "\n", " "), w-4)
+			items = []string{chatMsgStyle.Render("  " + full), "", chatMsgStyle.Render(fmt.Sprintf("  · %s  · %s › %s", formatTime(im.CreatedAt), im.ChannelName, im.ThreadTitle))}
+		}
 	case viewChannels:
 		if len(m.channels) == 0 || m.cursor < 0 || m.cursor >= len(m.channels) {
 			title = "Preview"
@@ -761,6 +870,8 @@ func (m model) helpView() string {
 		previewHint = hintKeyStyle.Render("L") + " hide preview"
 	}
 	switch m.view {
+	case viewInbox:
+		parts = []string{hintKeyStyle.Render("↑↓/j/k") + " nav", hintKeyStyle.Render("r") + " reply", previewHint, hintKeyStyle.Render("q") + " quit"}
 	case viewChannels:
 		parts = []string{hintKeyStyle.Render("↑↓/j/k") + " nav", hintKeyStyle.Render("Enter") + " open", hintKeyStyle.Render("n") + " new thread", previewHint, hintKeyStyle.Render("q") + " quit"}
 	case viewThreads:

@@ -85,3 +85,34 @@ func TestSimpleFlow(t *testing.T) {
 	view := m.View()
 	_ = view
 }
+
+func TestInboxFlow(t *testing.T) {
+	m := toModel(New("http://127.0.0.1:0"))
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+	m = toModel(nm)
+	inbox := []store.InboxMessage{
+		{Message: store.Message{ID: 1, ThreadID: 10, Seq: 1, Author: "alice", AuthorType: "human", Content: "first line\nsecond", CreatedAt: "2026-09-23T10:00:00Z"}, ChannelName: "general", ThreadTitle: "hello", ChannelID: 1},
+		{Message: store.Message{ID: 2, ThreadID: 11, Seq: 1, Author: "bob", AuthorType: "human", Content: "second", CreatedAt: "2026-09-23T11:00:00Z"}, ChannelName: "random", ThreadTitle: "world", ChannelID: 2},
+	}
+	nm, _ = m.Update(inboxFetchedMsg{inbox: inbox})
+	m = toModel(nm)
+	if len(m.inbox) != 2 {
+		t.Fatalf("inbox len")
+	}
+	if m.cursor != 0 {
+		t.Fatalf("cursor")
+	}
+	nm, _ = m.Update(tea.KeyPressMsg{Text: "j", Code: 'j'})
+	m = toModel(nm)
+	if m.cursor != 1 {
+		t.Fatalf("want 1 got %d", m.cursor)
+	}
+	nm, _ = m.Update(tea.KeyPressMsg{Text: "r", Code: 'r'})
+	m = toModel(nm)
+	if !m.compose.IsActive() {
+		t.Fatalf("compose")
+	}
+	if m.compose.state.threadID != 11 {
+		t.Fatalf("threadID %d", m.compose.state.threadID)
+	}
+}
