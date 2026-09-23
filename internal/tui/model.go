@@ -19,6 +19,12 @@ const (
 	viewMessages
 )
 
+const (
+	minContentWidth   = 10
+	ellipsisReserve   = 3
+	composeTitleLimit = 80
+)
+
 type model struct {
 	width, height    int
 	quitting         bool
@@ -388,6 +394,9 @@ func (m *model) handleReply() (tea.Model, tea.Cmd) {
 		m.status = "no thread — Esc back, n new thread"
 		return m, nil
 	}
+	if len(m.messages) > 0 && (m.cursor < 0 || m.cursor >= len(m.messages)) {
+		m.cursor = 0
+	}
 	chName := ""
 	if m.selectedChannel != nil {
 		chName = m.selectedChannel.Name
@@ -433,7 +442,11 @@ func (m *model) handleComposeSend(msg composeSendMsg) (tea.Model, tea.Cmd) {
 	m.compose.ClearError()
 	if msg.mode == composeModeNewThread {
 		channelID := m.compose.state.threadID
-		if channelID == 0 && m.selectedChannel != nil {
+		if channelID == 0 {
+			if m.selectedChannel == nil {
+				m.compose.SetError("no channel selected")
+				return m, nil
+			}
 			channelID = m.selectedChannel.ID
 		}
 		if channelID == 0 {
@@ -441,8 +454,8 @@ func (m *model) handleComposeSend(msg composeSendMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		title := msg.text
-		if len(title) > 80 {
-			title = title[:80]
+		if len(title) > composeTitleLimit {
+			title = title[:composeTitleLimit]
 		}
 		_, err := m.api.CreateThread(nil, channelID, title)
 		if err != nil {
@@ -617,7 +630,7 @@ func (m model) renderListWithWidth(w int) string {
 				}
 				tStr := formatTime(msg.CreatedAt)
 				author := truncate(msg.Author, 14)
-				content := truncate(msg.Content, max(10, w-30))
+				content := truncate(msg.Content, max(minContentWidth, w-30))
 				line := fmt.Sprintf("%s[%s] %s%s: %s", prefix, tStr, author, reply, content)
 				if i == m.cursor {
 					line = chatMsgSelectedStyle.Render(line)
@@ -691,7 +704,7 @@ func (m model) renderPreview(w int) string {
 				for _, msg := range m.previewMessages {
 					tStr := formatTime(msg.CreatedAt)
 					author := truncate(msg.Author, 12)
-					content := truncate(msg.Content, max(10, w-20))
+					content := truncate(msg.Content, max(minContentWidth, w-20))
 					line := fmt.Sprintf("  [%s] %s: %s", tStr, author, content)
 					items = append(items, chatMsgStyle.Render(line))
 				}
@@ -775,10 +788,10 @@ func truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
-	if maxLen <= 3 {
+	if maxLen <= ellipsisReserve {
 		return s[:maxLen]
 	}
-	return s[:maxLen-3] + "..."
+	return s[:maxLen-ellipsisReserve] + "..."
 }
 
 func formatTime(t string) string {
