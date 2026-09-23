@@ -1,8 +1,8 @@
 package tui
 
 import (
-	"charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/NoRaincheck/fluffle/internal/store"
 )
@@ -17,7 +17,7 @@ const (
 
 type composeState struct {
 	mode     composeMode
-	context  string // thread title or "reply to: ..."
+	context  string
 	text     string
 	cursor   int
 	error    string
@@ -48,7 +48,6 @@ func (m *composeModel) Open(mode composeMode, context string, maxH int) {
 	if m.width < 30 {
 		m.width = 60
 	}
-	// Minimum 5 lines (header + input + error/hint + padding), scale up to available space
 	m.height = 5
 	if maxH > 5 {
 		m.height = minInt(maxH-2, 12)
@@ -71,8 +70,8 @@ func (m *composeModel) Text() string {
 func (m *composeModel) Update(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		switch key := msg.Key(); key.Code {
-		case tea.KeyEscape:
+		switch msg.Type {
+		case tea.KeyEsc:
 			m.Close()
 			return nil
 		case tea.KeyEnter:
@@ -99,10 +98,10 @@ func (m *composeModel) Update(msg tea.Msg) tea.Cmd {
 			if m.state.cursor < len(m.state.text) {
 				m.state.cursor++
 			}
-		default:
-			if len(key.Text) == 1 {
-				m.state.text = m.state.text[:m.state.cursor] + key.Text + m.state.text[m.state.cursor:]
-				m.state.cursor++
+		case tea.KeyRunes:
+			for _, r := range msg.Runes {
+				m.state.text = m.state.text[:m.state.cursor] + string(r) + m.state.text[m.state.cursor:]
+				m.state.cursor += len(string(r))
 			}
 		}
 	}
@@ -116,10 +115,8 @@ func (m composeModel) View() string {
 
 	lines := make([]string, 0, m.height)
 
-	// Context header
 	lines = append(lines, modalTitleStyle.Render(m.state.context))
 
-	// Input line
 	cursorChar := "│"
 	if m.state.cursor >= len(m.state.text) {
 		cursorChar = "│ "
@@ -127,14 +124,12 @@ func (m composeModel) View() string {
 	inputLine := "▸ " + m.state.text + cursorChar
 	lines = append(lines, inputLine)
 
-	// Error if any
 	if m.state.error != "" {
 		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("204")).Render("  "+m.state.error))
 	} else {
 		lines = append(lines, "")
 	}
 
-	// Hints
 	switch m.state.mode {
 	case composeModeMessage:
 		lines = append(lines, modalHintStyle.Render("Enter to send, Esc to cancel"))
@@ -144,7 +139,6 @@ func (m composeModel) View() string {
 		lines = append(lines, modalHintStyle.Render("Enter to create thread, Esc to cancel"))
 	}
 
-	// Pad to height
 	for len(lines) < m.height {
 		lines = append(lines, "")
 	}

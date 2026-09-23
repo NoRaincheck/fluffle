@@ -1,38 +1,36 @@
 package tui
 
 import (
-	"image/color"
-
-	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/lipgloss"
 )
 
 var (
-	treeBg     = color.RGBA{30, 30, 46, 255}
-	treeFg     = color.RGBA{205, 214, 244, 255}
-	treeSelBg  = color.RGBA{49, 50, 68, 255}
-	treeSelFg  = color.RGBA{245, 245, 245, 255}
-	treeBorder = color.RGBA{69, 71, 90, 255}
+	treeBg     = lipgloss.Color("#1e1e2e")
+	treeFg     = lipgloss.Color("#cdd6f4")
+	treeSelBg  = lipgloss.Color("#313244")
+	treeSelFg  = lipgloss.Color("#f5f5f5")
+	treeBorder = lipgloss.Color("#45475a")
 
-	chatBg       = color.RGBA{40, 40, 56, 255}
-	chatFg       = color.RGBA{180, 190, 210, 255}
-	chatSelBg    = color.RGBA{49, 50, 68, 255}
-	chatSelFg    = color.RGBA{245, 245, 245, 255}
-	chatHeaderFg = color.RGBA{137, 180, 250, 255}
-	chatBorder   = color.RGBA{69, 71, 90, 255}
+	chatBg       = lipgloss.Color("#282838")
+	chatFg       = lipgloss.Color("#b4bed2")
+	chatSelBg    = lipgloss.Color("#313244")
+	chatSelFg    = lipgloss.Color("#f5f5f5")
+	chatHeaderFg = lipgloss.Color("#89b4fa")
+	chatBorder   = lipgloss.Color("#45475a")
 
-	modalBg      = color.RGBA{49, 50, 68, 255}
-	modalFg      = color.RGBA{245, 245, 245, 255}
-	modalBorder  = color.RGBA{137, 180, 250, 255}
-	modalOverlay = color.RGBA{10, 10, 16, 180}
+	modalBg      = lipgloss.Color("#313244")
+	modalFg      = lipgloss.Color("#f5f5f5")
+	modalBorder  = lipgloss.Color("#89b4fa")
+	modalOverlay = lipgloss.Color("#0a0a10")
 
-	statusBg = color.RGBA{24, 24, 37, 255}
-	statusFg = color.RGBA{137, 180, 250, 255}
+	statusBg = lipgloss.Color("#181825")
+	statusFg = lipgloss.Color("#89b4fa")
 
-	accent      = color.RGBA{137, 180, 250, 255}
-	dim         = color.RGBA{100, 100, 120, 255}
-	humanColor  = color.RGBA{137, 180, 250, 255}
-	agentColor  = color.RGBA{183, 180, 250, 255}
-	systemColor = color.RGBA{100, 100, 120, 255}
+	accent      = lipgloss.Color("#89b4fa")
+	dim         = lipgloss.Color("#646478")
+	humanColor  = lipgloss.Color("#89b4fa")
+	agentColor  = lipgloss.Color("#b7b4fa")
+	systemColor = lipgloss.Color("#646478")
 )
 
 var (
@@ -52,8 +50,7 @@ var (
 
 	treeItemSelectedStyle = lipgloss.NewStyle().
 				Foreground(treeSelFg).
-				Background(treeSelBg).
-				PaddingLeft(1)
+				Background(treeSelBg)
 
 	chatStyle = lipgloss.NewStyle().
 			Border(lipgloss.NormalBorder(), false, false, false, false).
@@ -71,8 +68,7 @@ var (
 
 	chatMsgSelectedStyle = lipgloss.NewStyle().
 				Foreground(chatSelFg).
-				Background(chatSelBg).
-				PaddingLeft(1)
+				Background(chatSelBg)
 
 	chatReplyStyle = lipgloss.NewStyle().
 			Foreground(dim).

@@ -5,9 +5,8 @@ import (
 	"strings"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
-	"charm.land/lipgloss/v2/table"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/NoRaincheck/fluffle/internal/store"
 )
@@ -32,6 +31,7 @@ type model struct {
 	quitting         bool
 	view             viewKind
 	cursor           int
+	scroll           int
 	status           string
 	api              *apiClient
 	channels         []store.Channel
@@ -115,6 +115,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.inbox = msg.inbox
 		m.cursor = 0
+		m.scroll = 0
 		m.view = viewInbox
 		if len(msg.inbox) == 0 {
 			m.status = "inbox — no messages · q quit"
@@ -129,6 +130,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.channels = msg.channels
 		m.cursor = 0
+		m.scroll = 0
 		if len(msg.channels) == 0 {
 			m.status = "no channels — n to create (orphaned) or flf channel create --orphaned --name demo"
 		} else {
@@ -146,6 +148,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.threads = msg.threads
 		m.cursor = 0
+		m.scroll = 0
 		m.view = viewThreads
 		name := ""
 		for _, ch := range m.channels {
@@ -179,6 +182,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.messages = msg.messages
 		m.cursor = 0
+		m.scroll = 0
 		m.view = viewMessages
 		threadTitle := ""
 		for _, th := range m.threads {
@@ -241,7 +245,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		if m.compose.IsActive() {
-			if msg.Key().Code == 'c' && msg.Key().Mod&tea.ModCtrl != 0 {
+			if msg.String() == "ctrl+c" {
 				m.quitting = true
 				return m, tea.Quit
 			}
@@ -259,12 +263,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	key := msg.Key()
-	switch key.Code {
+	switch msg.String() {
+	case "ctrl+c":
+		m.quitting = true
+		return m, tea.Quit
+	}
+	switch msg.Type {
 	case tea.KeyUp:
 		if m.cursor > 0 {
 			m.cursor--
 		}
+		m.clampCursor()
 		return m, m.maybeFetchPreview()
 	case tea.KeyDown:
 		max := 0
@@ -281,6 +290,7 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.cursor < max {
 			m.cursor++
 		}
+		m.clampCursor()
 		return m, m.maybeFetchPreview()
 	case tea.KeyEnter:
 		switch m.view {
@@ -303,13 +313,14 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case viewMessages:
 			return m.handlePost()
 		}
-	case tea.KeyEscape:
+	case tea.KeyEsc:
 		switch m.view {
 		case viewInbox:
 			return m, nil
 		case viewMessages:
 			m.view = viewThreads
 			m.cursor = 0
+			m.scroll = 0
 			if m.selectedChannel != nil {
 				m.status = fmt.Sprintf("#%s — %d threads · Enter open · n new · Esc back", m.selectedChannel.Name, len(m.threads))
 			}
@@ -317,6 +328,7 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case viewThreads:
 			m.view = viewChannels
 			m.cursor = 0
+			m.scroll = 0
 			m.selectedChannel = nil
 			m.selectedThread = nil
 			m.threads = nil
@@ -324,22 +336,18 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.status = fmt.Sprintf("%d channels — Enter open · q quit", len(m.channels))
 			return m, nil
 		}
-	default:
-		if key.Code == 'c' && key.Mod&tea.ModCtrl != 0 {
-			m.quitting = true
-			return m, tea.Quit
-		}
 	}
-	switch key.Text {
+	switch msg.String() {
 	case "q":
 		m.quitting = true
 		return m, tea.Quit
-	case "k":
+	case "k", "up":
 		if m.cursor > 0 {
 			m.cursor--
 		}
+		m.clampCursor()
 		return m, m.maybeFetchPreview()
-	case "j":
+	case "j", "down":
 		max := 0
 		switch m.view {
 		case viewInbox:
@@ -354,6 +362,7 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.cursor < max {
 			m.cursor++
 		}
+		m.clampCursor()
 		return m, m.maybeFetchPreview()
 	case "n":
 		return m.handleNewThreadInbox()
@@ -584,15 +593,15 @@ func (m *model) handleComposeSend(msg composeSendMsg) (tea.Model, tea.Cmd) {
 	return m, m.fetchMessages(threadID)
 }
 
-func (m model) View() tea.View {
+func (m model) View() string {
 	if m.quitting {
-		return tea.NewView("")
+		return ""
 	}
 	if m.compose.IsActive() {
 		bg := m.renderList()
 		composeView := m.compose.View()
 		content := lipgloss.JoinVertical(lipgloss.Left, bg, "", center(composeView, m.width))
-		return tea.NewView(content)
+		return content
 	}
 	var content string
 	if m.preview && m.width >= 80 {
@@ -618,7 +627,7 @@ func (m model) View() tea.View {
 		status = statusStyle.Render(" q quit · ↑↓/j/k nav · Enter open · Esc back · n new thread · c post ")
 	}
 	full := lipgloss.JoinVertical(lipgloss.Left, content, "", help, status)
-	return tea.NewView(full)
+	return full
 }
 
 func (m model) renderList() string {
@@ -631,7 +640,7 @@ func (m model) renderListWithWidth(w int) string {
 		h = 5
 	}
 	var title string
-	var items []string
+	var allItems []string
 	switch m.view {
 	case viewInbox:
 		return m.renderInboxWithWidth(w)
@@ -643,14 +652,14 @@ func (m model) renderListWithWidth(w int) string {
 		}
 		title = "Channels" + lastStr
 		if len(m.channels) == 0 {
-			items = []string{"  (no channels — press n after selecting, or run: flf channel create --orphaned --name demo)"}
+			allItems = []string{"  (no channels — press n after selecting, or run: flf channel create --orphaned --name demo)"}
 		} else {
 			for i, ch := range m.channels {
 				prefix := "  "
 				if i == m.cursor {
 					prefix = "▸ "
 				}
-				label := ch.Name
+				label := fmt.Sprintf("#%-4d %s", ch.ID, ch.Name)
 				if ch.IsOrphaned {
 					label += "  (orphaned)"
 				} else {
@@ -672,7 +681,7 @@ func (m model) renderListWithWidth(w int) string {
 				} else {
 					line = treeItemStyle.Render(line)
 				}
-				items = append(items, line)
+				allItems = append(allItems, line)
 			}
 		}
 	case viewThreads:
@@ -687,20 +696,20 @@ func (m model) renderListWithWidth(w int) string {
 		}
 		title = fmt.Sprintf("Threads in #%s%s", chName, lastStr)
 		if len(m.threads) == 0 {
-			items = []string{"  (no threads — press n to create)"}
+			allItems = []string{"  (no threads — press n to create)"}
 		} else {
 			for i, th := range m.threads {
 				prefix := "  "
 				if i == m.cursor {
 					prefix = "▸ "
 				}
-				line := prefix + fmt.Sprintf("# %s  · %s", th.Title, formatTime(th.CreatedAt))
+				line := prefix + fmt.Sprintf("#%-4d %s  · %s", th.ID, th.Title, formatTime(th.CreatedAt))
 				if i == m.cursor {
 					line = treeItemSelectedStyle.Render(line)
 				} else {
 					line = treeItemStyle.Render(line)
 				}
-				items = append(items, line)
+				allItems = append(allItems, line)
 			}
 		}
 	case viewMessages:
@@ -719,11 +728,12 @@ func (m model) renderListWithWidth(w int) string {
 		}
 		title = fmt.Sprintf("#%s › %s%s", chName, thName, lastStr)
 		if len(m.messages) == 0 {
-			items = []string{"  (no messages — press c to post, r to reply (appends to end))"}
+			allItems = []string{"  (no messages — press c to post, r to reply (appends to end))"}
 		} else {
 			timeWidth := 8
+			seqWidth := 6
 			senderWidth := 15
-			contentWidth := max(minContentWidth, w-timeWidth-senderWidth-10)
+			contentWidth := max(minContentWidth, w-timeWidth-seqWidth-senderWidth-12)
 
 			for i, msg := range m.messages {
 				prefix := "  "
@@ -737,33 +747,49 @@ func (m model) renderListWithWidth(w int) string {
 				author := truncate(msg.Author, senderWidth)
 				authorRendered := authorStyle.Render(author)
 
+				seqStr := fmt.Sprintf("#%-4d", msg.Seq)
 				content := truncate(msg.Content, contentWidth)
-				line := fmt.Sprintf("%s%s  %s  %s", prefix, tStr, authorRendered, content)
+				line := fmt.Sprintf("%s%s  %s  %s  %s", prefix, tStr, seqStr, authorRendered, content)
 
 				if i == m.cursor {
 					line = chatMsgSelectedStyle.Render(line)
 				} else {
 					line = chatMsgStyle.Render(line)
 				}
-				items = append(items, line)
+				allItems = append(allItems, line)
 			}
 		}
 	}
-	header := chatHeaderStyle.Render(title)
-	sepLen := min(max(0, w-4), 60)
-	if sepLen < 0 {
-		sepLen = 0
+	visibleCap := h - 1
+	if visibleCap < 1 {
+		visibleCap = 1
 	}
+	start := m.scroll
+	if start < 0 {
+		start = 0
+	}
+	if start >= len(allItems) {
+		start = len(allItems) - 1
+	}
+	if start < 0 {
+		start = 0
+	}
+	visible := allItems[start:]
+	if len(visible) > visibleCap {
+		visible = visible[:visibleCap]
+	}
+	boxW := max(20, w-4)
+	sepLen := max(0, boxW-2)
 	sep := chatHeaderStyle.Render(strings.Repeat("─", sepLen))
-	lines := []string{header, sep}
-	lines = append(lines, items...)
+	lines := []string{chatHeaderStyle.Render(title), sep}
+	lines = append(lines, visible...)
 	for len(lines) < h {
 		lines = append(lines, "")
 	}
 	if len(lines) > h {
 		lines = lines[:h]
 	}
-	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(treeBorder).Padding(0, 1).Width(max(20, w-4)).Render(strings.Join(lines, "\n"))
+	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(treeBorder).Padding(0, 1).Width(boxW).Render(strings.Join(lines, "\n"))
 	return box
 }
 
@@ -774,9 +800,9 @@ func (m model) renderInboxWithWidth(w int) string {
 	}
 	title := fmt.Sprintf("Inbox — %d messages", len(m.inbox))
 	if len(m.inbox) == 0 {
-		header := chatHeaderStyle.Render(title)
-		sep := chatHeaderStyle.Render(strings.Repeat("─", min(max(0, w-4), 60)))
-		lines := []string{header, sep, "  (no messages — press n for new thread)"}
+		boxW := max(20, w-4)
+		sep := chatHeaderStyle.Render(strings.Repeat("─", max(0, boxW-2)))
+		lines := []string{chatHeaderStyle.Render(title), sep, "  (no messages — press n for new thread)"}
 		for len(lines) < h {
 			lines = append(lines, "")
 		}
@@ -790,46 +816,59 @@ func (m model) renderInboxWithWidth(w int) string {
 	threadW := 16
 	senderW := 12
 	contentW := max(minContentWidth, w-timeW-chanW-threadW-senderW-14)
-	rows := make([][]string, 0, len(m.inbox))
-	for i, im := range m.inbox {
+	visibleCap := h - 2
+	if visibleCap < 1 {
+		visibleCap = 1
+	}
+	start := m.scroll
+	if start < 0 {
+		start = 0
+	}
+	if start >= len(m.inbox) {
+		start = len(m.inbox) - 1
+	}
+	if start < 0 {
+		start = 0
+	}
+	if start+visibleCap > len(m.inbox) {
+		visibleCap = len(m.inbox) - start
+	}
+	visibleInbox := m.inbox[start : start+visibleCap]
+	headerRow := fmt.Sprintf("  %*s  %-12s  %-16s  %-12s  %s", timeW, "TIME", "CHANNEL", "THREAD", "SENDER", "CONTENT")
+	headerRow = lipgloss.NewStyle().Foreground(chatHeaderFg).Bold(true).Render(headerRow)
+	boxW := max(20, w-4)
+	sep2 := lipgloss.NewStyle().Foreground(chatHeaderFg).Render(strings.Repeat("─", max(0, boxW-2)))
+	var rows []string
+	for i, im := range visibleInbox {
+		globalIdx := start + i
 		prefix := "  "
-		if i == m.cursor {
+		if globalIdx == m.cursor {
 			prefix = "▸ "
 		}
 		tStr := fmt.Sprintf("%*s", timeW, formatTime(im.CreatedAt))
-		chanS := truncate(im.ChannelName, chanW)
-		thrS := truncate(im.ThreadTitle, threadW)
+		chanS := truncate(fmt.Sprintf("#%d %s", im.ChannelID, im.ChannelName), chanW)
+		thrS := truncate(fmt.Sprintf("#%d %s", im.ThreadID, im.ThreadTitle), threadW)
 		author := truncate(im.Author, senderW)
 		content := truncate(strings.ReplaceAll(im.Content, "\n", " "), contentW)
-		rows = append(rows, []string{prefix + tStr, chanS, thrS, author, content})
+		line := fmt.Sprintf("%s%s  %-12s  %-16s  %-12s  %s", prefix, tStr, chanS, thrS, author, content)
+		if globalIdx == m.cursor {
+			line = chatMsgSelectedStyle.Render(line)
+		} else {
+			authorStyle := getAuthorStyle(im.AuthorType)
+			_ = authorStyle
+			line = chatMsgStyle.Render(line)
+		}
+		rows = append(rows, line)
 	}
-	tbl := table.New().BorderTop(false).BorderBottom(false).BorderLeft(false).BorderRight(false).BorderColumn(false).BorderRow(false).BorderHeader(true).Border(lipgloss.Border{Top: "─", Bottom: "─", Middle: "─"}).Width(w).Wrap(false).Headers("TIME", "CHANNEL", "THREAD", "SENDER", "CONTENT").Rows(rows...).StyleFunc(func(row, col int) lipgloss.Style {
-		if row == table.HeaderRow {
-			return lipgloss.NewStyle().Foreground(chatHeaderFg).Bold(true)
-		}
-		if row == m.cursor {
-			return chatMsgSelectedStyle
-		}
-		if col == 3 {
-			idx := row
-			if idx >= 0 && idx < len(m.inbox) {
-				return getAuthorStyle(m.inbox[idx].AuthorType)
-			}
-		}
-		return chatMsgStyle
-	})
-	items := []string{tbl.String()}
-	header := chatHeaderStyle.Render(title)
-	sep := chatHeaderStyle.Render(strings.Repeat("─", min(max(0, w-4), 60)))
-	lines := []string{header, sep}
-	lines = append(lines, items...)
+	lines := []string{chatHeaderStyle.Render(title), headerRow, sep2}
+	lines = append(lines, rows...)
 	for len(lines) < h {
 		lines = append(lines, "")
 	}
 	if len(lines) > h {
 		lines = lines[:h]
 	}
-	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(treeBorder).Padding(0, 1).Width(max(20, w-4)).Render(strings.Join(lines, "\n"))
+	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(treeBorder).Padding(0, 1).Width(boxW).Render(strings.Join(lines, "\n"))
 }
 
 func (m model) renderPreview(w int) string {
@@ -942,7 +981,7 @@ func (m model) renderPreview(w int) string {
 		}
 	}
 	header := chatHeaderStyle.Render(title)
-	sepLen := min(max(0, w-4), 60)
+	sepLen := max(0, max(20, w-4)-2)
 	if sepLen < 0 {
 		sepLen = 0
 	}
@@ -1004,6 +1043,57 @@ func lastNPreviewMessagesWithParent(msgs []store.Message, threadID int64, seq in
 		return filtered
 	}
 	return filtered[len(filtered)-n:]
+}
+
+func (m *model) clampCursor() {
+	total := 0
+	switch m.view {
+	case viewInbox:
+		total = len(m.inbox)
+	case viewChannels:
+		total = len(m.channels)
+	case viewThreads:
+		total = len(m.threads)
+	case viewMessages:
+		total = len(m.messages)
+	}
+	if total == 0 {
+		m.cursor = 0
+		m.scroll = 0
+		return
+	}
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+	if m.cursor >= total {
+		m.cursor = total - 1
+	}
+	h := m.height - 4
+	if h < 5 {
+		h = 5
+	}
+	visible := h - 1
+	if m.view == viewInbox {
+		visible = h - 2
+	}
+	if visible < 1 {
+		visible = 1
+	}
+	if m.cursor < m.scroll {
+		m.scroll = m.cursor
+	}
+	if m.cursor >= m.scroll+visible {
+		m.scroll = m.cursor - visible + 1
+	}
+	if m.scroll < 0 {
+		m.scroll = 0
+	}
+	if m.scroll+visible > total {
+		m.scroll = total - visible
+	}
+	if m.scroll < 0 {
+		m.scroll = 0
+	}
 }
 
 func (m model) helpView() string {

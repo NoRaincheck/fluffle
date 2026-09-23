@@ -4,12 +4,11 @@ import (
 	"fmt"
 	"os"
 
-	tea "charm.land/bubbletea/v2"
+	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/NoRaincheck/fluffle/internal/client"
 )
 
-// Run starts the TUI. Returns exit code.
 func Run() int {
 	base, err := client.EnsureDaemon()
 	if err != nil {
@@ -18,7 +17,7 @@ func Run() int {
 	}
 
 	m := New(base)
-	p := tea.NewProgram(m)
+	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "TUI error:", err)
 		return 1
