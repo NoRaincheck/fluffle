@@ -605,14 +605,16 @@ func (m model) View() string {
 	}
 	var content string
 	if m.preview && m.width >= 80 {
-		halfW := (m.width - 2) / 2
+		halfW := m.width / 2
 		leftW := halfW
-		rightW := halfW
+		rightW := m.width - halfW
 		if leftW < 20 {
 			leftW = 20
+			rightW = m.width - leftW
 		}
 		if rightW < 20 {
 			rightW = 20
+			leftW = m.width - rightW
 		}
 		left := m.renderListWithWidth(leftW)
 		right := m.renderPreview(rightW)
@@ -620,15 +622,17 @@ func (m model) View() string {
 	} else {
 		content = m.renderList()
 	}
-	header := lipgloss.NewStyle().Foreground(accent).Bold(true).Render(" fluffle ")
+	headerStyle := lipgloss.NewStyle().Foreground(accent).Bold(true).Width(m.width)
+	header := headerStyle.Render(" fluffle ")
 	help := m.helpView()
+	helpStyle := lipgloss.NewStyle().Width(m.width).Render(help)
 	status := ""
 	if m.status != "" {
-		status = statusStyle.Render(m.status)
+		status = statusStyle.Width(m.width).Render(m.status)
 	} else {
-		status = statusStyle.Render(" q quit · ↑↓/j/k nav · Enter open · Esc back · n new thread · c post ")
+		status = statusStyle.Width(m.width).Render(" q quit · ↑↓/j/k nav · Enter open · Esc back · n new thread · c post ")
 	}
-	footer := lipgloss.JoinVertical(lipgloss.Left, help, status)
+	footer := lipgloss.JoinVertical(lipgloss.Left, helpStyle, status)
 	full := lipgloss.JoinVertical(lipgloss.Left, header, content, footer)
 	return full
 }
@@ -781,7 +785,7 @@ func (m model) renderListWithWidth(w int) string {
 	if len(visible) > visibleCap {
 		visible = visible[:visibleCap]
 	}
-	boxW := max(20, w-4)
+	boxW := max(20, w)
 	sepLen := max(0, boxW-2)
 	sep := chatHeaderStyle.Render(strings.Repeat("─", sepLen))
 	lines := []string{chatHeaderStyle.Render(title), sep}
@@ -803,7 +807,7 @@ func (m model) renderInboxWithWidth(w int) string {
 	}
 	title := fmt.Sprintf("Inbox — %d messages", len(m.inbox))
 	if len(m.inbox) == 0 {
-		boxW := max(20, w-4)
+		boxW := max(20, w)
 		sep := chatHeaderStyle.Render(strings.Repeat("─", max(0, boxW-2)))
 		lines := []string{chatHeaderStyle.Render(title), sep, "  (no messages — press n for new thread)"}
 		for len(lines) < h {
@@ -812,7 +816,7 @@ func (m model) renderInboxWithWidth(w int) string {
 		if len(lines) > h {
 			lines = lines[:h]
 		}
-		return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(treeBorder).Padding(0, 1).Width(max(20, w-4)).Render(strings.Join(lines, "\n"))
+		return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(treeBorder).Padding(0, 1).Width(max(20, w)).Render(strings.Join(lines, "\n"))
 	}
 	timeW := 8
 	chanW := 12
@@ -839,7 +843,7 @@ func (m model) renderInboxWithWidth(w int) string {
 	visibleInbox := m.inbox[start : start+visibleCap]
 	headerRow := fmt.Sprintf("  %*s  %-12s  %-16s  %-12s  %s", timeW, "TIME", "CHANNEL", "THREAD", "SENDER", "CONTENT")
 	headerRow = lipgloss.NewStyle().Foreground(chatHeaderFg).Bold(true).Render(headerRow)
-	boxW := max(20, w-4)
+	boxW := max(20, w)
 	sep2 := lipgloss.NewStyle().Foreground(chatHeaderFg).Render(strings.Repeat("─", max(0, boxW-2)))
 	var rows []string
 	for i, im := range visibleInbox {
@@ -984,7 +988,7 @@ func (m model) renderPreview(w int) string {
 		}
 	}
 	header := chatHeaderStyle.Render(title)
-	sepLen := max(0, max(20, w-4)-2)
+	sepLen := max(0, max(20, w)-2)
 	if sepLen < 0 {
 		sepLen = 0
 	}
@@ -997,7 +1001,7 @@ func (m model) renderPreview(w int) string {
 	if len(lines) > h {
 		lines = lines[:h]
 	}
-	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(chatBorder).Padding(0, 1).Width(max(20, w-4)).Render(strings.Join(lines, "\n"))
+	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(chatBorder).Padding(0, 1).Width(max(20, w)).Render(strings.Join(lines, "\n"))
 	return box
 }
 
