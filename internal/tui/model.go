@@ -605,8 +605,9 @@ func (m model) View() string {
 	}
 	var content string
 	if m.preview && m.width >= 80 {
-		leftW := m.width/2 - 1
-		rightW := m.width - leftW - 3
+		halfW := (m.width - 2) / 2
+		leftW := halfW
+		rightW := halfW
 		if leftW < 20 {
 			leftW = 20
 		}
@@ -619,6 +620,7 @@ func (m model) View() string {
 	} else {
 		content = m.renderList()
 	}
+	header := lipgloss.NewStyle().Foreground(accent).Bold(true).Render(" fluffle ")
 	help := m.helpView()
 	status := ""
 	if m.status != "" {
@@ -626,7 +628,8 @@ func (m model) View() string {
 	} else {
 		status = statusStyle.Render(" q quit · ↑↓/j/k nav · Enter open · Esc back · n new thread · c post ")
 	}
-	full := lipgloss.JoinVertical(lipgloss.Left, content, "", help, status)
+	footer := lipgloss.JoinVertical(lipgloss.Left, help, status)
+	full := lipgloss.JoinVertical(lipgloss.Left, header, content, footer)
 	return full
 }
 
