@@ -331,3 +331,36 @@ func TestInboxPreviewFillToHeight(t *testing.T) {
 		t.Fatalf("short preview should keep root post, got %q", short)
 	}
 }
+
+func TestInboxEnterDetailView(t *testing.T) {
+	m := toModel(New("http://127.0.0.1:0"))
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+	m = toModel(nm)
+	inbox := []store.InboxMessage{
+		{Message: store.Message{ID: 1, ThreadID: 10, Seq: 1, Author: "alice", AuthorType: "human", Content: "root", CreatedAt: "2026-09-23T10:00:00Z"}, ChannelName: "general", ThreadTitle: "hello", ChannelID: 1},
+	}
+	nm, _ = m.Update(inboxFetchedMsg{inbox: inbox})
+	m = toModel(nm)
+	m.cursor = 0
+	nm, _ = m.Update(keyType(tea.KeyEnter))
+	m = toModel(nm)
+	if m.view != viewInboxDetail {
+		t.Fatalf("Enter should open detail view, got %v", m.view)
+	}
+	if m.detailThreadID != 10 {
+		t.Fatalf("detailThreadID not set")
+	}
+}
+
+func TestInboxEnterNoOpWhenEmpty(t *testing.T) {
+	m := toModel(New("http://127.0.0.1:0"))
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = toModel(nm)
+	nm, _ = m.Update(inboxFetchedMsg{inbox: nil})
+	m = toModel(nm)
+	nm, _ = m.Update(keyType(tea.KeyEnter))
+	m = toModel(nm)
+	if m.view != viewInbox {
+		t.Fatalf("Enter on empty inbox should stay inbox")
+	}
+}

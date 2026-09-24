@@ -16,6 +16,7 @@ type viewKind int
 
 const (
 	viewInbox viewKind = iota
+	viewInboxDetail
 	viewChannels
 	viewThreads
 	viewMessages
@@ -63,6 +64,11 @@ type model struct {
 	previewThreadID   int64
 	prevView          viewKind
 	hasPrev           bool
+	detailThreadID    int64
+	detailScroll      int
+	detailCursor      int
+	savedInboxCursor  int
+	savedInboxScroll  int
 }
 
 func New(base string) tea.Model {
@@ -348,6 +354,35 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.maybeFetchPreview()
 	case tea.KeyEnter:
 		switch m.view {
+		case viewInbox:
+			filtered := m.inboxFilteredSorted()
+			if len(filtered) == 0 || m.cursor < 0 || m.cursor >= len(filtered) {
+				return m, nil
+			}
+			im := filtered[m.cursor]
+			m.prevView = m.view
+			m.hasPrev = true
+			m.savedInboxCursor = m.cursor
+			m.savedInboxScroll = m.scroll
+			m.detailThreadID = im.ThreadID
+			ch := store.Channel{ID: im.ChannelID, Name: im.ChannelName}
+			for _, c := range m.channels {
+				if c.ID == im.ChannelID {
+					ch = c
+					break
+				}
+			}
+			m.selectedChannel = &ch
+			m.selectedThread = &store.Thread{ID: im.ThreadID, Title: im.ThreadTitle, ChannelID: im.ChannelID}
+			m.view = viewInboxDetail
+			m.detailCursor = 0
+			m.detailScroll = 0
+			m.scroll = 0
+			if m.previewThreadID == im.ThreadID && len(m.previewMessages) > 0 {
+				m.messages = m.previewMessages
+			}
+			m.status = fmt.Sprintf("%s › %s · %d messages · ↑↓ scroll · r reply · Esc back", im.ChannelName, im.ThreadTitle, len(m.messages))
+			return m, m.fetchMessages(im.ThreadID)
 		case viewChannels:
 			if len(m.channels) == 0 || m.cursor < 0 || m.cursor >= len(m.channels) {
 				return m, nil
@@ -365,6 +400,24 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case tea.KeyEsc:
 		switch m.view {
+		case viewInboxDetail:
+			m.view = viewInbox
+			m.hasPrev = false
+			m.detailThreadID = 0
+			m.detailScroll = 0
+			m.detailCursor = 0
+			m.cursor = m.savedInboxCursor
+			m.scroll = m.savedInboxScroll
+			m.clampCursor()
+			filtered := m.inboxFilteredSorted()
+			if len(m.inbox) == 0 {
+				m.status = "inbox — no messages · q quit"
+			} else if len(filtered) == 0 {
+				m.status = fmt.Sprintf("inbox — 0/%d messages (filtered)%s · q quit", len(m.inbox), m.inboxStatusSuffix())
+			} else {
+				m.status = fmt.Sprintf("inbox — %d messages · ↑↓/j/k nav · r reply · v sort · f filter%s · q quit", len(filtered), m.inboxStatusSuffix())
+			}
+			return m, m.maybeFetchPreview()
 		case viewInbox:
 			return m, nil
 		case viewMessages:
@@ -1325,6 +1378,8 @@ func (m *model) clampCursor() {
 	switch m.view {
 	case viewInbox:
 		total = len(m.inboxFilteredSorted())
+	case viewInboxDetail:
+		return
 	case viewChannels:
 		total = len(m.channels)
 	case viewThreads:
