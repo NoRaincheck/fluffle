@@ -1642,7 +1642,7 @@ func (m *model) clampCursor() {
 func (m model) detailLineCounts(w int) ([]int, int, int, []store.Message) {
 	timeW := 12
 	senderW := 15
-	msgW := max(minContentWidth, w-timeW-senderW-6)
+	msgW := max(minContentWidth, w-timeW-senderW-10)
 	sorted := sortedMessagesDesc(m.messages)
 	if len(sorted) == 0 {
 		return nil, 0, msgW, sorted
