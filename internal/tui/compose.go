@@ -48,10 +48,7 @@ func (m *composeModel) Open(mode composeMode, context string, maxH int) {
 	if m.width < 30 {
 		m.width = 60
 	}
-	m.height = 5
-	if maxH > 5 {
-		m.height = minInt(maxH-2, 12)
-	}
+	m.height = 4
 }
 
 func (m *composeModel) Close() {
@@ -113,7 +110,7 @@ func (m composeModel) View() string {
 		return ""
 	}
 
-	lines := make([]string, 0, m.height)
+	lines := make([]string, 0, 4)
 
 	lines = append(lines, modalTitleStyle.Render(m.state.context))
 
@@ -130,18 +127,7 @@ func (m composeModel) View() string {
 		lines = append(lines, "")
 	}
 
-	switch m.state.mode {
-	case composeModeMessage:
-		lines = append(lines, modalHintStyle.Render("Enter to send, Esc to cancel"))
-	case composeModeReply:
-		lines = append(lines, modalHintStyle.Render("Enter to reply, Esc to cancel"))
-	case composeModeNewThread:
-		lines = append(lines, modalHintStyle.Render("Enter to create thread, Esc to cancel"))
-	}
-
-	for len(lines) < m.height {
-		lines = append(lines, "")
-	}
+	lines = append(lines, modalHintStyle.Render("Enter to reply, Esc to cancel"))
 
 	return lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
@@ -203,6 +189,94 @@ func (m *composeModel) ClearError() {
 	m.state.error = ""
 }
 
+type filterModel struct {
+	active bool
+	text   string
+	cursor int
+	width  int
+	height int
+}
+
+func (m *filterModel) Open(initial string, maxW int) {
+	m.active = true
+	m.text = initial
+	m.cursor = len(initial)
+	if maxW < 30 {
+		maxW = 60
+	}
+	m.width = maxW
+	m.height = 4
+}
+
+func (m *filterModel) Close() {
+	m.active = false
+	m.text = ""
+	m.cursor = 0
+}
+
+func (m *filterModel) IsActive() bool { return m.active }
+
+func (m *filterModel) Update(msg tea.Msg) tea.Cmd {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.Type {
+		case tea.KeyEsc:
+			m.Close()
+			return nil
+		case tea.KeyEnter:
+			t := m.text
+			m.Close()
+			return func() tea.Msg { return filterAppliedMsg{text: t} }
+		case tea.KeyBackspace:
+			if m.cursor > 0 && len(m.text) > 0 {
+				m.text = m.text[:m.cursor-1] + m.text[m.cursor:]
+				m.cursor--
+			}
+		case tea.KeyDelete:
+			if m.cursor < len(m.text) {
+				m.text = m.text[:m.cursor] + m.text[m.cursor+1:]
+			}
+		case tea.KeyLeft:
+			if m.cursor > 0 {
+				m.cursor--
+			}
+		case tea.KeyRight:
+			if m.cursor < len(m.text) {
+				m.cursor++
+			}
+		case tea.KeyRunes:
+			for _, r := range msg.Runes {
+				m.text = m.text[:m.cursor] + string(r) + m.text[m.cursor:]
+				m.cursor += len(string(r))
+			}
+		}
+	}
+	return nil
+}
+
+func (m filterModel) View() string {
+	if !m.IsActive() {
+		return ""
+	}
+	title := modalTitleStyle.Render("Filter: channel[/thread]  (empty to clear)")
+	cursorChar := "│"
+	if m.cursor >= len(m.text) {
+		cursorChar = "│ "
+	}
+	inputLine := "▸ " + m.text + cursorChar
+	lines := []string{title, inputLine, "", modalHintStyle.Render("Enter to apply, Esc to cancel")}
+	return lipgloss.NewStyle().
+		BorderStyle(lipgloss.RoundedBorder()).
+		BorderForeground(modalBorder).
+		Background(modalBg).
+		Foreground(modalFg).
+		Padding(0, 2).
+		Width(m.width).
+		Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+}
+
+type filterAppliedMsg struct{ text string }
+
 func minInt(a, b int) int {
 	if a < b {
 		return a
@@ -217,7 +291,9 @@ func composeContext(mode composeMode, context string) string {
 	case composeModeReply:
 		preview := truncate(context, 40)
 		return "Reply to: " + preview
+	case composeModeNewThread:
+		return context
 	default:
-		return ""
+		return context
 	}
 }

@@ -84,10 +84,36 @@ func TestSimpleFlow(t *testing.T) {
 	m.cursor = 0
 	nm, _ = m.Update(keyRunes("n"))
 	m = toModel(nm)
+	if m.compose.IsActive() {
+		t.Fatalf("n should not open compose — reply-only")
+	}
+	nm, _ = m.Update(keyRunes("c"))
+	m = toModel(nm)
+	if m.compose.IsActive() {
+		t.Fatalf("c should not open compose — reply-only")
+	}
+	nm, _ = m.Update(keyType(tea.KeyEnter))
+	m = toModel(nm)
+	nm, _ = m.Update(threadsFetchedMsg{channelID: 2, threads: threads})
+	m = toModel(nm)
+	nm, _ = m.Update(keyRunes("r"))
+	m = toModel(nm)
 	if !m.compose.IsActive() {
-		t.Fatalf("want compose active for new thread")
+		t.Fatalf("r should open compose for thread reply")
+	}
+	if m.compose.state.threadID != 10 {
+		t.Fatalf("threadID %d", m.compose.state.threadID)
+	}
+	if m.view != viewMessages {
+		t.Fatalf("r from threads should show full thread (viewMessages), got %v", m.view)
+	}
+	if m.compose.height != 4 {
+		t.Fatalf("compose height should be minimal 4, got %d", m.compose.height)
 	}
 	view := m.View()
+	if !strings.Contains(view, "hello") && !strings.Contains(view, "Reply in") {
+		t.Fatalf("view should show thread and reply box, got %q", view)
+	}
 	_ = view
 }
 
@@ -119,6 +145,19 @@ func TestInboxFlow(t *testing.T) {
 	}
 	if m.compose.state.threadID != 11 {
 		t.Fatalf("threadID %d", m.compose.state.threadID)
+	}
+	if m.compose.state.parentID != 0 {
+		t.Fatalf("should reply to thread, not parent, got parentID %d", m.compose.state.parentID)
+	}
+	if m.view != viewMessages {
+		t.Fatalf("r should show full thread (viewMessages), got %v", m.view)
+	}
+	if m.compose.height != 4 {
+		t.Fatalf("compose minimal height 4, got %d", m.compose.height)
+	}
+	view := m.View()
+	if !strings.Contains(view, "world") {
+		t.Fatalf("compose view should show full thread layout, got %q", view)
 	}
 }
 
@@ -162,22 +201,30 @@ func TestInboxKeybindings(t *testing.T) {
 	m = toModel(nm)
 	nm, _ = m.Update(keyType(tea.KeyEnter))
 	m = toModel(nm)
-	if !m.compose.IsActive() {
-		t.Fatalf("Enter should open reply")
+	if m.compose.IsActive() {
+		t.Fatalf("Enter should not open reply — only r")
 	}
-	m.compose.Close()
 	nm, _ = m.Update(keyRunes("c"))
 	m = toModel(nm)
-	if !m.compose.IsActive() {
-		t.Fatalf("c should open compose")
+	if m.compose.IsActive() {
+		t.Fatalf("c should not open compose — only r")
 	}
-	m.compose.Close()
+	nm, _ = m.Update(keyRunes("n"))
+	m = toModel(nm)
+	if m.compose.IsActive() {
+		t.Fatalf("n should not open compose — only r")
+	}
 	nm, _ = m.Update(keyRunes("r"))
 	m = toModel(nm)
 	if !m.compose.IsActive() {
 		t.Fatalf("r should open compose")
 	}
+	if m.view != viewMessages {
+		t.Fatalf("r should switch to full thread view, got %v", m.view)
+	}
 	m.compose.Close()
+	m.view = viewInbox
+	m.cursor = 0
 	had := m.preview
 	nm, _ = m.Update(keyRunes("L"))
 	m = toModel(nm)
@@ -187,6 +234,6 @@ func TestInboxKeybindings(t *testing.T) {
 	nm, _ = m.Update(keyType(tea.KeyEsc))
 	m = toModel(nm)
 	if m.view != viewInbox {
-		t.Fatalf("Esc should be no-op in inbox")
+		t.Fatalf("Esc should be no-op in inbox, got %v", m.view)
 	}
 }
