@@ -297,3 +297,37 @@ func TestPreviewWrapNoTruncate(t *testing.T) {
 		t.Fatalf("root post truncated, missing 'end' in %q", rendered)
 	}
 }
+
+func TestInboxPreviewFillToHeight(t *testing.T) {
+	m := toModel(New("http://127.0.0.1:0"))
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+	m = toModel(nm)
+	inbox := []store.InboxMessage{{Message: store.Message{ID: 1, ThreadID: 10, Content: "root line one\nroot line two", Author: "alice", AuthorType: "human", CreatedAt: "2026-09-23T10:00:00Z"}, ChannelName: "general", ThreadTitle: "hello"}}
+	var msgs []store.Message
+	for i := 0; i < 10; i++ {
+		msgs = append(msgs, store.Message{ID: int64(2 + i), ThreadID: 10, Seq: int64(2 + i), Author: "bob", Content: fmt.Sprintf("reply %d", i), CreatedAt: "2026-09-23T11:00:00Z"})
+	}
+	nm, _ = m.Update(inboxFetchedMsg{inbox: inbox})
+	m = toModel(nm)
+	nm, _ = m.Update(previewMessagesFetchedMsg{threadID: 10, messages: msgs})
+	m = toModel(nm)
+	m.cursor = 0
+	tall := m.renderPreview(50, 40)
+	if strings.Count(tall, "reply") != 10 {
+		t.Fatalf("tall should show 10 replies, got %d", strings.Count(tall, "reply"))
+	}
+	if !strings.Contains(tall, "root line one") || !strings.Contains(tall, "root line two") {
+		t.Fatalf("root not fully shown %q", tall)
+	}
+	short := m.renderPreview(50, 10)
+	if !strings.Contains(short, "PREVIEW THREAD") {
+		t.Fatalf("header clipped %q", short)
+	}
+	lines := strings.Split(strings.TrimSuffix(short, "\n"), "\n")
+	if len(lines) != 10 {
+		t.Fatalf("height 10 expected 10 lines, got %d", len(lines))
+	}
+	if !strings.Contains(short, "root line one") {
+		t.Fatalf("short preview should keep root post, got %q", short)
+	}
+}

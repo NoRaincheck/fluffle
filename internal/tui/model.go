@@ -1133,12 +1133,15 @@ func (m model) renderPreview(w, h int) string {
 		} else {
 			im := filtered[m.cursor]
 			title = fmt.Sprintf("[PREVIEW THREAD]\n%s › %s", truncate(im.ChannelName, 20), truncate(im.ThreadTitle, 30))
-			for _, l := range strings.Split(im.Content, "\n") {
-				items = append(items, chatMsgStyle.Render("  "+truncate(l, max(minContentWidth, w-4))))
+			wrapped := wrapText(im.Content, max(minContentWidth, w-4))
+			for _, l := range wrapped {
+				items = append(items, chatMsgStyle.Render("  "+l))
 			}
 			items = append(items, chatMsgStyle.Render(strings.Repeat("─", min(w-4, 40))))
 			replies := filterThreadReplies(m.previewMessages, im.ThreadID, im.Seq, im.ID)
-			if len(replies) == 0 {
+			if m.previewThreadID != im.ThreadID && len(m.previewMessages) == 0 {
+				items = append(items, chatMsgStyle.Render("  (loading…)"))
+			} else if len(replies) == 0 {
 				items = append(items, chatMsgStyle.Render("  (no replies)"))
 			} else {
 				for _, r := range replies {
@@ -1211,11 +1214,31 @@ func (m model) renderPreview(w, h int) string {
 	headerStyleNoMargin := chatHeaderStyle.MarginBottom(0)
 	headerRendered := headerStyleNoMargin.Render(title)
 	headerLines := strings.Split(headerRendered, "\n")
-	previewHeaderStyle := headerStyleNoMargin
-	sep := previewHeaderStyle.Render(strings.Repeat("─", w))
+	sep := headerStyleNoMargin.Render(strings.Repeat("─", w))
 	lines := append([]string{}, headerLines...)
 	lines = append(lines, sep)
-	lines = append(lines, items...)
+	if len(items) > 0 {
+		if len(lines)+len(items) > h && m.view == viewInbox {
+			dashIdx := -1
+			for i, it := range items {
+				if strings.Contains(it, "─") {
+					dashIdx = i
+					break
+				}
+			}
+			if dashIdx >= 0 {
+				keep := h - len(lines) - dashIdx - 1
+				if keep < 0 {
+					keep = 0
+				}
+				if keep < len(items)-dashIdx-1 {
+					tail := items[len(items)-keep:]
+					items = append(items[:dashIdx+1], tail...)
+				}
+			}
+		}
+		lines = append(lines, items...)
+	}
 	for len(lines) < h {
 		lines = append(lines, "")
 	}
