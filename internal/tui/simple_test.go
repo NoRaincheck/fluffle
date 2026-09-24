@@ -143,7 +143,8 @@ func TestInboxFlow(t *testing.T) {
 	if !m.compose.IsActive() {
 		t.Fatalf("compose")
 	}
-	if m.compose.state.threadID != 11 {
+	// latest-desc default: cursor 0=threadID 11 (newer), cursor 1=threadID 10 (older)
+	if m.compose.state.threadID != 10 {
 		t.Fatalf("threadID %d", m.compose.state.threadID)
 	}
 	if m.compose.state.parentID != 0 {
@@ -156,7 +157,8 @@ func TestInboxFlow(t *testing.T) {
 		t.Fatalf("compose minimal height 4, got %d", m.compose.height)
 	}
 	view := m.View()
-	if !strings.Contains(view, "world") {
+	// cursor 1 = threadID 10 = "hello" (older, now second in latest-desc)
+	if !strings.Contains(view, "hello") {
 		t.Fatalf("compose view should show full thread layout, got %q", view)
 	}
 }

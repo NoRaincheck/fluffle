@@ -30,8 +30,11 @@ const (
 type inboxSort int
 
 const (
-	inboxSortLatest inboxSort = iota
-	inboxSortChannelThread
+	inboxSortLatestDesc inboxSort = iota
+	inboxSortLatestAsc
+	inboxSortChannelThreadAsc
+	inboxSortChannelThreadAscTimeDesc
+	inboxSortChannelThreadAscTimeAsc
 )
 
 type model struct {
@@ -453,10 +456,17 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleThreadReply()
 	case "v":
 		if m.view == viewInbox {
-			if m.inboxSort == inboxSortLatest {
-				m.inboxSort = inboxSortChannelThread
-			} else {
-				m.inboxSort = inboxSortLatest
+			switch m.inboxSort {
+			case inboxSortLatestDesc:
+				m.inboxSort = inboxSortLatestAsc
+			case inboxSortLatestAsc:
+				m.inboxSort = inboxSortChannelThreadAsc
+			case inboxSortChannelThreadAsc:
+				m.inboxSort = inboxSortChannelThreadAscTimeDesc
+			case inboxSortChannelThreadAscTimeDesc:
+				m.inboxSort = inboxSortChannelThreadAscTimeAsc
+			case inboxSortChannelThreadAscTimeAsc:
+				m.inboxSort = inboxSortLatestDesc
 			}
 			m.cursor = 0
 			m.scroll = 0
@@ -1313,11 +1323,18 @@ func parseInboxFilter(text string) (string, string) {
 
 func inboxSortName(s inboxSort) string {
 	switch s {
-	case inboxSortChannelThread:
-		return "channel/thread"
-	default:
-		return "latest"
+	case inboxSortLatestDesc:
+		return "latest ↓"
+	case inboxSortLatestAsc:
+		return "latest ↑"
+	case inboxSortChannelThreadAsc:
+		return "channel A→Z, thread A→Z, time ↑"
+	case inboxSortChannelThreadAscTimeDesc:
+		return "channel A→Z, thread A→Z, time ↓"
+	case inboxSortChannelThreadAscTimeAsc:
+		return "channel A→Z, thread A→Z, time ↑ (oldest)"
 	}
+	return ""
 }
 
 func (m *model) inboxFilteredSorted() []store.InboxMessage {
@@ -1335,7 +1352,7 @@ func (m *model) inboxFilteredSorted() []store.InboxMessage {
 		filtered = append(filtered, im)
 	}
 	switch m.inboxSort {
-	case inboxSortChannelThread:
+	case inboxSortChannelThreadAsc, inboxSortChannelThreadAscTimeDesc, inboxSortChannelThreadAscTimeAsc:
 		sort.SliceStable(filtered, func(i, j int) bool {
 			a, b := filtered[i], filtered[j]
 			ca := strings.ToLower(a.ChannelName)
@@ -1352,24 +1369,55 @@ func (m *model) inboxFilteredSorted() []store.InboxMessage {
 			tbTime, errB := time.Parse(time.RFC3339, b.CreatedAt)
 			if errA == nil && errB == nil {
 				if !taTime.Equal(tbTime) {
-					return taTime.Before(tbTime)
+					switch m.inboxSort {
+					case inboxSortChannelThreadAsc:
+						return taTime.Before(tbTime)
+					case inboxSortChannelThreadAscTimeDesc:
+						return taTime.After(tbTime)
+					case inboxSortChannelThreadAscTimeAsc:
+						return taTime.Before(tbTime)
+					}
 				}
 			} else if a.CreatedAt != b.CreatedAt {
-				return a.CreatedAt < b.CreatedAt
+				switch m.inboxSort {
+				case inboxSortChannelThreadAsc:
+					return a.CreatedAt < b.CreatedAt
+				case inboxSortChannelThreadAscTimeDesc:
+					return a.CreatedAt > b.CreatedAt
+				case inboxSortChannelThreadAscTimeAsc:
+					return a.CreatedAt < b.CreatedAt
+				}
 			}
-			return a.ID < b.ID
+			switch m.inboxSort {
+			case inboxSortChannelThreadAsc:
+				return a.ID < b.ID
+			case inboxSortChannelThreadAscTimeDesc:
+				return a.ID > b.ID
+			case inboxSortChannelThreadAscTimeAsc:
+				return a.ID < b.ID
+			}
+			return false
 		})
-	default:
+	case inboxSortLatestAsc, inboxSortLatestDesc:
 		sort.SliceStable(filtered, func(i, j int) bool {
 			a, b := filtered[i], filtered[j]
 			ta, errA := time.Parse(time.RFC3339, a.CreatedAt)
 			tb, errB := time.Parse(time.RFC3339, b.CreatedAt)
 			if errA == nil && errB == nil {
 				if !ta.Equal(tb) {
+					if m.inboxSort == inboxSortLatestDesc {
+						return ta.After(tb)
+					}
 					return ta.Before(tb)
 				}
 			} else if a.CreatedAt != b.CreatedAt {
+				if m.inboxSort == inboxSortLatestDesc {
+					return a.CreatedAt > b.CreatedAt
+				}
 				return a.CreatedAt < b.CreatedAt
+			}
+			if m.inboxSort == inboxSortLatestDesc {
+				return a.ID > b.ID
 			}
 			return a.ID < b.ID
 		})
