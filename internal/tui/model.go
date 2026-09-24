@@ -928,7 +928,6 @@ func (m model) renderPreview(w, h int) string {
 					items = append(items, chatMsgStyle.Render(line))
 				}
 			}
-			items = append(items, chatMsgStyle.Render(fmt.Sprintf("  · %s  · %s › %s", formatTime(im.CreatedAt), im.ChannelName, im.ThreadTitle)))
 		}
 	case viewChannels:
 		if len(m.channels) == 0 || m.cursor < 0 || m.cursor >= len(m.channels) {
@@ -986,11 +985,9 @@ func (m model) renderPreview(w, h int) string {
 		}
 	}
 	header := chatHeaderStyle.Render(title)
-	sepLen := max(0, max(20, w)-2)
-	if sepLen < 0 {
-		sepLen = 0
-	}
-	sep := chatHeaderStyle.Render(strings.Repeat("─", sepLen))
+	previewHeaderStyle := chatHeaderStyle.MarginBottom(0)
+
+	sep := previewHeaderStyle.Render(strings.Repeat("─", w))
 	lines := []string{header, sep}
 	lines = append(lines, items...)
 	for len(lines) < h {
