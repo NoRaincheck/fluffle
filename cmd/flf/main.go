@@ -746,12 +746,13 @@ func messageSendCmd(args []string) int {
 	as := fs.String("as", "", "author name (default $USER)")
 	agentID := fs.String("agent-id", "", "agent id")
 	replyTo := fs.Int64("reply-to", 0, "parent message id for threaded reply")
+	createdAt := fs.String("created-at", "", "message timestamp (RFC3339, e.g. 2025-01-15T10:30:00Z)")
 	jsonOut := fs.Bool("json", false, "JSON output")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
 	if *threadID == 0 || *text == "" {
-		fmt.Fprintln(os.Stderr, "usage: flf message send --thread ID --text T [--as NAME] [--agent-id ID] [--reply-to ID] [--json]")
+		fmt.Fprintln(os.Stderr, "usage: flf message send --thread ID --text T [--as NAME] [--agent-id ID] [--reply-to ID] [--created-at TS] [--json]")
 		return 1
 	}
 	base, err := client.EnsureDaemon()
@@ -763,6 +764,9 @@ func messageSendCmd(args []string) int {
 	body := map[string]any{"Author": author, "Role": "user", "Content": *text, "AgentID": *agentID}
 	if *replyTo != 0 {
 		body["ParentID"] = *replyTo
+	}
+	if *createdAt != "" {
+		body["CreatedAt"] = *createdAt
 	}
 	var out struct {
 		Seq int64 `json:"seq"`
