@@ -195,9 +195,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if len(msg.threads) == 0 {
-			m.status = fmt.Sprintf("#%s — no threads · Esc back", name)
+			m.status = fmt.Sprintf("%s — no threads · Esc back", name)
 		} else {
-			m.status = fmt.Sprintf("#%s — %d threads · ↑↓ nav · Enter open · Esc back", name, len(msg.threads))
+			m.status = fmt.Sprintf("%s — %d threads · ↑↓ nav · Enter open · Esc back", name, len(msg.threads))
 		}
 		return m, nil
 
@@ -244,9 +244,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			chName = m.selectedChannel.Name
 		}
 		if len(msg.messages) == 0 {
-			m.status = fmt.Sprintf("#%s › %s — no messages · r reply · Esc back", chName, threadTitle)
+			m.status = fmt.Sprintf("%s › %s — no messages · r reply · Esc back", chName, threadTitle)
 		} else {
-			m.status = fmt.Sprintf("#%s › %s — %d messages · ↑↓ nav · r reply · Esc back", chName, threadTitle, len(msg.messages))
+			m.status = fmt.Sprintf("%s › %s — %d messages · ↑↓ nav · r reply · Esc back", chName, threadTitle, len(msg.messages))
 		}
 		return m, nil
 
@@ -393,7 +393,7 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.scroll = 0
 			m.hasPrev = false
 			if m.selectedChannel != nil {
-				m.status = fmt.Sprintf("#%s — %d threads · Enter open · Esc back", m.selectedChannel.Name, len(m.threads))
+				m.status = fmt.Sprintf("%s — %d threads · Enter open · Esc back", m.selectedChannel.Name, len(m.threads))
 			}
 			return m, nil
 		case viewThreads:
@@ -550,7 +550,7 @@ func (m *model) handleThreadReply() (tea.Model, tea.Cmd) {
 		m.view = viewMessages
 		m.cursor = 0
 		m.scroll = 0
-		m.compose.Open(composeModeReply, fmt.Sprintf("Reply in #%s › %s", channelName, threadTitle), m.height)
+		m.compose.Open(composeModeReply, fmt.Sprintf("Reply in %s › %s", channelName, threadTitle), m.height)
 		m.compose.state.threadID = threadID
 		m.compose.state.parentID = 0
 		return m, m.fetchMessages(threadID)
@@ -575,7 +575,7 @@ func (m *model) handleThreadReply() (tea.Model, tea.Cmd) {
 		if m.selectedChannel != nil {
 			chName = m.selectedChannel.Name
 		}
-		m.compose.Open(composeModeReply, fmt.Sprintf("Reply in #%s › %s", chName, th.Title), m.height)
+		m.compose.Open(composeModeReply, fmt.Sprintf("Reply in %s › %s", chName, th.Title), m.height)
 		m.compose.state.threadID = th.ID
 		m.compose.state.parentID = 0
 		return m, m.fetchMessages(th.ID)
@@ -588,7 +588,7 @@ func (m *model) handleThreadReply() (tea.Model, tea.Cmd) {
 		if m.selectedChannel != nil {
 			chName = m.selectedChannel.Name
 		}
-		m.compose.Open(composeModeReply, fmt.Sprintf("Reply in #%s › %s", chName, m.selectedThread.Title), m.height)
+		m.compose.Open(composeModeReply, fmt.Sprintf("Reply in %s › %s", chName, m.selectedThread.Title), m.height)
 		m.compose.state.threadID = m.selectedThread.ID
 		m.compose.state.parentID = 0
 		return m, nil
@@ -760,9 +760,9 @@ func (m model) renderReplyBackground(w, h int) string {
 	} else if m.previewThreadID == threadID && len(m.previewMessages) > 0 {
 		msgs = m.previewMessages
 	}
-	title := fmt.Sprintf("#%s › %s", chName, thName)
-	if title == "# › " {
-		title = fmt.Sprintf("Thread #%d", threadID)
+	title := fmt.Sprintf("%s › %s", chName, thName)
+	if title == " › " {
+		title = "Thread"
 	} else {
 		last := latestMessageTime(msgs)
 		if last != "" {
@@ -861,7 +861,7 @@ func (m model) renderListWithWidth(w, h int) string {
 				if i == m.cursor {
 					prefix = "▸ "
 				}
-				label := fmt.Sprintf("#%-4d %s", ch.ID, ch.Name)
+				label := ch.Name
 				if ch.IsOrphaned {
 					label += "  (orphaned)"
 				} else {
@@ -896,7 +896,7 @@ func (m model) renderListWithWidth(w, h int) string {
 		if last != "" {
 			lastStr = fmt.Sprintf("  · last %s", formatTime(last))
 		}
-		title = fmt.Sprintf("Threads in #%s%s", chName, lastStr)
+		title = fmt.Sprintf("Threads in %s%s", chName, lastStr)
 		if len(m.threads) == 0 {
 			allItems = []string{"  (no threads)"}
 		} else {
@@ -905,7 +905,7 @@ func (m model) renderListWithWidth(w, h int) string {
 				if i == m.cursor {
 					prefix = "▸ "
 				}
-				line := prefix + fmt.Sprintf("#%-4d %s  · %s", th.ID, th.Title, formatTime(th.CreatedAt))
+				line := prefix + fmt.Sprintf("%s  · %s", th.Title, formatTime(th.CreatedAt))
 				if i == m.cursor {
 					line = treeItemSelectedStyle.Render(line)
 				} else {
@@ -928,7 +928,7 @@ func (m model) renderListWithWidth(w, h int) string {
 		if last != "" {
 			lastStr = fmt.Sprintf("  · last %s", formatTime(last))
 		}
-		title = fmt.Sprintf("#%s › %s%s", chName, thName, lastStr)
+		title = fmt.Sprintf("%s › %s%s", chName, thName, lastStr)
 		if len(m.messages) == 0 {
 			allItems = []string{"  (no messages — press r to reply)"}
 		} else {
@@ -1031,7 +1031,6 @@ func (m model) renderInboxWithWidth(w, h int) string {
 	chanW := 12
 	threadW := 16
 	senderW := 12
-	contentW := max(minContentWidth, w-timeW-chanW-threadW-senderW-14)
 	visibleCap := h - 2
 	if visibleCap < 1 {
 		visibleCap = 1
@@ -1050,7 +1049,18 @@ func (m model) renderInboxWithWidth(w, h int) string {
 		visibleCap = len(filtered) - start
 	}
 	visibleInbox := filtered[start : start+visibleCap]
-	headerRow := fmt.Sprintf("  %*s  %-12s  %-16s  %-12s  %s", timeW, "TIME", "CHANNEL", "THREAD", "SENDER", "CONTENT")
+	var maxID int64
+	for _, im := range visibleInbox {
+		if im.ID > maxID {
+			maxID = im.ID
+		}
+	}
+	idW := len(fmt.Sprintf("%d", maxID))
+	if idW < 1 {
+		idW = 1
+	}
+	contentW := max(minContentWidth, w-idW-timeW-chanW-threadW-senderW-14)
+	headerRow := fmt.Sprintf("  %0*d %*s  %-12s  %-16s  %-12s  %s", idW, maxID, timeW, "TIME", "CHANNEL", "THREAD", "SENDER", "CONTENT")
 	headerRow = lipgloss.NewStyle().Foreground(chatHeaderFg).Bold(true).Render(headerRow)
 	boxW := max(20, w)
 	sep2 := lipgloss.NewStyle().Foreground(chatHeaderFg).Render(strings.Repeat("─", max(0, boxW-2)))
@@ -1062,11 +1072,11 @@ func (m model) renderInboxWithWidth(w, h int) string {
 			prefix = "▸ "
 		}
 		tStr := fmt.Sprintf("%*s", timeW, formatTime(im.CreatedAt))
-		chanS := truncate(fmt.Sprintf("#%d %s", im.ChannelID, im.ChannelName), chanW)
-		thrS := truncate(fmt.Sprintf("#%d %s", im.ThreadID, im.ThreadTitle), threadW)
+		chanS := truncate(im.ChannelName, chanW)
+		thrS := truncate(im.ThreadTitle, threadW)
 		author := truncate(im.Author, senderW)
 		content := truncate(strings.ReplaceAll(im.Content, "\n", " "), contentW)
-		line := fmt.Sprintf("%s%s  %-12s  %-16s  %-12s  %s", prefix, tStr, chanS, thrS, author, content)
+		line := fmt.Sprintf("%s%0*d %s  %-12s  %-16s  %-12s  %s", prefix, idW, im.ID, tStr, chanS, thrS, author, content)
 		if globalIdx == m.cursor {
 			line = chatMsgSelectedStyle.Render(line)
 		} else {
@@ -1101,7 +1111,7 @@ func (m model) renderPreview(w, h int) string {
 			items = []string{"  (no message)"}
 		} else {
 			im := filtered[m.cursor]
-			title = fmt.Sprintf("[PREVIEW THREAD #%d]\n#%s › %s", im.ThreadID, im.ChannelName, truncate(im.ThreadTitle, 30))
+			title = fmt.Sprintf("[PREVIEW THREAD %s]", truncate(im.ThreadTitle, 30))
 			hPreview := m.height - 4
 			if hPreview < 5 {
 				hPreview = 5
@@ -1146,7 +1156,7 @@ func (m model) renderPreview(w, h int) string {
 			items = []string{"  (no channel)"}
 		} else {
 			ch := m.channels[m.cursor]
-			title = fmt.Sprintf("Preview: #%s", ch.Name)
+			title = fmt.Sprintf("Preview: %s", ch.Name)
 			if len(m.previewThreads) == 0 {
 				if m.previewChannelID == ch.ID {
 					items = []string{"  (no threads)"}
@@ -1155,7 +1165,7 @@ func (m model) renderPreview(w, h int) string {
 				}
 			} else {
 				for _, th := range m.previewThreads {
-					line := fmt.Sprintf("  # %s  · %s", th.Title, formatTime(th.CreatedAt))
+					line := fmt.Sprintf("  %s  · %s", th.Title, formatTime(th.CreatedAt))
 					items = append(items, chatMsgStyle.Render(truncate(line, w-6)))
 				}
 			}
@@ -1166,7 +1176,7 @@ func (m model) renderPreview(w, h int) string {
 			items = []string{"  (no thread)"}
 		} else {
 			th := m.threads[m.cursor]
-			title = fmt.Sprintf("[PREVIEW THREAD #%d] %s", th.ID, truncate(th.Title, 40))
+			title = fmt.Sprintf("[PREVIEW THREAD] %s", truncate(th.Title, 40))
 			if len(m.previewMessages) == 0 {
 				if m.previewThreadID == th.ID {
 					items = []string{"  (no messages — press r to reply)"}
