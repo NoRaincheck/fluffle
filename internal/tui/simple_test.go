@@ -210,8 +210,11 @@ func TestInboxKeybindings(t *testing.T) {
 	m = toModel(nm)
 	nm, _ = m.Update(keyType(tea.KeyEnter))
 	m = toModel(nm)
+	if m.view != viewInboxDetail {
+		t.Fatalf("Enter should open detail view, got %v", m.view)
+	}
 	if m.compose.IsActive() {
-		t.Fatalf("Enter should not open reply — only r")
+		t.Fatalf("Enter should not open compose — only r")
 	}
 	nm, _ = m.Update(keyRunes("c"))
 	m = toModel(nm)
@@ -228,8 +231,8 @@ func TestInboxKeybindings(t *testing.T) {
 	if !m.compose.IsActive() {
 		t.Fatalf("r should open compose")
 	}
-	if m.view != viewMessages {
-		t.Fatalf("r should switch to full thread view, got %v", m.view)
+	if m.view != viewInboxDetail {
+		t.Fatalf("r should stay in detail view, got %v", m.view)
 	}
 	m.compose.Close()
 	m.view = viewInbox

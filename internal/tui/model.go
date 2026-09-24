@@ -660,6 +660,19 @@ func (m *model) handleThreadReply() (tea.Model, tea.Cmd) {
 		m.compose.state.threadID = m.selectedThread.ID
 		m.compose.state.parentID = 0
 		return m, nil
+	case viewInboxDetail:
+		if m.selectedThread == nil {
+			m.status = "no thread — Esc back"
+			return m, nil
+		}
+		chName := ""
+		if m.selectedChannel != nil {
+			chName = m.selectedChannel.Name
+		}
+		m.compose.Open(composeModeReply, fmt.Sprintf("Reply in %s › %s", chName, m.selectedThread.Title), m.height)
+		m.compose.state.threadID = m.selectedThread.ID
+		m.compose.state.parentID = 0
+		return m, nil
 	default:
 		m.status = "open a thread first — Enter on channel, select thread, then r to reply"
 		return m, nil
@@ -1691,7 +1704,9 @@ func (m model) helpView() string {
 	}
 	switch m.view {
 	case viewInbox:
-		parts = []string{hintKeyStyle.Render("↑↓/j/k") + " nav", hintKeyStyle.Render("r") + " reply", hintKeyStyle.Render("v") + " sort", hintKeyStyle.Render("f") + " filter", previewHint, hintKeyStyle.Render("q") + " quit"}
+		parts = []string{hintKeyStyle.Render("↑↓/j/k") + " nav", hintKeyStyle.Render("Enter") + " view", hintKeyStyle.Render("r") + " reply", hintKeyStyle.Render("v") + " sort", hintKeyStyle.Render("f") + " filter", previewHint, hintKeyStyle.Render("q") + " quit"}
+	case viewInboxDetail:
+		parts = []string{hintKeyStyle.Render("↑↓/j/k") + " scroll", hintKeyStyle.Render("r") + " reply", hintKeyStyle.Render("Esc") + " back", previewHint, hintKeyStyle.Render("q") + " quit"}
 	case viewChannels:
 		parts = []string{hintKeyStyle.Render("↑↓/j/k") + " nav", hintKeyStyle.Render("Enter") + " open", previewHint, hintKeyStyle.Render("q") + " quit"}
 	case viewThreads:
