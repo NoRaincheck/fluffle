@@ -994,7 +994,7 @@ func (m model) renderInboxDetail(w, h int) string {
 				if j == 0 {
 					line = fmt.Sprintf("%s%s  %s  %s", prefix, tPadded, authorRendered, wl)
 				} else {
-					indent := strings.Repeat(" ", len(prefix)+timeW+2+senderW+2)
+					indent := strings.Repeat(" ", 2+timeW+2+senderW+2)
 					line = indent + wl
 				}
 				if i == m.detailCursor {
@@ -1329,7 +1329,7 @@ func (m model) renderInboxWithWidth(w, h int) string {
 			contentPlainLen = contentW
 		}
 		lineRendered := fmt.Sprintf("%s%0*d %s  %-12s  %-16s  %-12s  %s", prefix, idW, im.ID, tStr, chanS, thrS, author, contentRendered)
-		plainLen := len(prefix) + idW + 1 + timeW + 2 + chanW + 2 + threadW + 2 + senderW + 2 + contentPlainLen
+		plainLen := 2 + idW + 1 + timeW + 2 + chanW + 2 + threadW + 2 + senderW + 2 + contentPlainLen
 		if plainLen > w {
 			excess := plainLen - w
 			if excess < len(baseTrunc) {
