@@ -1,6 +1,6 @@
 # Global Inbox with Adaptive Preview Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use subagent-driven-development (recommended) or executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the 3-view Channels→Threads→Messages stack with a single flat global inbox table plus adaptive preview pane showing full message truncated to Y lines + last 5 replies.
 
@@ -8,8 +8,8 @@
 
 **Tech Stack:** Go 1.22+, SQLite (modernc.org/sqlite), Bubble Tea v2, Lipgloss v2 table, net/http
 
-**Spec:** `docs/superpowers/specs/2026-09-23-inbox-preview-design.md`
-**Brainstorm:** `docs/superpowers/specs/2026-09-23-tui-brainstorm.md` (layout alternatives, gaps, visual enhancements)
+**Design Spec:** `docs/inbox-preview-design.md`
+**Brainstorm:** `docs/tui-brainstorm.md` (layout alternatives, gaps, visual enhancements)
 
 ## Global Constraints
 
@@ -28,12 +28,12 @@
 
 - `internal/store/store.go` — add `InboxMessage` type + `ListInbox(limit int) ([]InboxMessage, error)` (JOIN, cap limits, reverse to ASC)
 - `internal/store/store_test.go` — add `TestListInbox` coverage
-- `internal/server/server.go` — add `handleInbox` + route `GET /v1/inbox` (verify via existing `readAPIError` envelope)
-- `internal/server/server_test.go` or `internal/server/inbox_test.go` — handler test (if no existing server test, create new file)
+- `internal/apiserver/server.go` — add `handleInbox` + route `GET /v1/inbox` (verify via existing `readAPIError` envelope)
+- `internal/apiserver/inbox_test.go` — handler test
 - `internal/tui/api.go` — add `ListInbox(ctx, limit) ([]store.InboxMessage, error)` + `InboxMessage` re-export or define locally
 - `internal/tui/model.go` — core changes: `viewInbox`, `inbox []InboxMessage`, `fetchInbox`, `inboxFetchedMsg`, `renderInboxWithWidth`, `renderPreview` adaptive Y, `maybeFetchPreview` inbox variant, key handling `r/c/n/L`, helpView update, title/status strings
 - `internal/tui/simple_test.go` — rewrite/add `TestInboxFlow` + `TestAdaptivePreviewTruncation`
-- `internal/tui/preview_test.go` (optional) — unit test for `truncatePreviewContent` helper if extracted
+- `internal/tui/api_test.go` — `TestAPIListInbox`
 
 ---
 
@@ -52,7 +52,7 @@
 
 ```go
 func TestListInbox(t *testing.T) {
-    s := newTestStore(t) // use existing helper that opens temp file, or Open("file:"+t.Name()+"?mode=memory&cache=shared") with SetMaxOpenConns(1)
+    s := newTestStore(t)
     ch1, _ := s.CreateChannel("general", "", "", "", "", true)
     ch2, _ := s.CreateChannel("random", "", "", "", "", true)
     th1, _ := s.CreateThread(ch1, "hello")
@@ -65,8 +65,6 @@ func TestListInbox(t *testing.T) {
     if len(msgs) != 3 { t.Fatalf("want 3 got %d", len(msgs)) }
     if msgs[0].Content != "first" || msgs[1].Content != "second" || msgs[2].Content != "third" { t.Fatalf("order wrong") }
     if msgs[0].ChannelName != "general" || msgs[0].ThreadTitle != "hello" { t.Fatalf("enrichment wrong") }
-    // archived excluded
-    // limit cap test
     msgs2, _ := s.ListInbox(1)
     if len(msgs2) != 1 { t.Fatalf("limit 1") }
     if msgs2[0].Content != "third" { t.Fatalf("limit should return newest last when reversed to ASC, got %q", msgs2[0].Content) }
@@ -113,7 +111,6 @@ func (s *Store) ListInbox(limit int) ([]InboxMessage, error) {
     return out, nil
 }
 ```
-Place type near `Message` definition at `store.go:194`, method after `ListMessagesByParent`.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -134,8 +131,8 @@ git commit -m "feat(store): add InboxMessage and ListInbox global query"
 ### Task 2: Server — GET /v1/inbox endpoint
 
 **Files:**
-- Modify: `internal/server/server.go`
-- Test: `internal/server/server_test.go` (create if missing, or reuse `internal/server/inbox_test.go`)
+- Modify: `internal/apiserver/server.go`
+- Test: `internal/apiserver/inbox_test.go`
 
 **Interfaces:**
 - Consumes: `store.Store.ListInbox(int) ([]InboxMessage, error)` from Task 1
@@ -146,11 +143,10 @@ git commit -m "feat(store): add InboxMessage and ListInbox global query"
 ```go
 func TestInboxHandler(t *testing.T) {
     store := newTestStore(t)
-    // seed channel/thread/message via store directly
     ch, _ := store.CreateChannel("general", "", "", "", "", true)
     th, _ := store.CreateThread(ch, "hello")
-    _, _ = store.AppendMessage(th, "alice", "human", "user", "hi")
-    srv := newTestServer(t, store) // helper that builds mux with routes
+    _, _ := store.AppendMessage(th, "alice", "human", "user", "hi")
+    srv := newTestServer(t, store)
     resp := srv.Get(t, "/v1/inbox?limit=10")
     if resp.Code != 200 { t.Fatalf("want 200 got %d body %s", resp.Code, resp.Body.String()) }
     if ct := resp.Header().Get("Content-Type"); ct != "application/json" { t.Fatalf("want json ct got %q", ct) }
@@ -161,14 +157,12 @@ func TestInboxHandler(t *testing.T) {
 }
 ```
 
-If `newTestServer` not exists, inspect `internal/server/server.go` for `New` and `Handler` creation; replicate pattern from existing tests (check `docs/backend.md`).
-
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `go test ./internal/server -run TestInboxHandler -v`
+Run: `go test ./internal/apiserver -run TestInboxHandler -v`
 Expected: FAIL 404 or route not found
 
-- [ ] **Step 3: Write minimal implementation in `internal/server/server.go`**
+- [ ] **Step 3: Write minimal implementation in `internal/apiserver/server.go`**
 
 Locate mux setup where `"/v1/channels"` is registered. Add:
 
@@ -185,21 +179,17 @@ mux.HandleFunc("/v1/inbox", func(w http.ResponseWriter, r *http.Request) {
 })
 ```
 
-Ensure `writeJSON` sets `Content-Type: application/json`, `writeError` uses `{"code","message"}` envelope (existing helpers).
-
-Add `strconv` to imports.
-
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `go test ./internal/server -v`
+Run: `go test ./internal/apiserver -v`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
 
 ```bash
-gofmt -w internal/server/server.go internal/server/*_test.go
-go vet ./internal/server
-git add internal/server/server.go internal/server/*_test.go
+gofmt -w internal/apiserver/server.go internal/apiserver/*_test.go
+go vet ./internal/apiserver
+git add internal/apiserver/server.go internal/apiserver/*_test.go
 git commit -m "feat(server): expose GET /v1/inbox for global inbox"
 ```
 
@@ -209,7 +199,7 @@ git commit -m "feat(server): expose GET /v1/inbox for global inbox"
 
 **Files:**
 - Modify: `internal/tui/api.go`
-- Test: `internal/tui/api_test.go` (or inline test in `simple_test.go`)
+- Test: `internal/tui/api_test.go`
 
 **Interfaces:**
 - Consumes: `GET /v1/inbox` from Task 2
@@ -255,8 +245,6 @@ func (c *apiClient) ListInbox(ctx context.Context, limit int) ([]store.InboxMess
 }
 ```
 
-Ensure import of `store` already present.
-
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `go test ./internal/tui -run TestAPIListInbox -v`
@@ -265,9 +253,9 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-gofmt -w internal/tui/api.go
+gofmt -w internal/tui/api.go internal/tui/api_test.go
 go vet ./internal/tui
-git add internal/tui/api.go
+git add internal/tui/api.go internal/tui/api_test.go
 git commit -m "feat(tui): add api ListInbox client"
 ```
 
@@ -276,7 +264,7 @@ git commit -m "feat(tui): add api ListInbox client"
 ### Task 4: TUI Model — Global Inbox State & Inbox Fetch
 
 **Files:**
-- Modify: `internal/tui/model.go:15,29,58`
+- Modify: `internal/tui/model.go`
 - Test: `internal/tui/simple_test.go`
 
 **Interfaces:**
@@ -298,19 +286,15 @@ func TestInboxFlow(t *testing.T) {
     m = toModel(nm)
     if len(m.inbox)!=2 { t.Fatalf("inbox len") }
     if m.cursor!=0 { t.Fatalf("cursor") }
-    // j down
     nm,_ = m.Update(tea.KeyPressMsg{Text:"j", Code:'j'})
     m = toModel(nm)
     if m.cursor!=1 { t.Fatalf("want 1 got %d", m.cursor) }
-    // r reply should open compose with correct threadID
     nm,_ = m.Update(tea.KeyPressMsg{Text:"r", Code:'r'})
     m = toModel(nm)
     if !m.compose.IsActive() { t.Fatalf("compose") }
     if m.compose.state.threadID != 11 { t.Fatalf("threadID %d", m.compose.state.threadID) }
 }
 ```
-
-Add `inboxFetchedMsg` definition to model.go first? Test will fail until model updated.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -320,18 +304,18 @@ Expected: FAIL undefined inboxFetchedMsg or field inbox
 - [ ] **Step 3: Write minimal implementation**
 
 In `model.go`:
-- Add to `viewKind`: `viewInbox viewKind = iota` (keep old constants but mark deprecated; or replace enumeration to single inbox — simpler: add `viewInbox` and keep others but unused)
+- Add to `viewKind`: `viewInbox viewKind = iota` (keep old constants but mark deprecated)
 - Add fields to `model`: `inbox []store.InboxMessage`
 - Add `type inboxFetchedMsg struct { inbox []store.InboxMessage; err error }` near other fetched msgs
 - Add `func (m *model) fetchInbox() tea.Cmd { return func() tea.Msg { msgs, err := m.api.ListInbox(nil, 100); return inboxFetchedMsg{inbox: msgs, err: err} } }`
 - Change `Init()` to `return m.fetchInbox()`
 - Add case `inboxFetchedMsg` in `Update`: set `m.inbox`, `m.cursor=0`, status string, return `maybeFetchPreview()`
-- Stub `renderInboxWithWidth` minimal returning placeholder (full table in Task 5), but enough to compile
+- Stub `renderInboxWithWidth` minimal returning placeholder (full table in Task 5)
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `go test ./internal/tui -run TestInboxFlow -v`
-Expected: PASS (render not checked yet)
+Expected: PASS
 
 - [ ] **Step 5: Commit**
 
@@ -347,8 +331,8 @@ git commit -m "feat(tui): add inbox state and fetch lifecycle"
 ### Task 5: TUI Rendering — Inbox Table + Adaptive Preview
 
 **Files:**
-- Modify: `internal/tui/model.go:529,699`
-- Test: `internal/tui/simple_test.go` (extend)
+- Modify: `internal/tui/model.go`
+- Test: `internal/tui/simple_test.go`
 
 **Interfaces:**
 - Consumes: `m.inbox`, `m.previewMessages`, `getAuthorStyle`, `truncate`, `formatTime`, `lipgloss/table`
@@ -361,7 +345,7 @@ func TestAdaptivePreviewTruncation(t *testing.T) {
     m := toModel(New("http://127.0.0.1:0"))
     nm,_ := m.Update(tea.WindowSizeMsg{Width:120, Height:24})
     m = toModel(nm)
-    long := strings.Repeat("line\n", 20) // 20 lines
+    long := strings.Repeat("line\n", 20)
     inbox := []store.InboxMessage{{Message: store.Message{ID:1, ThreadID:10, Content: long, Author:"alice", AuthorType:"human", CreatedAt:"2026-09-23T10:00:00Z"}, ChannelName:"general", ThreadTitle:"hello"}}
     previewMsgs := make([]store.Message, 10)
     for i:=0;i<10;i++ { previewMsgs[i]=store.Message{ID:int64(2+i), ThreadID:10, Seq:int64(2+i), Author:"bob", Content:fmt.Sprintf("reply %d",i), CreatedAt:"2026-09-23T11:00:00Z"} }
@@ -380,7 +364,6 @@ func TestAdaptivePreviewTruncation(t *testing.T) {
     if strings.Count(rendered, "reply") > 5 {
         t.Fatalf("should show at most 5 replies")
     }
-    // table render
     tbl := m.renderInboxWithWidth(100)
     if !strings.Contains(tbl, "CHANNEL") || !strings.Contains(tbl, "CONTENT") { t.Fatalf("header missing %q", tbl) }
 }
@@ -421,7 +404,7 @@ In `renderPreview(w)` for viewInbox:
 - Split content by "\n", truncate with marker `... (+N lines)` if needed
 - Render truncated message lines via `chatMsgStyle`
 - Separator `strings.Repeat("─", min(w-4,40))`
-- Last 5 replies: `replies := lastNPreviewMessages(m.previewMessages, im.ThreadID, im.Seq, 5)` where helper filters `Seq > im.Seq` or `ParentID==im.ID` if valid, else just tail of thread
+- Last 5 replies: filter `previewMessages` where `Seq > highlighted.Seq`; take `last X` via slice
 - Each reply `fmt.Sprintf("  [%s] %s: %s", formatTime(r.CreatedAt), truncate(r.Author,12), truncate(r.Content, max(minContentWidth,w-20)))`
 
 Also implement `lastNPreviewMessages` helper.
@@ -449,7 +432,7 @@ git commit -m "feat(tui): inbox table and adaptive preview rendering"
 ### Task 6: TUI Keybindings & Compose Integration (Inbox)
 
 **Files:**
-- Modify: `internal/tui/model.go:233` (`handleKey`, `handlePost`, `handleReply`, `handleNewThread`, `handleComposeSend`)
+- Modify: `internal/tui/model.go`
 - Test: `internal/tui/simple_test.go`
 
 **Interfaces:**
@@ -473,7 +456,6 @@ func TestInboxKeybindings(t *testing.T) {
     nm,_ = m.Update(tea.KeyPressMsg{Text:"c", Code:'c'})
     m = toModel(nm)
     if !m.compose.IsActive() { t.Fatalf("c should open compose") }
-    // preview toggle
     had := m.preview
     nm,_ = m.Update(tea.KeyPressMsg{Text:"L", Code:'L'})
     m = toModel(nm)
@@ -492,9 +474,9 @@ Expected: FAIL if Enter not wired
   - `KeyUp`/`k` → cursor--, `maybeFetchPreview()`
   - `KeyDown`/`j` → cursor++ bounded by `len(inbox)-1`
   - `KeyEnter` → `handleReply()` (if inbox non-empty) else noop
-  - `KeyEscape` → no-op for inbox (return nil) — remove old view stack switch
+  - `KeyEscape` → no-op for inbox (return nil)
   - `r`/`c` → `handleReply()`
-  - `n` → `handleNewThreadInbox()` (new): if `len(channels)==0` fetch channels first (return fetchChannels Cmd), else open compose for channel picker — v1 simple: reuse first channel or prompt; minimal: `if len(m.channels)==0 { return fetchChannels }` then `compose.Open(composeModeNewThread, "New thread — type title", height)` with `state.threadID = m.channels[0].ID` (or highlighted inbox's ChannelID if inbox non-empty)
+  - `n` → `handleNewThreadInbox()` — if `len(channels)==0` fetch channels first, else open compose for channel picker
   - `L`/`l` toggle preview
 
 - `handleReply()` inbox variant:
@@ -505,13 +487,12 @@ func (m *model) handleReply() (tea.Model, tea.Cmd) {
     im:= m.inbox[m.cursor]
     m.compose.Open(composeModeMessage, fmt.Sprintf("#%s › %s — reply appends", im.ChannelName, im.ThreadTitle), m.height)
     m.compose.state.threadID = im.ThreadID
-    m.compose.state.parentID = im.ID // use parent threading if schema supports
+    m.compose.state.parentID = im.ID
     return m, nil
 }
 ```
-Keep `handlePost` as alias to `handleReply`.
 
-- `handleComposeSend` after message send: `return m, m.fetchInbox()` instead of `fetchMessages`; after thread create: `return m, m.fetchInbox()` as well.
+- `handleComposeSend` after message send: `return m, m.fetchInbox()` instead of `fetchMessages`
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -570,4 +551,3 @@ git commit -m "chore: vet and fmt pass for inbox preview"
 - Spec §10 Testing plan covered across Tasks 1-6, vet Task 7.
 - No placeholders — each step has concrete code/tests.
 - Type consistency: `InboxMessage` used consistently store→server→tui; `inboxFetchedMsg.inbox` field reused; `previewThreadID` dedup retained.
-

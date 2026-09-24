@@ -67,7 +67,7 @@ Uses existing `scanMessages` pattern; no new indices required beyond existing `i
 
 ## 5. API
 
-**New endpoint in `internal/server/server.go`:**
+**New endpoint in `internal/apiserver/server.go`:**
 ```
 GET /v1/inbox?limit=100
 Response: []InboxMessage (JSON, Content-Type: application/json)
@@ -166,18 +166,18 @@ Replies: filter `previewMessages` where `Seq > highlighted.Seq` (or `ParentID ==
 ## 10. Testing Plan
 
 - `internal/store/store_test.go`: `TestListInbox` — seed 2 channels, 3 threads, 5 messages across them, assert `ListInbox(10)` returns 5 enriched rows sorted ASC by `created_at`, channel/thread names correct, archived rows excluded.
-- `internal/server` handler test: `TestInboxHandler` — inject store, `GET /v1/inbox` returns `Content-Type: application/json`, 200, correct count.
+- `internal/apiserver` handler test: `TestInboxHandler` — inject store, `GET /v1/inbox` returns `Content-Type: application/json`, 200, correct count.
 - `internal/tui/simple_test.go`: rewrite `TestSimpleFlow` to `TestInboxFlow` — feed `inboxFetchedMsg` with 3 `InboxMessage`, assert cursor nav moves, `maybeFetchPreview` dedup (second call with same thread returns nil), `renderInboxWithWidth` non-empty, adaptive truncation: create message with 20 lines + 10 previewMessages → rendered preview contains `... (+` and shows ≤5 replies. Also verify `handleReply` sets `state.threadID` correctly.
 - Static checks: `gofmt -l` empty, `go vet ./...` clean, exit codes preserved.
 
 ## 11. File Touch List
 
 - `internal/store/store.go` — `InboxMessage` + `ListInbox`
-- `internal/server/server.go` — handler + route `GET /v1/inbox`
+- `internal/apiserver/server.go` — handler + route `GET /v1/inbox`
 - `internal/tui/api.go` — `ListInbox`
 - `internal/tui/model.go` — inbox state, fetch, key handling, renderInbox, adaptive preview (largest diff)
 - `internal/tui/simple_test.go` — rewritten flow test
-- `docs/superpowers/specs/2026-09-23-inbox-preview-design.md` — this doc
+- `docs/inbox-preview-design.md` — this doc
 
 ## 12. Rollout & Migration
 
