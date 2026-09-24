@@ -44,8 +44,8 @@ func TestRenderInboxDetailIsTableWithWrapping(t *testing.T) {
 	}
 	m.detailCursor = 0
 	out := m.renderInboxDetail(m.width, m.height-4)
-	if !strings.Contains(out, "TIME") || !strings.Contains(out, "SENDER") || !strings.Contains(out, "MESSAGE") {
-		t.Fatalf("renderInboxDetail should contain table header TIME/SENDER/MESSAGE, got:\n%s", out)
+	if !strings.Contains(out, "TIME") || !strings.Contains(out, "NAME") || !strings.Contains(out, "MESSAGE") {
+		t.Fatalf("renderInboxDetail should contain table header TIME/NAME/MESSAGE, got:\n%s", out)
 	}
 	bobIdx := strings.Index(out, "bob")
 	aliceIdx := strings.Index(out, "alice")

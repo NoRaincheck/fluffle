@@ -389,7 +389,7 @@ func TestInboxDetailScrolling(t *testing.T) {
 	if len(lines) != 6 {
 		t.Fatalf("detail height 6 expected 6 lines, got %d %q", len(lines), rendered)
 	}
-	if !strings.Contains(rendered, "TIME") || !strings.Contains(rendered, "SENDER") || !strings.Contains(rendered, "MESSAGE") {
+	if !strings.Contains(rendered, "TIME") || !strings.Contains(rendered, "NAME") || !strings.Contains(rendered, "MESSAGE") {
 		t.Fatalf("should show table header, got %q", rendered)
 	}
 	if !strings.Contains(rendered, "message 19") {
