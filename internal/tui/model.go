@@ -144,7 +144,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(msg.inbox) == 0 {
 			m.status = "inbox — no messages · q quit"
 		} else if len(filtered) == 0 {
-			m.status = fmt.Sprintf("inbox — 0/%d messages (filtered)%s · q quit", len(msg.inbox), m.inboxStatusSuffix())
+			m.status = fmt.Sprintf("inbox — 0/%d messages (filtered)%s · q quit", totalGroups(msg.inbox), m.inboxStatusSuffix())
 		} else {
 			m.status = fmt.Sprintf("inbox — %d messages · ↑↓/j/k nav · r reply · v sort · f filter%s · q quit", len(filtered), m.inboxStatusSuffix())
 		}
@@ -159,7 +159,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(m.inbox) == 0 {
 			m.status = "inbox — no messages · q quit"
 		} else if len(filtered) == 0 {
-			m.status = fmt.Sprintf("inbox — 0/%d messages (filtered)%s · q quit", len(m.inbox), m.inboxStatusSuffix())
+			m.status = fmt.Sprintf("inbox — 0/%d messages (filtered)%s · q quit", m.inboxTotalGroups(), m.inboxStatusSuffix())
 		} else {
 			m.status = fmt.Sprintf("inbox — %d messages · ↑↓/j/k nav · r reply · v sort · f filter%s · q quit", len(filtered), m.inboxStatusSuffix())
 		}
@@ -428,7 +428,7 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if len(m.inbox) == 0 {
 				m.status = "inbox — no messages · q quit"
 			} else if len(filtered) == 0 {
-				m.status = fmt.Sprintf("inbox — 0/%d messages (filtered)%s · q quit", len(m.inbox), m.inboxStatusSuffix())
+				m.status = fmt.Sprintf("inbox — 0/%d messages (filtered)%s · q quit", m.inboxTotalGroups(), m.inboxStatusSuffix())
 			} else {
 				m.status = fmt.Sprintf("inbox — %d messages · ↑↓/j/k nav · r reply · v sort · f filter%s · q quit", len(filtered), m.inboxStatusSuffix())
 			}
@@ -450,7 +450,7 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if len(m.inbox) == 0 {
 					m.status = "inbox — no messages · q quit"
 				} else if len(filtered) == 0 {
-					m.status = fmt.Sprintf("inbox — 0/%d messages (filtered)%s · q quit", len(m.inbox), m.inboxStatusSuffix())
+					m.status = fmt.Sprintf("inbox — 0/%d messages (filtered)%s · q quit", m.inboxTotalGroups(), m.inboxStatusSuffix())
 				} else {
 					m.status = fmt.Sprintf("inbox — %d messages · ↑↓/j/k nav · r reply · v sort · f filter%s · q quit", len(filtered), m.inboxStatusSuffix())
 				}
@@ -475,7 +475,7 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if len(m.inbox) == 0 {
 					m.status = "inbox — no messages · q quit"
 				} else if len(filtered) == 0 {
-					m.status = fmt.Sprintf("inbox — 0/%d messages (filtered)%s · q quit", len(m.inbox), m.inboxStatusSuffix())
+					m.status = fmt.Sprintf("inbox — 0/%d messages (filtered)%s · q quit", m.inboxTotalGroups(), m.inboxStatusSuffix())
 				} else {
 					m.status = fmt.Sprintf("inbox — %d messages · ↑↓/j/k nav · r reply · v sort · f filter%s · q quit", len(filtered), m.inboxStatusSuffix())
 				}
@@ -542,7 +542,7 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if len(m.inbox) == 0 {
 				m.status = "inbox — no messages · q quit"
 			} else if len(filtered) == 0 {
-				m.status = fmt.Sprintf("inbox — 0/%d messages (filtered)%s · q quit", len(m.inbox), m.inboxStatusSuffix())
+				m.status = fmt.Sprintf("inbox — 0/%d messages (filtered)%s · q quit", m.inboxTotalGroups(), m.inboxStatusSuffix())
 			} else {
 				m.status = fmt.Sprintf("inbox — %d messages · ↑↓/j/k nav · r reply · v sort · f filter%s · q quit", len(filtered), m.inboxStatusSuffix())
 			}
@@ -1192,9 +1192,11 @@ func (m model) renderInboxWithWidth(w, h int) string {
 		h = 5
 	}
 	filtered := m.inboxFilteredSorted()
+	groupedAll, counts := groupInboxByChannelThread(m.inbox)
+	totalGroups := len(groupedAll)
 	title := fmt.Sprintf("Inbox — %d messages", len(filtered))
-	if len(m.inbox) > 0 && len(filtered) != len(m.inbox) {
-		title = fmt.Sprintf("Inbox — %d/%d messages", len(filtered), len(m.inbox))
+	if totalGroups > 0 && len(filtered) != totalGroups {
+		title = fmt.Sprintf("Inbox — %d/%d messages", len(filtered), totalGroups)
 	}
 	if m.inboxFilterChan != "" {
 		f := m.inboxFilterChan
@@ -1270,16 +1272,56 @@ func (m model) renderInboxWithWidth(w, h int) string {
 		chanS := truncate(im.ChannelName, chanW)
 		thrS := truncate(im.ThreadTitle, threadW)
 		author := truncate(im.Author, senderW)
-		content := truncate(strings.ReplaceAll(im.Content, "\n", " "), contentW)
-		lineRaw := fmt.Sprintf("%s%0*d %s  %-12s  %-16s  %-12s  %s", prefix, idW, im.ID, tStr, chanS, thrS, author, content)
-		lineRaw = truncate(lineRaw, w)
+		base := strings.ReplaceAll(im.Content, "\n", " ")
+		more := ""
+		if cnt := counts[inboxKey(im)]; cnt > 1 {
+			more = fmt.Sprintf(" (%d+)", cnt-1)
+		}
+		moreW := len(more)
+		baseAvail := contentW - moreW
+		if more != "" && baseAvail < 1 {
+			baseAvail = 1
+		}
+		if baseAvail < 0 {
+			baseAvail = 0
+		}
+		baseTrunc := truncate(base, baseAvail)
+		if more == "" {
+			baseTrunc = truncate(base, contentW)
+		}
+		var contentRendered string
+		if more != "" {
+			contentRendered = baseTrunc + inboxMoreStyle.Render(more)
+		} else {
+			contentRendered = baseTrunc
+		}
+		contentPlainLen := len(baseTrunc) + moreW
+		if contentPlainLen > contentW {
+			contentPlainLen = contentW
+		}
+		lineRendered := fmt.Sprintf("%s%0*d %s  %-12s  %-16s  %-12s  %s", prefix, idW, im.ID, tStr, chanS, thrS, author, contentRendered)
+		plainLen := len(prefix) + idW + 1 + timeW + 2 + chanW + 2 + threadW + 2 + senderW + 2 + contentPlainLen
+		if plainLen > w {
+			excess := plainLen - w
+			if excess < len(baseTrunc) {
+				baseTrunc = truncate(baseTrunc, max(0, len(baseTrunc)-excess))
+				if more != "" {
+					contentRendered = baseTrunc + inboxMoreStyle.Render(more)
+				} else {
+					contentRendered = baseTrunc
+				}
+				lineRendered = fmt.Sprintf("%s%0*d %s  %-12s  %-16s  %-12s  %s", prefix, idW, im.ID, tStr, chanS, thrS, author, contentRendered)
+			} else {
+				lineRendered = truncate(lineRendered, w)
+			}
+		}
 		var line string
 		if globalIdx == m.cursor {
-			line = chatMsgSelectedStyle.Render(lineRaw)
+			line = chatMsgSelectedStyle.Render(lineRendered)
 		} else {
 			authorStyle := getAuthorStyle(im.AuthorType)
 			_ = authorStyle
-			line = chatMsgStyle.Render(lineRaw)
+			line = chatMsgStyle.Render(lineRendered)
 		}
 		rows = append(rows, line)
 	}
@@ -1315,6 +1357,17 @@ func (m model) renderPreview(w, h int) string {
 			}
 			items = append(items, chatMsgStyle.Render(strings.Repeat("─", min(w-4, 40))))
 			replies := filterThreadReplies(m.previewMessages, im.ThreadID, im.Seq, im.ID)
+			if len(replies) == 0 && m.previewThreadID == im.ThreadID && len(m.previewMessages) > 0 {
+				var prev []store.Message
+				for _, msg := range m.previewMessages {
+					if msg.ThreadID == im.ThreadID && msg.ID != im.ID {
+						prev = append(prev, msg)
+					}
+				}
+				if len(prev) > 0 {
+					replies = prev
+				}
+			}
 			if m.previewThreadID != im.ThreadID && len(m.previewMessages) == 0 {
 				items = append(items, chatMsgStyle.Render("  (loading…)"))
 			} else if len(replies) == 0 {
@@ -1607,12 +1660,62 @@ func inboxSortName(s inboxSort) string {
 	return ""
 }
 
+func inboxKey(im store.InboxMessage) string {
+	if im.ChannelID != 0 && im.ThreadID != 0 {
+		return fmt.Sprintf("%d:%d", im.ChannelID, im.ThreadID)
+	}
+	return fmt.Sprintf("%s:%s", im.ChannelName, im.ThreadTitle)
+}
+
+func inboxIsLater(a, b store.InboxMessage) bool {
+	ta, errA := time.Parse(time.RFC3339, a.CreatedAt)
+	tb, errB := time.Parse(time.RFC3339, b.CreatedAt)
+	if errA == nil && errB == nil {
+		if !ta.Equal(tb) {
+			return ta.After(tb)
+		}
+	} else if a.CreatedAt != b.CreatedAt {
+		return a.CreatedAt > b.CreatedAt
+	}
+	return a.ID > b.ID
+}
+
+func groupInboxByChannelThread(msgs []store.InboxMessage) ([]store.InboxMessage, map[string]int) {
+	if len(msgs) == 0 {
+		return nil, nil
+	}
+	groups := make(map[string]store.InboxMessage)
+	counts := make(map[string]int)
+	for _, im := range msgs {
+		k := inboxKey(im)
+		counts[k]++
+		if cur, ok := groups[k]; !ok {
+			groups[k] = im
+		} else if inboxIsLater(im, cur) {
+			groups[k] = im
+		}
+	}
+	out := make([]store.InboxMessage, 0, len(groups))
+	for _, v := range groups {
+		out = append(out, v)
+	}
+	return out, counts
+}
+
+func totalGroups(msgs []store.InboxMessage) int {
+	g, _ := groupInboxByChannelThread(msgs)
+	return len(g)
+}
+
+func (m *model) inboxTotalGroups() int { return totalGroups(m.inbox) }
+
 func (m *model) inboxFilteredSorted() []store.InboxMessage {
 	if len(m.inbox) == 0 {
 		return nil
 	}
-	filtered := make([]store.InboxMessage, 0, len(m.inbox))
-	for _, im := range m.inbox {
+	grouped, _ := groupInboxByChannelThread(m.inbox)
+	filtered := make([]store.InboxMessage, 0, len(grouped))
+	for _, im := range grouped {
 		if m.inboxFilterChan != "" && !strings.Contains(strings.ToLower(im.ChannelName), strings.ToLower(m.inboxFilterChan)) {
 			continue
 		}
