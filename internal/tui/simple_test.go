@@ -151,8 +151,8 @@ func TestInboxFlow(t *testing.T) {
 	if m.compose.state.parentID != 0 {
 		t.Fatalf("should reply to thread, not parent, got parentID %d", m.compose.state.parentID)
 	}
-	if m.view != viewMessages {
-		t.Fatalf("r should show full thread (viewMessages), got %v", m.view)
+	if m.view != viewInboxDetail {
+		t.Fatalf("r should show full thread (viewInboxDetail), got %v", m.view)
 	}
 	if m.compose.height != 4 {
 		t.Fatalf("compose minimal height 4, got %d", m.compose.height)
@@ -389,12 +389,15 @@ func TestInboxDetailScrolling(t *testing.T) {
 	if len(lines) != 6 {
 		t.Fatalf("detail height 6 expected 6 lines, got %d %q", len(lines), rendered)
 	}
-	if !strings.Contains(rendered, "message 0") {
-		t.Fatalf("should show top, got %q", rendered)
+	if !strings.Contains(rendered, "TIME") || !strings.Contains(rendered, "SENDER") || !strings.Contains(rendered, "MESSAGE") {
+		t.Fatalf("should show table header, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "message 19") {
+		t.Fatalf("latest at top: should show message 19, got %q", rendered)
 	}
 	m.detailScroll = 10
 	rendered2 := m.renderInboxDetail(80, 6)
-	if strings.Contains(rendered2, "message 0") {
+	if strings.Contains(rendered2, "message 19") {
 		t.Fatalf("after scroll top should be hidden %q", rendered2)
 	}
 }
