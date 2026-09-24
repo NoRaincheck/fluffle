@@ -115,7 +115,6 @@ func TestInboxSortChannelThreadTimeOrdering(t *testing.T) {
 	nm, _ = m.Update(inboxFetchedMsg{inbox: inbox})
 	m = toModel(nm)
 
-	// time desc: newest first within each thread
 	nm, _ = m.Update(keyRunes("v")) // latest-asc
 	m = toModel(nm)
 	nm, _ = m.Update(keyRunes("v")) // channel-thread-asc
@@ -123,29 +122,27 @@ func TestInboxSortChannelThreadTimeOrdering(t *testing.T) {
 	nm, _ = m.Update(keyRunes("v")) // channel-thread-asc time desc
 	m = toModel(nm)
 	filtered := m.inboxFilteredSorted()
-	// thread-a has 2 msgs, thread-b has 1; within thread-a newest first = new msg, old msg
+	if len(filtered) != 2 {
+		t.Fatalf("grouped len 2 expected got %d %v", len(filtered), filtered)
+	}
 	if filtered[0].Content != "new msg" || filtered[0].ThreadTitle != "thread-a" {
 		t.Fatalf("time desc: expected new msg first in thread-a, got %v", filtered[0])
 	}
-	if filtered[1].Content != "old msg" || filtered[1].ThreadTitle != "thread-a" {
-		t.Fatalf("time desc: expected old msg second in thread-a, got %v", filtered[1])
-	}
-	if filtered[2].Content != "mid msg" || filtered[2].ThreadTitle != "thread-b" {
-		t.Fatalf("time desc: expected mid msg in thread-b, got %v", filtered[2])
+	if filtered[1].Content != "mid msg" || filtered[1].ThreadTitle != "thread-b" {
+		t.Fatalf("time desc: expected mid msg in thread-b, got %v", filtered[1])
 	}
 
-	// time asc: oldest first within each thread
 	nm, _ = m.Update(keyRunes("v")) // channel-thread-asc time asc
 	m = toModel(nm)
 	filtered = m.inboxFilteredSorted()
-	if filtered[0].Content != "old msg" || filtered[0].ThreadTitle != "thread-a" {
-		t.Fatalf("time asc: expected old msg first in thread-a, got %v", filtered[0])
+	if len(filtered) != 2 {
+		t.Fatalf("grouped len 2 expected got %d", len(filtered))
 	}
-	if filtered[1].Content != "new msg" || filtered[1].ThreadTitle != "thread-a" {
-		t.Fatalf("time asc: expected new msg second in thread-a, got %v", filtered[1])
+	if filtered[0].Content != "new msg" || filtered[0].ThreadTitle != "thread-a" {
+		t.Fatalf("time asc: expected new msg first in thread-a, got %v", filtered[0])
 	}
-	if filtered[2].Content != "mid msg" || filtered[2].ThreadTitle != "thread-b" {
-		t.Fatalf("time asc: expected mid msg in thread-b, got %v", filtered[2])
+	if filtered[1].Content != "mid msg" || filtered[1].ThreadTitle != "thread-b" {
+		t.Fatalf("time asc: expected mid msg in thread-b, got %v", filtered[1])
 	}
 }
 

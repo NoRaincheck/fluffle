@@ -114,6 +114,7 @@ var (
 	humanAuthorStyle  = lipgloss.NewStyle().Foreground(humanColor)
 	agentAuthorStyle  = lipgloss.NewStyle().Foreground(agentColor)
 	systemAuthorStyle = lipgloss.NewStyle().Foreground(systemColor)
+	inboxMoreStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#fab387")).Italic(true)
 )
 
 func getAuthorStyle(authorType string) lipgloss.Style {
