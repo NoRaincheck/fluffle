@@ -1930,18 +1930,7 @@ func formatTime(t string) string {
 	if err != nil {
 		return t
 	}
-	now := time.Now()
-	diff := now.Sub(parsed)
-	if diff < time.Minute {
-		return "now"
-	}
-	if diff < time.Hour {
-		return fmt.Sprintf("%dm", int(diff.Minutes()))
-	}
-	if diff < 24*time.Hour {
-		return fmt.Sprintf("%dh", int(diff.Hours()))
-	}
-	return parsed.Format("01/02")
+	return parsed.Format("Jan 02 15:04")
 }
 
 func latestChannelTime(channels []store.Channel) string {
