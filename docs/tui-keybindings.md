@@ -6,12 +6,11 @@ All key bindings for the Fluffle TUI (`flf tui`). Context-sensitive: some keys o
 
 | Key | Inbox | Compose |
 |-----|-------|---------|
-| `↑` / `k` | Move cursor up | Move cursor left |
-| `↓` / `j` | Move cursor down | Move cursor right |
-| `Enter` | Reply (same as `r`) | Send message |
+| `↑` / `k` | Move cursor up / scroll up | Move cursor left |
+| `↓` / `j` | Move cursor down / scroll down | Move cursor right |
+| `Enter` | View details: open fullscreen scrollable thread | Send message |
 | `r` / `c` | Reply: open compose | — |
 | `n` | New thread: open compose | — |
-| `L` / `l` | Toggle preview panel | — |
 | `q` | Quit | — |
 | `Ctrl+C` | Quit | Quit |
 | `Esc` | No-op | Cancel |
@@ -19,6 +18,25 @@ All key bindings for the Fluffle TUI (`flf tui`). Context-sensitive: some keys o
 | `Delete` | — | Delete char at cursor |
 | `Left` | — | Move cursor left |
 | `Right` | — | Move cursor right |
+
+## Detail View
+
+Fullscreen scrollable thread view. Entered via `Enter` from inbox. `Esc` returns to inbox.
+
+| Key | Action |
+|-----|--------|
+| `↑` / `k` | Scroll up / move cursor up one message |
+| `↓` / `j` | Scroll down / move cursor down one message |
+| `r` | Reply: open compose with `threadID` + `parentID` |
+| `Esc` | Return to inbox (preserves cursor position) |
+| `q` | Quit |
+| `Ctrl+C` | Quit TUI entirely |
+
+**Message display:**
+- Full content wrapped (no truncation)
+- Format: `[TIME] #SEQ Author: wrapped content...`
+- Continuation lines indented under content column
+- Selected message highlighted with `▸` prefix
 
 ## Inbox View
 
@@ -28,7 +46,8 @@ Single flat table showing all messages across all channels/threads.
 |-----|--------|
 | `↑` / `k` | Move cursor up one message |
 | `↓` / `j` | Move cursor down one message |
-| `r` / `c` / `Enter` | Reply: open compose with `threadID` + `parentID` set from cursor position |
+| `r` / `c` | Reply: open compose with `threadID` + `parentID` set from cursor position |
+| `Enter` | Open detail view: fullscreen scrollable thread |
 | `n` | New thread: opens compose, uses channel from `inbox[cursor].ChannelID` |
 | `L` / `l` | Toggle preview panel (shows full message + last 5 replies) |
 | `q` | Quit |
@@ -56,9 +75,9 @@ Toggled by `L` or `l`. Shows a right-side panel with preview content for the cur
 
 **Preview content:**
 - Title: `Preview: #channel › thread · author`
-- Full message content, truncated to adaptive Y lines
-- Truncation marker: `... (+N lines)` if truncated
-- Last 5 replies, each one line truncated
+- Full message content, word-wrapped with no truncation (via `wrapText`)
+- Replies fill remaining pane height; newest-tail truncation when space runs out
+- No truncation marker on root post — always fully visible
 
 ## Compose Modal
 
@@ -89,7 +108,7 @@ Centered overlay. Activated by `r`, `c`, or `n`.
 
 Always visible at the bottom. Shows:
 
-- **Normal**: `inbox — N messages · ↑↓ nav · r reply · n new thread · L preview`
+- **Normal**: `inbox — N messages · ↑↓ nav · Enter view · r reply · n new thread · L preview`
 - **Error**: `error: DAEMON_DOWN: ...`
 - **Empty state**: `no messages — press n for new thread`
 - **Action feedback**: `sent`, `thread "name" created`

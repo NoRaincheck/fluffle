@@ -64,12 +64,13 @@ No new external dependencies beyond the Bubble Tea ecosystem. The TUI reuses `in
      ▲                       │    │                        │
      │                       │    │ Esc (cancel)           │
      │                       │    │                        │
-     └─────↑/j cursor nav ───┘    │                        │
+     │     Enter             │    │                        │
+     └─────▼── inbox detail ─┘    │                        │
                     │              │                        │
-                    └──────────────┘                        │
+                    └─────Esc──────┘                        │
 ```
 
-Single view: **Inbox Table** (tracked as `viewInbox`). Navigation is cursor-based: `↑/↓` or `j/k` moves through messages. `r`/`c`/`Enter` opens compose for reply. `n` opens compose for new thread. `L` toggles preview panel.
+Single view: **Inbox Table** (tracked as `viewInbox`). Navigation is cursor-based: `↑/↓` or `j/k` moves through messages. `r`/`c` opens compose for reply. `n` opens compose for new thread. `Enter` opens detail view. `L` toggles preview panel.
 
 ### State Fields
 
@@ -141,9 +142,9 @@ Renders the inbox as a `lipgloss/table`:
 Renders the preview panel for the cursor-highlighted inbox message:
 
 - Title: `Preview: #channel › thread · author`
-- Full message content, truncated to Y lines (adaptive calculation)
-- Truncation marker: `... (+N lines)` if truncated
-- Last 5 replies, each one line truncated
+- Root post: word-wrapped fully with `wrapText`, no truncation
+- Replies: fill remaining height, newest-tail truncation when space runs out
+- Adaptive Y calculation for available space
 - Empty state: `(no message)` or `(no replies)`
 
 ### `helpView()`
@@ -197,10 +198,11 @@ model.Update(tea.KeyMsg)
   └─ no ──▶ handleKey(key)
               │
               ├─ ↑↓/j/k ──▶ cursor++, cursor-- ──▶ maybeFetchPreview()
-              ├─ r/c/Enter ──▶ handleReply() ──▶ compose.Open(composeModeMessage)
+              ├─ r/c ──▶ handleReply() ──▶ compose.Open(composeModeMessage)
+              ├─ Enter ──▶ viewInboxDetail (fullscreen thread)
               ├─ n ──▶ handleNewThread() ──▶ compose.Open(composeModeNewThread)
               ├─ L/l ──▶ toggle preview ──▶ maybeFetchPreview()
-              ├─ Esc ──▶ no-op (reserved for future filter clear)
+              ├─ Esc ──▶ no-op (inbox) / return to inbox (detail)
               └─ q ──▶ quitting = true ──▶ tea.Quit
   │
   ▼
@@ -236,6 +238,29 @@ type InboxMessage struct {
 
 `GET /v1/inbox?limit=100` → `[]InboxMessage` (JSON, `Content-Type: application/json`). Reuses daemon auth. Existing `GET /v1/threads/:id/messages` serves preview.
 
+## Inbox Detail View
+
+`viewInboxDetail` — fullscreen scrollable thread view. Entered via `Enter` from inbox. `Esc` returns to inbox, preserving `cursor`/`scroll`.
+
+**Rendering:**
+- Full terminal width, single pane (no preview split)
+- Title: `#channel › thread · last <time>`
+- Each message: `[TIME] #SEQ Author: wrapped content...`
+- Continuation lines indented 20 spaces under content column
+- `wrapText` used for all message content — no truncation
+- `detailScroll` tracks vertical scroll offset; `detailCursor` tracks selected message index
+- `clampDetailScroll()` keeps cursor visible within visible window
+- Empty state: `(loading…)` or `(no messages — press r to reply)`
+
+**State fields:**
+| Field | Purpose |
+|-------|---------|
+| `detailThreadID` | Thread ID for the detail view (int64) |
+| `detailScroll` | Vertical scroll offset (int) |
+| `detailCursor` | Selected message index (int) |
+| `savedInboxCursor` | Inbox cursor saved before entering detail |
+| `savedInboxScroll` | Inbox scroll saved before entering detail |
+
 ## Adaptive Preview Y
 
 ```
@@ -248,14 +273,24 @@ Y := clamp(3, 20, hAvail - replyReserve - 2)
 
 1. **Flat inbox over 3-view stack**: All messages in one table. Eliminates Enter/Esc navigation for scanning. `↑↓` is the only nav.
 2. **Preview panel**: Shows full message + last 5 replies. Adaptive Y prevents overflow. Toggle with `L`.
-3. **Reply via `r`/`c`/`Enter`**: All three keys open compose. `threadID` + `parentID` set from cursor position for threaded replies.
-4. **No filter/sort**: Explicitly deferred. YAGNI.
-5. **Preview auto-enables at ≥100 cols**: Below 100 cols, user must press `L` to enable. At 80-99 cols, preview available but off by default. Below 80 cols, forced off.
-6. **Status bar at bottom**: Always visible, shows action feedback, error messages, and context-sensitive hints.
-7. **Compose modal centered**: Full width of terminal, height scales with terminal height (min 5, max 12 lines).
-8. **Channel cache retained**: Only for new-thread picker, not for inbox rendering.
-9. **Grouping via columns only**: No injected date/group headers; deferred to follow-up.
-10. **Cursor starts at top (0)**: Keeps `↑↓` natural; start-at-bottom can be added with `G` key later.
+3. **Reply via `r`/`c`**: Opens compose with `threadID` + `parentID` set from cursor position for threaded replies.
+4. **Enter opens detail view**: On inbox, `Enter` opens the selected thread in a fullscreen scrollable detail view. `Esc` returns to inbox, preserving cursor position. Detail view is read-only; `r` from detail opens compose for reply.
+5. **Full-post wrapping in preview and detail**: Preview root post is word-wrapped with no truncation (via `wrapText`), replies fill remaining pane height with newest-tail truncation. Detail view wraps all messages fully — no ellipsis truncation on message content.
+6. **Fill-to-height preview**: Replies in the preview pane fill available space; when content exceeds height, oldest replies are dropped and newest are kept (tail truncation).
+7. **No filter/sort**: Explicitly deferred. YAGNI.
+8. **Preview auto-enables at ≥100 cols**: Below 100 cols, user must press `L` to enable. At 80-99 cols, preview available but off by default. Below 80 cols, forced off.
+9. **Status bar at bottom**: Always visible, shows action feedback, error messages, and context-sensitive hints.
+10. **Compose modal centered**: Full width of terminal, height scales with terminal height (min 5, max 12 lines).
+11. **Channel cache retained**: Only for new-thread picker, not for inbox rendering.
+12. **Grouping via columns only**: No injected date/group headers; deferred to follow-up.
+13. **Cursor starts at top (0)**: Keeps `↑↓` natural; start-at-bottom can be added with `G` key later.
+14. **Detail view hides preview**: When in detail view, the split-pane preview is suppressed — the thread fills the full terminal width.
+15. **Inbox cursor preserved on Esc**: Entering detail saves `cursor`/`scroll`; returning via `Esc` restores them.
+16. **Preview panel hidden in detail**: `View()` early-returns for `viewInboxDetail` with single-pane rendering; the preview split condition guards `&& m.view != viewInboxDetail`.
+
+## wrapText Helper
+
+`func wrapText(s string, width int) []string` — splits `s` on `\n`, then word-wraps each paragraph to `width` columns (preserving words, breaking long words at `width`). Returns slice of lines, all `len(line) <= width`. Used by `renderPreview` (inbox branch) and `renderInboxDetail` for full-post wrapping with no truncation.
 
 ## Deferred Features
 
@@ -266,3 +301,5 @@ Y := clamp(3, 20, hAvail - replyReserve - 2)
 - Toggle density modes (compact/standard/expanded)
 - Search/filter with visual feedback
 - Unread indicators per channel/thread
+- Start-at-bottom cursor (e.g. `G` key)
+- Thread grouping in inbox (by channel/thread)
