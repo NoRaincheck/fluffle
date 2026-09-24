@@ -979,8 +979,6 @@ func (m model) renderInboxDetail(w, h int) string {
 			tPadded := fmt.Sprintf("%-*s", timeW, tPlain)
 			authorPlain := truncate(msg.Author, senderW)
 			authorPadded := fmt.Sprintf("%-*s", senderW, authorPlain)
-			authorStyle := getAuthorStyle(msg.AuthorType)
-			authorRendered := authorStyle.Render(authorPadded)
 			wrapped := wrapText(strings.ReplaceAll(msg.Content, "\n", " "), msgW)
 			if len(wrapped) == 0 {
 				wrapped = []string{""}
@@ -991,15 +989,22 @@ func (m model) renderInboxDetail(w, h int) string {
 					prefix = "▸ "
 				}
 				var line string
-				if j == 0 {
-					line = fmt.Sprintf("%s%s  %s  %s", prefix, tPadded, authorRendered, wl)
-				} else {
-					indent := strings.Repeat(" ", 2+timeW+2+senderW+2)
-					line = indent + wl
-				}
 				if i == m.detailCursor {
+					if j == 0 {
+						line = fmt.Sprintf("%s%s  %s  %s", prefix, tPadded, authorPadded, wl)
+					} else {
+						indent := strings.Repeat(" ", 2+timeW+2+senderW+2)
+						line = indent + wl
+					}
 					line = chatMsgSelectedStyle.Render(line)
 				} else {
+					authorRendered := getAuthorStyle(msg.AuthorType).Render(authorPadded)
+					if j == 0 {
+						line = fmt.Sprintf("%s%s  %s  %s", prefix, tPadded, authorRendered, wl)
+					} else {
+						indent := strings.Repeat(" ", 2+timeW+2+senderW+2)
+						line = indent + wl
+					}
 					line = chatMsgStyle.Render(line)
 				}
 				allItems = append(allItems, line)
