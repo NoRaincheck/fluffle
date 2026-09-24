@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -416,5 +417,37 @@ func TestPreviewRepliesNotTruncated(t *testing.T) {
 	}
 	if !strings.Contains(rendered, "x x x") {
 		t.Fatalf("full reply content should be visible, got %q", rendered)
+	}
+}
+
+func TestPreviewLinesFitWidth(t *testing.T) {
+	stripAnsi := func(s string) string {
+		re := regexp.MustCompile("\x1b\\[[0-9;]*m")
+		return re.ReplaceAllString(s, "")
+	}
+	content := "Quick note on etiquette: please keep general discussions friendly and on-topic. If you have suggestions for features or want to report bugs, tui-testing and dev are the right places. Have fun!"
+	for _, w := range []int{50, 57, 69, 80} {
+		m := toModel(New("http://127.0.0.1:0"))
+		nm, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+		m = toModel(nm)
+		inbox := []store.InboxMessage{{Message: store.Message{ID: 1, ThreadID: 10, Seq: 1, Author: "alice", AuthorType: "human", Content: "root", CreatedAt: "2026-09-23T10:00:00Z"}, ChannelName: "general", ThreadTitle: "hello", ChannelID: 1}}
+		msgs := []store.Message{{ID: 2, ThreadID: 10, Seq: 2, Author: "alice", Content: content, CreatedAt: "2026-09-23T11:00:00Z"}}
+		nm, _ = m.Update(inboxFetchedMsg{inbox: inbox})
+		m = toModel(nm)
+		nm, _ = m.Update(previewMessagesFetchedMsg{threadID: 10, messages: msgs})
+		m = toModel(nm)
+		m.cursor = 0
+		rendered := m.renderPreview(w, 20)
+		for i, line := range strings.Split(rendered, "\n") {
+			plain := stripAnsi(line)
+			trimmed := strings.TrimRight(plain, " ")
+			runeLen := len([]rune(trimmed))
+			if runeLen > w {
+				t.Fatalf("w=%d line %d exceeds width %d: runeLen %d %q", w, i, w, runeLen, plain)
+			}
+		}
+		if !strings.Contains(rendered, "suggestions") {
+			t.Fatalf("w=%d missing wrapped content", w)
+		}
 	}
 }

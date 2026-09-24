@@ -958,14 +958,17 @@ func (m model) renderInboxDetail(w, h int) string {
 				prefix = "▸ "
 			}
 			headerLine := fmt.Sprintf("%s%s  #%-4d  %s", prefix, tStr, msg.Seq, authorStyled)
-			cw := max(minContentWidth, w-6)
+			plainAuthor := truncate(msg.Author, 15)
+			plainHeaderLen := len(prefix) + len(tStr) + 2 + 6 + 2 + len(plainAuthor)
+			cw := max(minContentWidth, w-plainHeaderLen-2)
 			wrapped := wrapText(msg.Content, cw)
+			indent := strings.Repeat(" ", plainHeaderLen+2)
 			for j, wl := range wrapped {
 				var line string
 				if j == 0 {
 					line = headerLine + "  " + wl
 				} else {
-					line = "                    " + wl
+					line = indent + wl
 				}
 				if i == m.detailCursor {
 					line = chatMsgSelectedStyle.Render(line)
@@ -1319,14 +1322,16 @@ func (m model) renderPreview(w, h int) string {
 			} else {
 				for _, r := range replies {
 					headerLine := fmt.Sprintf("  [%s] %s:", formatTime(r.CreatedAt), truncate(r.Author, 12))
-					cw := max(minContentWidth, w-6)
+					headerLen := len(headerLine)
+					cw := max(minContentWidth, w-headerLen-1)
 					wrapped := wrapText(r.Content, cw)
+					indent := strings.Repeat(" ", headerLen+1)
 					for j, wl := range wrapped {
 						var line string
 						if j == 0 {
 							line = headerLine + " " + wl
 						} else {
-							line = "                    " + wl
+							line = indent + wl
 						}
 						items = append(items, chatMsgStyle.Render(line))
 					}
