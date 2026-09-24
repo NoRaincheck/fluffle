@@ -219,9 +219,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.messages = msg.messages
-		m.cursor = 0
-		m.scroll = 0
-		m.view = viewMessages
+		if m.view == viewInboxDetail && m.detailThreadID == msg.threadID {
+			m.detailCursor = 0
+			m.detailScroll = 0
+		} else {
+			m.cursor = 0
+			m.scroll = 0
+			m.view = viewMessages
+		}
 		threadTitle := ""
 		for _, th := range m.threads {
 			if th.ID == msg.threadID {
@@ -605,8 +610,10 @@ func (m *model) handleThreadReply() (tea.Model, tea.Cmd) {
 		}
 		m.prevView = m.view
 		m.hasPrev = true
-		m.view = viewMessages
-		m.cursor = 0
+		m.view = viewInboxDetail
+		m.detailThreadID = threadID
+		m.detailCursor = 0
+		m.detailScroll = 0
 		m.scroll = 0
 		m.compose.Open(composeModeReply, fmt.Sprintf("Reply in %s › %s", channelName, threadTitle), m.height)
 		m.compose.state.threadID = threadID
@@ -749,7 +756,9 @@ func (m model) View() string {
 	}
 	if m.compose.IsActive() {
 		var bg string
-		if m.compose.state.mode == composeModeReply && m.compose.state.threadID != 0 {
+		if m.view == viewInboxDetail {
+			bg = m.renderInboxDetail(m.width, m.height-4)
+		} else if m.compose.state.mode == composeModeReply && m.compose.state.threadID != 0 {
 			bg = m.renderReplyBackground(m.width, m.height-4)
 		} else {
 			bg = m.renderList()
@@ -916,6 +925,28 @@ func (m model) renderReplyBackground(w, h int) string {
 	return lipgloss.NewStyle().Width(boxW).Render(strings.Join(lines, "\n"))
 }
 
+func sortedMessagesDesc(msgs []store.Message) []store.Message {
+	if msgs == nil {
+		return nil
+	}
+	out := make([]store.Message, len(msgs))
+	copy(out, msgs)
+	sort.SliceStable(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		ta, errA := time.Parse(time.RFC3339, a.CreatedAt)
+		tb, errB := time.Parse(time.RFC3339, b.CreatedAt)
+		if errA == nil && errB == nil {
+			if !ta.Equal(tb) {
+				return ta.After(tb)
+			}
+		} else if a.CreatedAt != b.CreatedAt {
+			return a.CreatedAt > b.CreatedAt
+		}
+		return a.ID > b.ID
+	})
+	return out
+}
+
 func (m model) renderInboxDetail(w, h int) string {
 	if h < 5 {
 		h = 5
@@ -935,42 +966,55 @@ func (m model) renderInboxDetail(w, h int) string {
 	if last := latestMessageTime(m.messages); last != "" {
 		title += fmt.Sprintf("  · last %s", formatTime(last))
 	}
+	timeW := 12
+	senderW := 15
+	_, _, msgW, sorted := m.detailLineCounts(w)
 	var allItems []string
-	if len(m.messages) == 0 {
+	if len(sorted) == 0 {
 		allItems = []string{"  (loading…)"}
 	} else {
-		for i, msg := range m.messages {
+		for i, msg := range sorted {
 			tStr := formatTime(msg.CreatedAt)
-			author := truncate(msg.Author, 15)
-			authorStyled := getAuthorStyle(msg.AuthorType).Render(author)
-			prefix := "  "
-			if i == m.detailCursor {
-				prefix = "▸ "
+			tPlain := truncate(tStr, timeW)
+			tPadded := fmt.Sprintf("%-*s", timeW, tPlain)
+			authorPlain := truncate(msg.Author, senderW)
+			authorPadded := fmt.Sprintf("%-*s", senderW, authorPlain)
+			wrapped := wrapText(strings.ReplaceAll(msg.Content, "\n", " "), msgW)
+			if len(wrapped) == 0 {
+				wrapped = []string{""}
 			}
-			headerLine := fmt.Sprintf("%s%s  #%-4d  %s", prefix, tStr, msg.Seq, authorStyled)
-			plainAuthor := truncate(msg.Author, 15)
-			plainHeaderLen := len(prefix) + len(tStr) + 2 + 6 + 2 + len(plainAuthor)
-			cw := max(minContentWidth, w-plainHeaderLen-2)
-			wrapped := wrapText(msg.Content, cw)
-			indent := strings.Repeat(" ", plainHeaderLen+2)
 			for j, wl := range wrapped {
-				var line string
-				if j == 0 {
-					line = headerLine + "  " + wl
-				} else {
-					line = indent + wl
-				}
+				prefix := "  "
 				if i == m.detailCursor {
+					prefix = "▸ "
+				}
+				var line string
+				if i == m.detailCursor {
+					if j == 0 {
+						line = fmt.Sprintf("%s%s  %s  %s", prefix, tPadded, authorPadded, wl)
+					} else {
+						indent := strings.Repeat(" ", 2+timeW+2+senderW+2)
+						line = indent + wl
+					}
 					line = chatMsgSelectedStyle.Render(line)
 				} else {
+					authorRendered := getAuthorStyle(msg.AuthorType).Render(authorPadded)
+					if j == 0 {
+						line = fmt.Sprintf("%s%s  %s  %s", prefix, tPadded, authorRendered, wl)
+					} else {
+						indent := strings.Repeat(" ", 2+timeW+2+senderW+2)
+						line = indent + wl
+					}
 					line = chatMsgStyle.Render(line)
 				}
 				allItems = append(allItems, line)
 			}
-			allItems = append(allItems, chatMsgStyle.Render(""))
 		}
 	}
-	visibleCap := h - 2
+	headerRow := fmt.Sprintf("  %-*s  %-*s  %s", timeW, "TIME", senderW, "SENDER", "MESSAGE")
+	headerRow = truncate(headerRow, w)
+	headerStyled := lipgloss.NewStyle().Foreground(chatHeaderFg).Bold(true).Render(headerRow)
+	visibleCap := h - 3
 	if visibleCap < 1 {
 		visibleCap = 1
 	}
@@ -989,7 +1033,7 @@ func (m model) renderInboxDetail(w, h int) string {
 	sepLen := max(0, boxW-2)
 	headerStyleNoMargin := chatHeaderStyle.MarginBottom(0)
 	sep := headerStyleNoMargin.Render(strings.Repeat("─", sepLen))
-	lines := []string{headerStyleNoMargin.Render(title), sep}
+	lines := []string{headerStyleNoMargin.Render(title), headerStyled, sep}
 	lines = append(lines, visible...)
 	for len(lines) < h {
 		lines = append(lines, "")
@@ -1290,7 +1334,7 @@ func (m model) renderInboxWithWidth(w, h int) string {
 			contentPlainLen = contentW
 		}
 		lineRendered := fmt.Sprintf("%s%0*d %s  %-12s  %-16s  %-12s  %s", prefix, idW, im.ID, tStr, chanS, thrS, author, contentRendered)
-		plainLen := len(prefix) + idW + 1 + timeW + 2 + chanW + 2 + threadW + 2 + senderW + 2 + contentPlainLen
+		plainLen := 2 + idW + 1 + timeW + 2 + chanW + 2 + threadW + 2 + senderW + 2 + contentPlainLen
 		if plainLen > w {
 			excess := plainLen - w
 			if excess < len(baseTrunc) {
@@ -1600,24 +1644,66 @@ func (m *model) clampCursor() {
 	}
 }
 
+func (m model) detailLineCounts(w int) ([]int, int, int, []store.Message) {
+	timeW := 12
+	senderW := 15
+	msgW := max(minContentWidth, w-timeW-senderW-10)
+	sorted := sortedMessagesDesc(m.messages)
+	if len(sorted) == 0 {
+		return nil, 0, msgW, sorted
+	}
+	counts := make([]int, len(sorted))
+	total := 0
+	for i, msg := range sorted {
+		wrapped := wrapText(strings.ReplaceAll(msg.Content, "\n", " "), msgW)
+		if len(wrapped) == 0 {
+			wrapped = []string{""}
+		}
+		counts[i] = len(wrapped)
+		total += counts[i]
+	}
+	return counts, total, msgW, sorted
+}
+
 func (m *model) clampDetailScroll() {
 	if len(m.messages) == 0 {
 		m.detailScroll = 0
 		return
 	}
+	if m.detailCursor < 0 {
+		m.detailCursor = 0
+	}
+	if m.detailCursor >= len(m.messages) {
+		m.detailCursor = len(m.messages) - 1
+	}
+	counts, total, _, _ := m.detailLineCounts(m.width)
+	lineStart := 0
+	for i := 0; i < m.detailCursor && i < len(counts); i++ {
+		lineStart += counts[i]
+	}
+	cursorCount := 1
+	if m.detailCursor >= 0 && m.detailCursor < len(counts) {
+		cursorCount = counts[m.detailCursor]
+	}
 	h := m.height - 4
-	visible := h - 2
+	visible := h - 3
 	if visible < 1 {
 		visible = 1
 	}
-	if m.detailCursor < m.detailScroll {
-		m.detailScroll = m.detailCursor
+	if lineStart < m.detailScroll {
+		m.detailScroll = lineStart
 	}
-	if m.detailCursor >= m.detailScroll+visible {
-		m.detailScroll = m.detailCursor - visible + 1
+	if lineStart+cursorCount > m.detailScroll+visible {
+		m.detailScroll = lineStart + cursorCount - visible
 	}
 	if m.detailScroll < 0 {
 		m.detailScroll = 0
+	}
+	if total > 0 && m.detailScroll+visible > total {
+		m.detailScroll = total - visible
+		if m.detailScroll < 0 {
+			m.detailScroll = 0
+		}
 	}
 }
 
