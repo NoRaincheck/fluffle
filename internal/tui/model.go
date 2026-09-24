@@ -926,6 +926,9 @@ func (m model) renderReplyBackground(w, h int) string {
 }
 
 func sortedMessagesDesc(msgs []store.Message) []store.Message {
+	if msgs == nil {
+		return nil
+	}
 	out := make([]store.Message, len(msgs))
 	copy(out, msgs)
 	sort.SliceStable(out, func(i, j int) bool {
@@ -965,8 +968,7 @@ func (m model) renderInboxDetail(w, h int) string {
 	}
 	timeW := 12
 	senderW := 15
-	msgW := max(minContentWidth, w-timeW-senderW-6)
-	sorted := sortedMessagesDesc(m.messages)
+	_, _, msgW, sorted := m.detailLineCounts(w)
 	var allItems []string
 	if len(sorted) == 0 {
 		allItems = []string{"  (loading…)"}
@@ -1637,6 +1639,27 @@ func (m *model) clampCursor() {
 	}
 }
 
+func (m model) detailLineCounts(w int) ([]int, int, int, []store.Message) {
+	timeW := 12
+	senderW := 15
+	msgW := max(minContentWidth, w-timeW-senderW-6)
+	sorted := sortedMessagesDesc(m.messages)
+	if len(sorted) == 0 {
+		return nil, 0, msgW, sorted
+	}
+	counts := make([]int, len(sorted))
+	total := 0
+	for i, msg := range sorted {
+		wrapped := wrapText(strings.ReplaceAll(msg.Content, "\n", " "), msgW)
+		if len(wrapped) == 0 {
+			wrapped = []string{""}
+		}
+		counts[i] = len(wrapped)
+		total += counts[i]
+	}
+	return counts, total, msgW, sorted
+}
+
 func (m *model) clampDetailScroll() {
 	if len(m.messages) == 0 {
 		m.detailScroll = 0
@@ -1648,20 +1671,7 @@ func (m *model) clampDetailScroll() {
 	if m.detailCursor >= len(m.messages) {
 		m.detailCursor = len(m.messages) - 1
 	}
-	timeW := 12
-	senderW := 15
-	msgW := max(minContentWidth, m.width-timeW-senderW-6)
-	sorted := sortedMessagesDesc(m.messages)
-	counts := make([]int, len(sorted))
-	total := 0
-	for i, msg := range sorted {
-		wrapped := wrapText(strings.ReplaceAll(msg.Content, "\n", " "), msgW)
-		if len(wrapped) == 0 {
-			wrapped = []string{""}
-		}
-		counts[i] = len(wrapped)
-		total += counts[i]
-	}
+	counts, total, _, _ := m.detailLineCounts(m.width)
 	lineStart := 0
 	for i := 0; i < m.detailCursor && i < len(counts); i++ {
 		lineStart += counts[i]
