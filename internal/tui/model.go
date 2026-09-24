@@ -605,20 +605,22 @@ func (m model) View() string {
 	}
 	var content string
 	if m.preview && m.width >= 80 {
-		halfW := m.width / 2
-		leftW := halfW
-		rightW := m.width - halfW
+		contentW := m.width - 2
+		leftW := contentW / 2
+		rightW := contentW - leftW
 		if leftW < 20 {
 			leftW = 20
-			rightW = m.width - leftW
+			rightW = contentW - leftW
 		}
 		if rightW < 20 {
 			rightW = 20
-			leftW = m.width - rightW
+			leftW = contentW - rightW
 		}
-		left := m.renderListWithWidth(leftW)
-		right := m.renderPreview(rightW)
-		content = lipgloss.JoinHorizontal(lipgloss.Top, left, right)
+		contentH := m.height - 6
+		left := m.renderListWithWidth(leftW, contentH)
+		right := m.renderPreview(rightW, contentH)
+		joined := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
+		content = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(treeBorder).Render(joined)
 	} else {
 		content = m.renderList()
 	}
@@ -638,11 +640,10 @@ func (m model) View() string {
 }
 
 func (m model) renderList() string {
-	return m.renderListWithWidth(m.width)
+	return m.renderListWithWidth(m.width, m.height-4)
 }
 
-func (m model) renderListWithWidth(w int) string {
-	h := m.height - 4
+func (m model) renderListWithWidth(w, h int) string {
 	if h < 5 {
 		h = 5
 	}
@@ -650,7 +651,7 @@ func (m model) renderListWithWidth(w int) string {
 	var allItems []string
 	switch m.view {
 	case viewInbox:
-		return m.renderInboxWithWidth(w)
+		return m.renderInboxWithWidth(w, h)
 	case viewChannels:
 		last := latestChannelTime(m.channels)
 		lastStr := ""
@@ -796,12 +797,10 @@ func (m model) renderListWithWidth(w int) string {
 	if len(lines) > h {
 		lines = lines[:h]
 	}
-	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(treeBorder).Padding(0, 1).Width(boxW).Render(strings.Join(lines, "\n"))
-	return box
+	return lipgloss.NewStyle().Width(boxW).Render(strings.Join(lines, "\n"))
 }
 
-func (m model) renderInboxWithWidth(w int) string {
-	h := m.height - 4
+func (m model) renderInboxWithWidth(w, h int) string {
 	if h < 5 {
 		h = 5
 	}
@@ -816,7 +815,7 @@ func (m model) renderInboxWithWidth(w int) string {
 		if len(lines) > h {
 			lines = lines[:h]
 		}
-		return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(treeBorder).Padding(0, 1).Width(max(20, w)).Render(strings.Join(lines, "\n"))
+		return lipgloss.NewStyle().Width(max(20, w)).Render(strings.Join(lines, "\n"))
 	}
 	timeW := 8
 	chanW := 12
@@ -875,11 +874,10 @@ func (m model) renderInboxWithWidth(w int) string {
 	if len(lines) > h {
 		lines = lines[:h]
 	}
-	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(treeBorder).Padding(0, 1).Width(boxW).Render(strings.Join(lines, "\n"))
+	return lipgloss.NewStyle().Width(boxW).Render(strings.Join(lines, "\n"))
 }
 
-func (m model) renderPreview(w int) string {
-	h := m.height - 4
+func (m model) renderPreview(w, h int) string {
 	if h < 5 {
 		h = 5
 	}
@@ -888,11 +886,11 @@ func (m model) renderPreview(w int) string {
 	switch m.view {
 	case viewInbox:
 		if len(m.inbox) == 0 || m.cursor < 0 || m.cursor >= len(m.inbox) {
-			title = "Preview"
+			title = "[PREVIEW]"
 			items = []string{"  (no message)"}
 		} else {
 			im := m.inbox[m.cursor]
-			title = fmt.Sprintf("Preview: #%s › %s · %s", im.ChannelName, im.ThreadTitle, truncate(im.Author, 20))
+			title = fmt.Sprintf("[PREVIEW THREAD #%d]\n#%s › %s", im.ThreadID, im.ChannelName, truncate(im.ThreadTitle, 30))
 			hPreview := m.height - 4
 			if hPreview < 5 {
 				hPreview = 5
@@ -934,7 +932,7 @@ func (m model) renderPreview(w int) string {
 		}
 	case viewChannels:
 		if len(m.channels) == 0 || m.cursor < 0 || m.cursor >= len(m.channels) {
-			title = "Preview"
+			title = "[PREVIEW]"
 			items = []string{"  (no channel)"}
 		} else {
 			ch := m.channels[m.cursor]
@@ -954,11 +952,11 @@ func (m model) renderPreview(w int) string {
 		}
 	case viewThreads:
 		if len(m.threads) == 0 || m.cursor < 0 || m.cursor >= len(m.threads) {
-			title = "Preview"
+			title = "[PREVIEW]"
 			items = []string{"  (no thread)"}
 		} else {
 			th := m.threads[m.cursor]
-			title = fmt.Sprintf("Preview: %s", th.Title)
+			title = fmt.Sprintf("[PREVIEW THREAD #%d] %s", th.ID, truncate(th.Title, 40))
 			if len(m.previewMessages) == 0 {
 				if m.previewThreadID == th.ID {
 					items = []string{"  (no messages — press c in main view)"}
@@ -977,11 +975,11 @@ func (m model) renderPreview(w int) string {
 		}
 	case viewMessages:
 		if len(m.messages) == 0 || m.cursor < 0 || m.cursor >= len(m.messages) {
-			title = "Preview"
+			title = "[PREVIEW]"
 			items = []string{"  (no message)"}
 		} else {
 			msg := m.messages[m.cursor]
-			title = fmt.Sprintf("Preview: %s", truncate(msg.Author, 20))
+			title = fmt.Sprintf("[PREVIEW MESSAGE #%d] %s", msg.ID, truncate(msg.Author, 30))
 			full := fmt.Sprintf("  %s", msg.Content)
 			wrapped := truncate(full, w-4)
 			items = []string{chatMsgStyle.Render(wrapped), "", chatMsgStyle.Render(fmt.Sprintf("  · %s  · %s", formatTime(msg.CreatedAt), msg.Author))}
@@ -1001,8 +999,7 @@ func (m model) renderPreview(w int) string {
 	if len(lines) > h {
 		lines = lines[:h]
 	}
-	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(chatBorder).Padding(0, 1).Width(max(20, w)).Render(strings.Join(lines, "\n"))
-	return box
+	return lipgloss.NewStyle().Width(max(20, w)).Render(strings.Join(lines, "\n"))
 }
 
 func lastNPreviewMessages(msgs []store.Message, threadID int64, seq int64, n int) []store.Message {

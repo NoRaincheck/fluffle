@@ -140,14 +140,14 @@ func TestAdaptivePreviewTruncation(t *testing.T) {
 	m.width = 120
 	m.height = 24
 	m.cursor = 0
-	rendered := m.renderPreview(50)
+	rendered := m.renderPreview(50, 20)
 	if !strings.Contains(rendered, "(+") {
 		t.Fatalf("expected truncation marker, got %q", rendered)
 	}
 	if strings.Count(rendered, "reply") > 5 {
 		t.Fatalf("should show at most 5 replies")
 	}
-	tbl := m.renderInboxWithWidth(100)
+	tbl := m.renderInboxWithWidth(100, 20)
 	if !strings.Contains(tbl, "CHANNEL") || !strings.Contains(tbl, "CONTENT") {
 		t.Fatalf("header missing %q", tbl)
 	}
