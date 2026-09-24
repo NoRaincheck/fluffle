@@ -1223,7 +1223,7 @@ func (m model) renderInboxWithWidth(w, h int) string {
 		}
 		return lipgloss.NewStyle().Width(max(20, w)).Render(strings.Join(lines, "\n"))
 	}
-	timeW := 8
+	timeW := 11
 	chanW := 12
 	threadW := 16
 	senderW := 12
