@@ -86,7 +86,6 @@ func Open(path string) (*Store, error) {
 func migrate(db *sql.DB, schema string) error {
 	rows, err := db.Query(`PRAGMA table_info(messages)`)
 	if err != nil {
-		// Table doesn't exist yet; just create
 		_, err := db.Exec(schema)
 		return err
 	}
@@ -107,11 +106,9 @@ func migrate(db *sql.DB, schema string) error {
 	}
 	rows.Close()
 	if found {
-		// Schema is up to date; just create any missing tables
 		_, err := db.Exec(schema)
 		return err
 	}
-	// parent_id missing: drop all tables and recreate with new schema
 	for _, tbl := range []string{"reactions", "messages", "threads", "channels"} {
 		db.Exec("DROP TABLE IF EXISTS " + tbl)
 	}
@@ -195,6 +192,13 @@ type Message struct {
 	ID, ThreadID, Seq                            int64
 	ParentID                                     sql.NullInt64
 	Author, AuthorType, Role, Content, CreatedAt string
+}
+
+type InboxMessage struct {
+	Message
+	ChannelName string `json:"channel_name"`
+	ChannelID   int64  `json:"channel_id"`
+	ThreadTitle string `json:"thread_title"`
 }
 
 func (s *Store) CreateThread(channelID int64, title string) (int64, error) {
@@ -353,6 +357,45 @@ func (s *Store) ListMessagesByParent(threadID int64, parentID int64) ([]Message,
 	}
 	defer rows.Close()
 	return scanMessages(rows)
+}
+
+func (s *Store) ListInbox(limit int) ([]InboxMessage, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	q := `SELECT m.id, m.thread_id, m.seq, m.parent_id, m.author, m.author_type, m.role, m.content, COALESCE(m.created_at,''),
+                 c.name, c.id, t.title
+          FROM messages m
+          JOIN threads t ON t.id = m.thread_id
+          JOIN channels c ON c.id = t.channel_id
+          WHERE c.archived_at IS NULL AND t.archived_at IS NULL
+          ORDER BY m.created_at DESC, m.id DESC LIMIT ?`
+	rows, err := s.db.Query(q, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []InboxMessage
+	for rows.Next() {
+		var im InboxMessage
+		if err := rows.Scan(&im.ID, &im.ThreadID, &im.Seq, &im.ParentID, &im.Author, &im.AuthorType, &im.Role, &im.Content, &im.CreatedAt, &im.ChannelName, &im.ChannelID, &im.ThreadTitle); err != nil {
+			return nil, err
+		}
+		out = append(out, im)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	if out == nil {
+		out = []InboxMessage{}
+	}
+	return out, nil
 }
 
 func (s *Store) CountReplies(threadID int64, parentID int64) (int, error) {

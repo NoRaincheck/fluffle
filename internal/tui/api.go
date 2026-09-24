@@ -109,6 +109,29 @@ func (c *apiClient) ListMessages(ctx context.Context, threadID int64) ([]store.M
 	return msgs, nil
 }
 
+func (c *apiClient) ListInbox(ctx context.Context, limit int) ([]store.InboxMessage, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	url := fmt.Sprintf("%s/v1/inbox?limit=%d", c.base, limit)
+	resp, err := c.http.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("DAEMON_DOWN: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return nil, readAPIError(resp)
+	}
+	var msgs []store.InboxMessage
+	if err := json.NewDecoder(resp.Body).Decode(&msgs); err != nil {
+		return nil, fmt.Errorf("DAEMON_DOWN: %w", err)
+	}
+	if msgs == nil {
+		msgs = []store.InboxMessage{}
+	}
+	return msgs, nil
+}
+
 func (c *apiClient) SendMessage(ctx context.Context, threadID, parentID int64, text string) error {
 	body := map[string]any{"Author": "you", "Role": "user", "Content": text, "ParentID": parentID}
 	resp, err := c.http.Post(c.base+"/v1/threads/"+fmt.Sprintf("%d", threadID)+"/messages", "application/json", jsonBody(body))
