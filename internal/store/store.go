@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS messages(
   thread_id INTEGER NOT NULL REFERENCES threads(id),
   seq INTEGER NOT NULL,
   parent_id INTEGER REFERENCES messages(id),
-  author TEXT NOT NULL CHECK(length(trim(author)) > 0),
+  name TEXT NOT NULL CHECK(length(trim(name)) > 0),
   author_type TEXT NOT NULL CHECK(author_type IN ('human','agent')),
   role TEXT NOT NULL CHECK(role IN ('user','assistant','system')),
   content TEXT NOT NULL CHECK(length(trim(content)) > 0),
@@ -54,10 +54,10 @@ CREATE TABLE IF NOT EXISTS reactions(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   message_id INTEGER NOT NULL REFERENCES messages(id),
   emoji TEXT NOT NULL CHECK(length(trim(emoji)) > 0),
-  author TEXT NOT NULL CHECK(length(trim(author)) > 0),
+  name TEXT NOT NULL CHECK(length(trim(name)) > 0),
   author_type TEXT NOT NULL CHECK(author_type IN ('human','agent')),
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-  UNIQUE(message_id, emoji, author)
+  UNIQUE(message_id, emoji, name)
 );
 `
 
@@ -189,9 +189,9 @@ type Thread struct {
 }
 
 type Message struct {
-	ID, ThreadID, Seq                            int64
-	ParentID                                     sql.NullInt64
-	Author, AuthorType, Role, Content, CreatedAt string
+	ID, ThreadID, Seq                          int64
+	ParentID                                   sql.NullInt64
+	Name, AuthorType, Role, Content, CreatedAt string
 }
 
 type InboxMessage struct {
@@ -236,21 +236,21 @@ func (s *Store) ListThreads(channelID int64) ([]Thread, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) AppendMessage(threadID int64, author, authorType, role, content string) (int64, error) {
-	return s.AppendMessageWithParent(threadID, author, authorType, role, content, 0)
+func (s *Store) AppendMessage(threadID int64, name, authorType, role, content string) (int64, error) {
+	return s.AppendMessageWithParent(threadID, name, authorType, role, content, 0)
 }
 
-func (s *Store) AppendMessageWithParent(threadID int64, author, authorType, role, content string, parentID int64) (int64, error) {
-	return s.AppendMessageAtWithParent(threadID, author, authorType, role, content, "", parentID)
+func (s *Store) AppendMessageWithParent(threadID int64, name, authorType, role, content string, parentID int64) (int64, error) {
+	return s.AppendMessageAtWithParent(threadID, name, authorType, role, content, "", parentID)
 }
 
-func (s *Store) AppendMessageAt(threadID int64, author, authorType, role, content, createdAt string) (int64, error) {
-	return s.AppendMessageAtWithParent(threadID, author, authorType, role, content, createdAt, 0)
+func (s *Store) AppendMessageAt(threadID int64, name, authorType, role, content, createdAt string) (int64, error) {
+	return s.AppendMessageAtWithParent(threadID, name, authorType, role, content, createdAt, 0)
 }
 
-func (s *Store) AppendMessageAtWithParent(threadID int64, author, authorType, role, content, createdAt string, parentID int64) (int64, error) {
-	if strings.TrimSpace(author) == "" || strings.TrimSpace(content) == "" {
-		return 0, errors.New("author and content required")
+func (s *Store) AppendMessageAtWithParent(threadID int64, name, authorType, role, content, createdAt string, parentID int64) (int64, error) {
+	if strings.TrimSpace(name) == "" || strings.TrimSpace(content) == "" {
+		return 0, errors.New("name and content required")
 	}
 	if authorType != "human" && authorType != "agent" {
 		return 0, errors.New("bad author_type")
@@ -291,10 +291,10 @@ func (s *Store) AppendMessageAtWithParent(threadID int64, author, authorType, ro
 		if _, err := time.Parse(time.RFC3339, createdAt); err != nil {
 			return 0, err
 		}
-		if _, err := tx.Exec(`INSERT INTO messages(thread_id, seq, parent_id, author, author_type, role, content, created_at) VALUES(?,?,?,?,?,?,?,?)`, threadID, seq, nullIfInt64(parentID), author, authorType, role, content, createdAt); err != nil {
+		if _, err := tx.Exec(`INSERT INTO messages(thread_id, seq, parent_id, name, author_type, role, content, created_at) VALUES(?,?,?,?,?,?,?,?)`, threadID, seq, nullIfInt64(parentID), name, authorType, role, content, createdAt); err != nil {
 			return 0, err
 		}
-	} else if _, err := tx.Exec(`INSERT INTO messages(thread_id, seq, parent_id, author, author_type, role, content) VALUES(?,?,?,?,?,?,?)`, threadID, seq, nullIfInt64(parentID), author, authorType, role, content); err != nil {
+	} else if _, err := tx.Exec(`INSERT INTO messages(thread_id, seq, parent_id, name, author_type, role, content) VALUES(?,?,?,?,?,?,?)`, threadID, seq, nullIfInt64(parentID), name, authorType, role, content); err != nil {
 		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -311,7 +311,7 @@ func nullIfInt64(v int64) any {
 }
 
 func (s *Store) ListMessages(threadID int64, lastN int) ([]Message, error) {
-	q := `SELECT id, thread_id, seq, parent_id, author, author_type, role, content, COALESCE(created_at,'') FROM messages WHERE thread_id = ? ORDER BY seq ASC`
+	q := `SELECT id, thread_id, seq, parent_id, name, author_type, role, content, COALESCE(created_at,'') FROM messages WHERE thread_id = ? ORDER BY seq ASC`
 	if lastN > 0 {
 		q = `SELECT * FROM (` + q + `) ORDER BY seq DESC LIMIT ?`
 		q = `SELECT * FROM (` + q + `) ORDER BY seq ASC`
@@ -334,7 +334,7 @@ func scanMessages(rows *sql.Rows) ([]Message, error) {
 	var out []Message
 	for rows.Next() {
 		var m Message
-		if err := rows.Scan(&m.ID, &m.ThreadID, &m.Seq, &m.ParentID, &m.Author, &m.AuthorType, &m.Role, &m.Content, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.ThreadID, &m.Seq, &m.ParentID, &m.Name, &m.AuthorType, &m.Role, &m.Content, &m.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -350,7 +350,7 @@ func (m Message) ParentIDValue() int64 {
 }
 
 func (s *Store) ListMessagesByParent(threadID int64, parentID int64) ([]Message, error) {
-	q := `SELECT id, thread_id, seq, parent_id, author, author_type, role, content, COALESCE(created_at,'') FROM messages WHERE thread_id = ? AND parent_id = ? ORDER BY seq ASC`
+	q := `SELECT id, thread_id, seq, parent_id, name, author_type, role, content, COALESCE(created_at,'') FROM messages WHERE thread_id = ? AND parent_id = ? ORDER BY seq ASC`
 	rows, err := s.db.Query(q, threadID, parentID)
 	if err != nil {
 		return nil, err
@@ -366,7 +366,7 @@ func (s *Store) ListInbox(limit int) ([]InboxMessage, error) {
 	if limit > 200 {
 		limit = 200
 	}
-	q := `SELECT m.id, m.thread_id, m.seq, m.parent_id, m.author, m.author_type, m.role, m.content, COALESCE(m.created_at,''),
+	q := `SELECT m.id, m.thread_id, m.seq, m.parent_id, m.name, m.author_type, m.role, m.content, COALESCE(m.created_at,''),
                  c.name, c.id, t.title
           FROM messages m
           JOIN threads t ON t.id = m.thread_id
@@ -381,7 +381,7 @@ func (s *Store) ListInbox(limit int) ([]InboxMessage, error) {
 	var out []InboxMessage
 	for rows.Next() {
 		var im InboxMessage
-		if err := rows.Scan(&im.ID, &im.ThreadID, &im.Seq, &im.ParentID, &im.Author, &im.AuthorType, &im.Role, &im.Content, &im.CreatedAt, &im.ChannelName, &im.ChannelID, &im.ThreadTitle); err != nil {
+		if err := rows.Scan(&im.ID, &im.ThreadID, &im.Seq, &im.ParentID, &im.Name, &im.AuthorType, &im.Role, &im.Content, &im.CreatedAt, &im.ChannelName, &im.ChannelID, &im.ThreadTitle); err != nil {
 			return nil, err
 		}
 		out = append(out, im)
@@ -406,14 +406,14 @@ func (s *Store) CountReplies(threadID int64, parentID int64) (int, error) {
 	return n, nil
 }
 
-func (s *Store) AddReaction(messageID int64, emoji, author, authorType string) error {
-	if strings.TrimSpace(emoji) == "" || strings.TrimSpace(author) == "" {
-		return errors.New("emoji and author required")
+func (s *Store) AddReaction(messageID int64, emoji, name, authorType string) error {
+	if strings.TrimSpace(emoji) == "" || strings.TrimSpace(name) == "" {
+		return errors.New("emoji and name required")
 	}
 	if authorType != "human" && authorType != "agent" {
 		return errors.New("bad author_type")
 	}
-	if _, err := s.db.Exec(`INSERT INTO reactions(message_id, emoji, author, author_type) VALUES(?,?,?,?)`, messageID, emoji, author, authorType); err != nil {
+	if _, err := s.db.Exec(`INSERT INTO reactions(message_id, emoji, name, author_type) VALUES(?,?,?,?)`, messageID, emoji, name, authorType); err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
 			return ErrConflict
 		}

@@ -38,6 +38,12 @@ next_ts() {
   date -u -r $(( BASE + ELAPSED )) +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null
 }
 
+# ── agent senders ─────────────────────────────────────────────────────
+# Agents use --agent-id so the server sets author_type="agent" (purple in TUI).
+# Humans omit --agent-id so author_type="human" (blue in TUI).
+AGENT_REPLACER="replacer"
+AGENT_SUMMARIZER="summarizer"
+
 PORT=$(jq -r .port "$FLUFFLE_HOME/daemon.json")
 
 # ── 1. orphan channel: general ───────────────────────────────────────
@@ -95,22 +101,40 @@ flf_json_q message send --thread "$TID_WELCOME" --text "Nice to be here" --as ca
 # --- general: announcements (day 1) ---
 flf_json_q message send --thread "$TID_ANNOUNCE" --text "Fluffle v0.1 is out!" --as alice --created-at "$(next_ts)"
 
+# --- agent: announcements (day 7.5) ---
+flf_json_q message send --thread "$TID_ANNOUNCE" --text "Announcement rotation check: 1 active announcement. No expirations scheduled." --as "$AGENT_REPLACER" --agent-id "$AGENT_REPLACER" --created-at "$(next_ts)"
+
 # --- random: off-topic (day 2) ---
 flf_json_q message send --thread "$TID_OFFTOPIC" --text "Anyone up for a game tonight?" --as dave --created-at "$(next_ts)"
+
+# --- agent: off-topic (day 8.5) ---
+flf_json_q message send --thread "$TID_OFFTOPIC" --text "Game night summary: 4 replies, 2 interested. Scheduling for Friday 8pm." --as "$AGENT_SUMMARIZER" --agent-id "$AGENT_SUMMARIZER" --created-at "$(next_ts)"
 
 # --- random: memes (day 3) ---
 flf_json_q message send --thread "$TID_MEMES" --text "Check this out" --as grace --created-at "$(next_ts)"
 flf_json_q message send --thread "$TID_MEMES" --text "😂😂😂" --as henry --created-at "$(next_ts)"
 
+# --- agent: memes (day 3.5) ---
+flf_json_q message send --thread "$TID_MEMES" --text "Meme quality check: 2 posts, both above threshold. No spam detected." --as "$AGENT_REPLACER" --agent-id "$AGENT_REPLACER" --created-at "$(next_ts)"
+
 # --- tui-testing: feedback (day 4) ---
 flf_json_q message send --thread "$TID_TUI" --text "The preview panel looks great!" --as ivan --created-at "$(next_ts)"
 flf_json_q message send --thread "$TID_TUI" --text "Can we add dark mode?" --as judy --created-at "$(next_ts)"
 
+# --- agent: tui feedback (day 9.5) ---
+flf_json_q message send --thread "$TID_TUI" --text "Feedback digest: 4 messages, 2 feature requests (dark mode, starred threads). 1 bug report pending." --as "$AGENT_SUMMARIZER" --agent-id "$AGENT_SUMMARIZER" --created-at "$(next_ts)"
+
 # --- dev: pr review (day 5) ---
 flf_json_q message send --thread "$TID_PR" --text "LGTM, r+1" --as alice --created-at "$(next_ts)"
 
+# --- agent: pr review (day 10.5) ---
+flf_json_q message send --thread "$TID_PR" --text "PR status: 3 messages, 2 approvals. All comments resolved." --as "$AGENT_REPLACER" --agent-id "$AGENT_REPLACER" --created-at "$(next_ts)"
+
 # --- dev: bug fix (day 6) ---
 flf_json_q message send --thread "$TID_BUG" --text "Found the race condition" --as carol --created-at "$(next_ts)"
+
+# --- agent: bug fix (day 11.5) ---
+flf_json_q message send --thread "$TID_BUG" --text "Triage: race condition in channel map + TOCTOU in append handler. Severity: high. Assignee: carol." --as "$AGENT_REPLACER" --agent-id "$AGENT_REPLACER" --created-at "$(next_ts)"
 
 # ── 9b. fetch message IDs for threaded replies ───────────────────────
 MSG_ANNOUNCE_ROOT=$(curl -s "http://127.0.0.1:$PORT/v1/threads/$TID_ANNOUNCE/messages" | jq -r '.[0].ID')
@@ -144,6 +168,9 @@ flf_json_q message send --thread "$TID_BUG" --text "Nice find, I'll patch it. Th
 
 flf_json_q message send --thread "$TID_WELCOME" --text "Quick note on etiquette: please keep general discussions friendly and on-topic. If you have suggestions for features or want to report bugs, tui-testing and dev are the right places. Have fun!" --as alice --created-at "$(next_ts)"
 
+# --- agent: welcome (day 13) ---
+flf_json_q message send --thread "$TID_WELCOME" --text "Summary of this thread: 4 messages so far. Welcome everyone!" --as "$AGENT_SUMMARIZER" --agent-id "$AGENT_SUMMARIZER" --created-at "$(next_ts)"
+
 flf_json_q message send --thread "$TID_OFFTOPIC" --text "So I was thinking we could set up a weekly game night. Maybe Fridays at 8pm? I was thinking we could do a mix of party games and strategy games. Something like Jackbox for the party games and maybe a round of Catan or Ticket to Ride for strategy. Let me know what works for everyone and I'll set up a recurring calendar invite." --as dave --created-at "$(next_ts)"
 
 flf_json_q message send --thread "$TID_TUI" --text "I've been prototyping a dark mode theme for the TUI. The main challenge is balancing contrast - too dark and text becomes hard to read, too bright and it defeats the purpose. I'm leaning towards a slate-900 background with slate-100 text for body content, and using indigo-500 for links and interactive elements. The key is making sure the thread list, message area, and input bar all have distinct visual hierarchy. Also need to handle the case where the user has a light terminal theme - we should detect that and offer a light mode variant." --as ivan --created-at "$(next_ts)"
@@ -170,6 +197,11 @@ flf react add --message "$MSG_TUI_JUDY_ID" --emoji "👍" --as ivan
 flf react add --message "$MSG_TUI_JUDY_ID" --emoji "👎" --as judy
 flf react add --message "$MSG_PR_BOB" --emoji "✅" --as bob
 flf react add --message "$MSG_BUG_DAVE" --emoji "🔧" --as dave
+
+# ── 10b. agent reactions ─────────────────────────────────────────────
+flf react add --message "$MSG_WELCOME_ALICE" --emoji "🤖" --as "$AGENT_REPLACER" --agent-id "$AGENT_REPLACER"
+flf react add --message "$MSG_OFFTOPIC_DAVE" --emoji "📊" --as "$AGENT_SUMMARIZER" --agent-id "$AGENT_SUMMARIZER"
+flf react add --message "$MSG_PR_BOB" --emoji "✅" --as "$AGENT_REPLACER" --agent-id "$AGENT_REPLACER"
 
 # ── 11. summary ──────────────────────────────────────────────────────
 echo ""

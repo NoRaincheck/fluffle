@@ -490,7 +490,7 @@ func dumpThreadMessages(base string, threadID int64, last int, agentID string) i
 		lines = append(lines, jsonl.Line{
 			Seq:        m.Seq,
 			Role:       m.Role,
-			Author:     m.Author,
+			Name:       m.Name,
 			AuthorType: m.AuthorType,
 			Content:    m.Content,
 			Timestamp:  m.CreatedAt,
@@ -522,7 +522,7 @@ func postJSONLLines(base string, threadID int64, lines []jsonl.Line, agentID str
 		if role == "" {
 			role = "user"
 		}
-		body := map[string]any{"Author": l.Author, "Role": role, "Content": l.Content, "AgentID": agentID, "CreatedAt": l.Timestamp}
+		body := map[string]any{"Name": l.Name, "Role": role, "Content": l.Content, "AgentID": agentID, "CreatedAt": l.Timestamp}
 		var out struct {
 			Seq int64 `json:"seq"`
 		}
@@ -729,7 +729,7 @@ func messageCmd(args []string) int {
 	return messageSendCmd(args[1:])
 }
 
-func defaultAuthor(as string) string {
+func defaultName(as string) string {
 	if as != "" {
 		return as
 	}
@@ -743,7 +743,7 @@ func messageSendCmd(args []string) int {
 	fs := flag.NewFlagSet("message send", flag.ContinueOnError)
 	threadID := fs.Int64("thread", 0, "thread id")
 	text := fs.String("text", "", "message text")
-	as := fs.String("as", "", "author name (default $USER)")
+	as := fs.String("as", "", "name (default $USER)")
 	agentID := fs.String("agent-id", "", "agent id")
 	replyTo := fs.Int64("reply-to", 0, "parent message id for threaded reply")
 	createdAt := fs.String("created-at", "", "message timestamp (RFC3339, e.g. 2025-01-15T10:30:00Z)")
@@ -760,8 +760,8 @@ func messageSendCmd(args []string) int {
 		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
 		return 2
 	}
-	author := defaultAuthor(*as)
-	body := map[string]any{"Author": author, "Role": "user", "Content": *text, "AgentID": *agentID}
+	name := defaultName(*as)
+	body := map[string]any{"Name": name, "Role": "user", "Content": *text, "AgentID": *agentID}
 	if *replyTo != 0 {
 		body["ParentID"] = *replyTo
 	}
@@ -778,7 +778,7 @@ func messageSendCmd(args []string) int {
 	if *jsonOut {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		enc.Encode(map[string]any{"seq": out.Seq, "thread_id": *threadID, "author": author, "content": *text, "parent_id": *replyTo})
+		enc.Encode(map[string]any{"seq": out.Seq, "thread_id": *threadID, "name": name, "content": *text, "parent_id": *replyTo})
 		return 0
 	}
 	fmt.Printf("seq %d\n", out.Seq)
@@ -797,7 +797,7 @@ func reactAddCmd(args []string) int {
 	fs := flag.NewFlagSet("react add", flag.ContinueOnError)
 	messageID := fs.Int64("message", 0, "message id")
 	emoji := fs.String("emoji", "", "emoji")
-	as := fs.String("as", "", "author name (default $USER)")
+	as := fs.String("as", "", "name (default $USER)")
 	agentID := fs.String("agent-id", "", "agent id")
 	if err := fs.Parse(args); err != nil {
 		return 1
@@ -811,8 +811,8 @@ func reactAddCmd(args []string) int {
 		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
 		return 2
 	}
-	author := defaultAuthor(*as)
-	body := map[string]any{"Emoji": *emoji, "Author": author, "AgentID": *agentID}
+	name := defaultName(*as)
+	body := map[string]any{"Emoji": *emoji, "Name": name, "AgentID": *agentID}
 	var out map[string]any
 	u := base + "/v1/messages/" + strconv.FormatInt(*messageID, 10) + "/reactions"
 	if code := apiPost(u, *agentID, body, &out); code != 0 {

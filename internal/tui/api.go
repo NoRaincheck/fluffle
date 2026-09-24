@@ -133,7 +133,7 @@ func (c *apiClient) ListInbox(ctx context.Context, limit int) ([]store.InboxMess
 }
 
 func (c *apiClient) SendMessage(ctx context.Context, threadID, parentID int64, text string) error {
-	body := map[string]any{"Author": "you", "Role": "user", "Content": text, "ParentID": parentID}
+	body := map[string]any{"Name": "you", "Role": "user", "Content": text, "ParentID": parentID}
 	resp, err := c.http.Post(c.base+"/v1/threads/"+fmt.Sprintf("%d", threadID)+"/messages", "application/json", jsonBody(body))
 	if err != nil {
 		return fmt.Errorf("DAEMON_DOWN: %w", err)
@@ -146,7 +146,7 @@ func (c *apiClient) SendMessage(ctx context.Context, threadID, parentID int64, t
 }
 
 func (c *apiClient) AddReaction(ctx context.Context, messageID int64, emoji string) error {
-	body := map[string]any{"Emoji": emoji, "Author": "you"}
+	body := map[string]any{"Emoji": emoji, "Name": "you"}
 	resp, err := c.http.Post(c.base+"/v1/messages/"+fmt.Sprintf("%d", messageID)+"/reactions", "application/json", jsonBody(body))
 	if err != nil {
 		return fmt.Errorf("DAEMON_DOWN: %w", err)

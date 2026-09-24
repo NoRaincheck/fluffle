@@ -502,7 +502,7 @@ func TestE2E_AgentRead(t *testing.T) {
 		}
 		msgs = append(msgs, m)
 	}
-	if len(msgs) != 1 || msgs[0].Content != "agent message" || msgs[0].Author != "alice" {
+	if len(msgs) != 1 || msgs[0].Content != "agent message" || msgs[0].Name != "alice" {
 		t.Fatalf("expected 1 message from alice, got: %s", out)
 	}
 
@@ -604,7 +604,7 @@ func TestE2E_FullWorkflow(t *testing.T) {
 	out = runCLI(t, env, bin, "agent", "read", "--thread", strconv.FormatInt(th.ID, 10), "--json")
 	type Message struct {
 		Seq     int64  `json:"seq"`
-		Author  string `json:"author"`
+		Name    string `json:"name"`
 		Content string `json:"content"`
 	}
 	var msgs []Message
@@ -618,7 +618,7 @@ func TestE2E_FullWorkflow(t *testing.T) {
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(msgs))
 	}
-	if msgs[0].Author != "alice" || msgs[1].Author != "bob" {
+	if msgs[0].Name != "alice" || msgs[1].Name != "bob" {
 		t.Fatalf("expected alice then bob, got: %+v", msgs)
 	}
 
