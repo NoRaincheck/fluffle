@@ -374,6 +374,7 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.cursor = 0
 				m.scroll = 0
 				m.hasPrev = false
+				m.previewThreadID = 0
 				filtered := m.inboxFilteredSorted()
 				if len(m.inbox) == 0 {
 					m.status = "inbox — no messages · q quit"
@@ -382,7 +383,7 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				} else {
 					m.status = fmt.Sprintf("inbox — %d messages · ↑↓/j/k nav · r reply · v sort · f filter%s · q quit", len(filtered), m.inboxStatusSuffix())
 				}
-				return m, m.maybeFetchPreview()
+				return m, tea.Batch(m.fetchInbox(), m.maybeFetchPreview())
 			}
 			m.view = viewThreads
 			m.cursor = 0
@@ -398,6 +399,7 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.cursor = 0
 				m.scroll = 0
 				m.hasPrev = false
+				m.previewThreadID = 0
 				filtered := m.inboxFilteredSorted()
 				if len(m.inbox) == 0 {
 					m.status = "inbox — no messages · q quit"
@@ -406,7 +408,7 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				} else {
 					m.status = fmt.Sprintf("inbox — %d messages · ↑↓/j/k nav · r reply · v sort · f filter%s · q quit", len(filtered), m.inboxStatusSuffix())
 				}
-				return m, m.maybeFetchPreview()
+				return m, tea.Batch(m.fetchInbox(), m.maybeFetchPreview())
 			}
 			m.view = viewChannels
 			m.cursor = 0
@@ -644,6 +646,10 @@ func (m *model) handleComposeSend(msg composeSendMsg) (tea.Model, tea.Cmd) {
 	}
 	m.compose.Close()
 	m.status = "sent"
+	if m.hasPrev && m.prevView == viewInbox {
+		m.previewThreadID = 0
+		return m, tea.Batch(m.fetchMessages(threadID), m.fetchInbox())
+	}
 	if m.view == viewInbox {
 		return m, m.fetchInbox()
 	}
