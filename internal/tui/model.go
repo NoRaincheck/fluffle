@@ -801,7 +801,7 @@ func (m model) renderReplyBackground(w, h int) string {
 			allItems = append(allItems, line)
 		}
 	}
-	visibleCap := h - 1
+	visibleCap := h - 2
 	if visibleCap < 1 {
 		visibleCap = 1
 	}
@@ -821,8 +821,9 @@ func (m model) renderReplyBackground(w, h int) string {
 	}
 	boxW := max(20, w)
 	sepLen := max(0, boxW-2)
-	sep := chatHeaderStyle.Render(strings.Repeat("─", sepLen))
-	lines := []string{chatHeaderStyle.Render(title), sep}
+	headerStyleNoMargin := chatHeaderStyle.MarginBottom(0)
+	sep := headerStyleNoMargin.Render(strings.Repeat("─", sepLen))
+	lines := []string{headerStyleNoMargin.Render(title), sep}
 	lines = append(lines, visible...)
 	for len(lines) < h {
 		lines = append(lines, "")
@@ -835,6 +836,21 @@ func (m model) renderReplyBackground(w, h int) string {
 
 func (m model) renderList() string {
 	return m.renderListWithWidth(m.width, m.height-4)
+}
+
+func (m model) listHeight() int {
+	if m.preview && m.width >= 80 {
+		h := m.height - 6
+		if h < 5 {
+			h = 5
+		}
+		return h
+	}
+	h := m.height - 4
+	if h < 5 {
+		h = 5
+	}
+	return h
 }
 
 func (m model) renderListWithWidth(w, h int) string {
@@ -962,7 +978,7 @@ func (m model) renderListWithWidth(w, h int) string {
 			}
 		}
 	}
-	visibleCap := h - 1
+	visibleCap := h - 2
 	if visibleCap < 1 {
 		visibleCap = 1
 	}
@@ -982,8 +998,9 @@ func (m model) renderListWithWidth(w, h int) string {
 	}
 	boxW := max(20, w)
 	sepLen := max(0, boxW-2)
-	sep := chatHeaderStyle.Render(strings.Repeat("─", sepLen))
-	lines := []string{chatHeaderStyle.Render(title), sep}
+	headerStyleNoMargin := chatHeaderStyle.MarginBottom(0)
+	sep := headerStyleNoMargin.Render(strings.Repeat("─", sepLen))
+	lines := []string{headerStyleNoMargin.Render(title), sep}
 	lines = append(lines, visible...)
 	for len(lines) < h {
 		lines = append(lines, "")
@@ -1013,12 +1030,13 @@ func (m model) renderInboxWithWidth(w, h int) string {
 	title += fmt.Sprintf(" · sort:%s", inboxSortName(m.inboxSort))
 	if len(filtered) == 0 {
 		boxW := max(20, w)
-		sep := chatHeaderStyle.Render(strings.Repeat("─", max(0, boxW-2)))
+		headerStyleNoMargin := chatHeaderStyle.MarginBottom(0)
+		sep := headerStyleNoMargin.Render(strings.Repeat("─", max(0, boxW-2)))
 		empty := "  (no messages)"
 		if len(m.inbox) > 0 {
 			empty = "  (no messages — filtered, press f to clear)"
 		}
-		lines := []string{chatHeaderStyle.Render(title), sep, empty}
+		lines := []string{headerStyleNoMargin.Render(title), sep, empty}
 		for len(lines) < h {
 			lines = append(lines, "")
 		}
@@ -1031,7 +1049,7 @@ func (m model) renderInboxWithWidth(w, h int) string {
 	chanW := 12
 	threadW := 16
 	senderW := 12
-	visibleCap := h - 2
+	visibleCap := h - 3
 	if visibleCap < 1 {
 		visibleCap = 1
 	}
@@ -1060,8 +1078,9 @@ func (m model) renderInboxWithWidth(w, h int) string {
 		idW = 1
 	}
 	contentW := max(minContentWidth, w-idW-timeW-chanW-threadW-senderW-14)
-	headerRow := fmt.Sprintf("  %0*d %*s  %-12s  %-16s  %-12s  %s", idW, maxID, timeW, "TIME", "CHANNEL", "THREAD", "SENDER", "CONTENT")
-	headerRow = lipgloss.NewStyle().Foreground(chatHeaderFg).Bold(true).Render(headerRow)
+	headerRowRaw := fmt.Sprintf("  %0*d %*s  %-12s  %-16s  %-12s  %s", idW, maxID, timeW, "TIME", "CHANNEL", "THREAD", "SENDER", "CONTENT")
+	headerRowRaw = truncate(headerRowRaw, w)
+	headerRow := lipgloss.NewStyle().Foreground(chatHeaderFg).Bold(true).Render(headerRowRaw)
 	boxW := max(20, w)
 	sep2 := lipgloss.NewStyle().Foreground(chatHeaderFg).Render(strings.Repeat("─", max(0, boxW-2)))
 	var rows []string
@@ -1076,17 +1095,19 @@ func (m model) renderInboxWithWidth(w, h int) string {
 		thrS := truncate(im.ThreadTitle, threadW)
 		author := truncate(im.Author, senderW)
 		content := truncate(strings.ReplaceAll(im.Content, "\n", " "), contentW)
-		line := fmt.Sprintf("%s%0*d %s  %-12s  %-16s  %-12s  %s", prefix, idW, im.ID, tStr, chanS, thrS, author, content)
+		lineRaw := fmt.Sprintf("%s%0*d %s  %-12s  %-16s  %-12s  %s", prefix, idW, im.ID, tStr, chanS, thrS, author, content)
+		lineRaw = truncate(lineRaw, w)
+		var line string
 		if globalIdx == m.cursor {
-			line = chatMsgSelectedStyle.Render(line)
+			line = chatMsgSelectedStyle.Render(lineRaw)
 		} else {
 			authorStyle := getAuthorStyle(im.AuthorType)
 			_ = authorStyle
-			line = chatMsgStyle.Render(line)
+			line = chatMsgStyle.Render(lineRaw)
 		}
 		rows = append(rows, line)
 	}
-	lines := []string{chatHeaderStyle.Render(title), headerRow, sep2}
+	lines := []string{chatHeaderStyle.MarginBottom(0).Render(title), headerRow, sep2}
 	lines = append(lines, rows...)
 	for len(lines) < h {
 		lines = append(lines, "")
@@ -1112,40 +1133,17 @@ func (m model) renderPreview(w, h int) string {
 		} else {
 			im := filtered[m.cursor]
 			title = fmt.Sprintf("[PREVIEW THREAD]\n%s › %s", truncate(im.ChannelName, 20), truncate(im.ThreadTitle, 30))
-			hPreview := m.height - 4
-			if hPreview < 5 {
-				hPreview = 5
-			}
-			hAvail := hPreview - 4
-			Y := hAvail - 5*2 - 2
-			if Y < 3 {
-				Y = 3
-			}
-			if Y > 20 {
-				Y = 20
-			}
-			split := strings.Split(im.Content, "\n")
-			display := split
-			remaining := 0
-			truncated := false
-			if len(split) > Y {
-				display = split[:Y]
-				remaining = len(split) - Y
-				truncated = true
-			}
-			for _, l := range display {
+			for _, l := range strings.Split(im.Content, "\n") {
 				items = append(items, chatMsgStyle.Render("  "+truncate(l, max(minContentWidth, w-4))))
 			}
-			if truncated {
-				items = append(items, chatMsgStyle.Render(fmt.Sprintf("  ... (+%d lines)", remaining)))
-			}
 			items = append(items, chatMsgStyle.Render(strings.Repeat("─", min(w-4, 40))))
-			replies := lastNPreviewMessagesWithParent(m.previewMessages, im.ThreadID, im.Seq, im.ID, 5)
+			replies := filterThreadReplies(m.previewMessages, im.ThreadID, im.Seq, im.ID)
 			if len(replies) == 0 {
 				items = append(items, chatMsgStyle.Render("  (no replies)"))
 			} else {
 				for _, r := range replies {
 					line := fmt.Sprintf("  [%s] %s: %s", formatTime(r.CreatedAt), truncate(r.Author, 12), truncate(r.Content, max(minContentWidth, w-20)))
+					line = truncate(line, w)
 					items = append(items, chatMsgStyle.Render(line))
 				}
 			}
@@ -1193,6 +1191,7 @@ func (m model) renderPreview(w, h int) string {
 					author := truncate(msg.Author, 12)
 					content := truncate(msg.Content, max(minContentWidth, w-20))
 					line := fmt.Sprintf("  [%s] %s: %s", tStr, author, content)
+					line = truncate(line, w)
 					items = append(items, chatMsgStyle.Render(line))
 				}
 			}
@@ -1209,11 +1208,13 @@ func (m model) renderPreview(w, h int) string {
 			items = []string{chatMsgStyle.Render(wrapped), "", chatMsgStyle.Render(fmt.Sprintf("  · %s  · %s", formatTime(msg.CreatedAt), msg.Author))}
 		}
 	}
-	header := chatHeaderStyle.Render(title)
-	previewHeaderStyle := chatHeaderStyle.MarginBottom(0)
-
+	headerStyleNoMargin := chatHeaderStyle.MarginBottom(0)
+	headerRendered := headerStyleNoMargin.Render(title)
+	headerLines := strings.Split(headerRendered, "\n")
+	previewHeaderStyle := headerStyleNoMargin
 	sep := previewHeaderStyle.Render(strings.Repeat("─", w))
-	lines := []string{header, sep}
+	lines := append([]string{}, headerLines...)
+	lines = append(lines, sep)
 	lines = append(lines, items...)
 	for len(lines) < h {
 		lines = append(lines, "")
@@ -1226,6 +1227,31 @@ func (m model) renderPreview(w, h int) string {
 
 func lastNPreviewMessages(msgs []store.Message, threadID int64, seq int64, n int) []store.Message {
 	return lastNPreviewMessagesWithParent(msgs, threadID, seq, 0, n)
+}
+
+func filterThreadReplies(msgs []store.Message, threadID int64, seq int64, parentID int64) []store.Message {
+	var filtered []store.Message
+	for _, msg := range msgs {
+		if msg.ThreadID != threadID {
+			continue
+		}
+		if msg.ParentID.Valid && msg.ParentID.Int64 == parentID {
+			filtered = append(filtered, msg)
+		}
+	}
+	if len(filtered) > 0 {
+		return filtered
+	}
+	for _, msg := range msgs {
+		if msg.ThreadID != threadID {
+			continue
+		}
+		if seq != 0 && msg.Seq <= seq {
+			continue
+		}
+		filtered = append(filtered, msg)
+	}
+	return filtered
 }
 
 func lastNPreviewMessagesWithParent(msgs []store.Message, threadID int64, seq int64, parentID int64, n int) []store.Message {
@@ -1294,13 +1320,10 @@ func (m *model) clampCursor() {
 	if m.cursor >= total {
 		m.cursor = total - 1
 	}
-	h := m.height - 4
-	if h < 5 {
-		h = 5
-	}
-	visible := h - 1
+	h := m.listHeight()
+	visible := h - 2
 	if m.view == viewInbox {
-		visible = h - 2
+		visible = h - 3
 	}
 	if visible < 1 {
 		visible = 1

@@ -181,12 +181,19 @@ func TestAdaptivePreviewTruncation(t *testing.T) {
 	m.width = 120
 	m.height = 24
 	m.cursor = 0
-	rendered := m.renderPreview(50, 20)
-	if !strings.Contains(rendered, "(+") {
-		t.Fatalf("expected truncation marker, got %q", rendered)
+	rendered := m.renderPreview(50, 40)
+	if strings.Contains(rendered, "(+") {
+		t.Fatalf("should not have truncation marker, got %q", rendered)
 	}
-	if strings.Count(rendered, "reply") > 5 {
-		t.Fatalf("should show at most 5 replies")
+	if strings.Count(rendered, "reply") < 10 {
+		t.Fatalf("should show all 10 replies, got %d", strings.Count(rendered, "reply"))
+	}
+	if !strings.Contains(rendered, "PREVIEW THREAD") {
+		t.Fatalf("preview header missing, got %q", rendered)
+	}
+	small := m.renderPreview(50, 10)
+	if !strings.Contains(small, "PREVIEW THREAD") {
+		t.Fatalf("preview header should remain visible when clipped, got %q", small)
 	}
 	tbl := m.renderInboxWithWidth(100, 20)
 	if !strings.Contains(tbl, "CHANNEL") || !strings.Contains(tbl, "CONTENT") {
