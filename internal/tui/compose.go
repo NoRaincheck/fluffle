@@ -95,8 +95,12 @@ func (m *composeModel) Update(msg tea.Msg) tea.Cmd {
 			if m.state.cursor < len(m.state.text) {
 				m.state.cursor++
 			}
-		case tea.KeyRunes:
-			for _, r := range msg.Runes {
+		case tea.KeyRunes, tea.KeySpace:
+			runes := msg.Runes
+			if len(runes) == 0 && msg.Type == tea.KeySpace {
+				runes = []rune{' '}
+			}
+			for _, r := range runes {
 				m.state.text = m.state.text[:m.state.cursor] + string(r) + m.state.text[m.state.cursor:]
 				m.state.cursor += len(string(r))
 			}
@@ -244,8 +248,12 @@ func (m *filterModel) Update(msg tea.Msg) tea.Cmd {
 			if m.cursor < len(m.text) {
 				m.cursor++
 			}
-		case tea.KeyRunes:
-			for _, r := range msg.Runes {
+		case tea.KeyRunes, tea.KeySpace:
+			runes := msg.Runes
+			if len(runes) == 0 && msg.Type == tea.KeySpace {
+				runes = []rune{' '}
+			}
+			for _, r := range runes {
 				m.text = m.text[:m.cursor] + string(r) + m.text[m.cursor:]
 				m.cursor += len(string(r))
 			}
