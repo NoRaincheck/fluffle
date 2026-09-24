@@ -1,25 +1,24 @@
 # TUI Architecture
 
-Bubble Tea v2 terminal UI for Fluffle. Split-panel interface: left-hand channel/thread/message list, right-hand preview panel (wide terminals), centered compose modal overlay.
+Bubble Tea v2 terminal UI for Fluffle. Flat inbox table with right-side preview panel (wide terminals), centered compose modal overlay.
 
 ## Overview
 
 ```
-┌─────────────────────┬──────────────────────────────────────────┐
-│ Channels            │ Preview: #hello                          │
-│                     │                                          │
-│ ▸ demo (orphaned)   │ # hello  · now                           │
-│   second (main)     │                                          │
-│                     │ [now] alice: hi                          │
-│                     │ [2m] bob: reply                          │
-│                     │                                          │
-├─────────────────────┤──────────────────────────────────────────┤
-│ ↑↓ nav · Enter open · n new thread · L hide preview · q quit  │
-│ Channels · last now                                                      │
-└─────────────────────┴──────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│ Inbox — 42 messages · last 2m ago                                │
+├──────┬──────────┬─────────┬──────────┬──────────────────────────┤
+│ TIME │ CHANNEL  │ THREAD  │ SENDER   │ CONTENT                  │
+├──────┼──────────┼─────────┼──────────┼──────────────────────────┤
+│ 11:05│ ▸general │ hello   │ 👤alice  │ looks great!             │
+│ 11:00│ random   │ pr-rev  │ 🤖ci-bot │ ✅ build passed          │
+│ 10:45│ general  │ hello   │ 👤bob    │ check out this PR        │
+├──────┴──────────┴─────────┴──────────┴──────────────────────────┤
+│ ↑↓ nav · r reply · n new thread · L preview · q quit            │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-Three views in a stack: **Channels → Threads → Messages**. `Esc` backs up the stack. `L` toggles a right-side preview panel showing the next screen for the highlighted item. Preview auto-enables at ≥100 cols, respects toggle at ≥80 cols, forced off below 80.
+Single flat **Global Inbox** table showing all messages across all channels/threads. `L` toggles a right-side preview panel showing the full selected message + last 5 replies. Preview auto-enables at ≥100 cols, respects toggle at ≥80 cols, forced off below 80.
 
 ## Package Structure
 
@@ -61,29 +60,28 @@ No new external dependencies beyond the Bubble Tea ecosystem. The TUI reuses `in
                     ┌──────────────────────────────────────┐
                     │                                      │
                     ▼                                      │
-  [Channels] ──Enter──▶ [Threads] ──Enter──▶ [Messages]   │
-     ▲                  │    │                      │      │
-     │                  │    │ Esc                  │ c    │
-     │                  │    │                      ▼      │
-     │              [Esc]  [n]               [Compose]     │
-     │                    │                          │     │
-     └────────────────────┴──────────────────────────┘     │
-                    │                                      │
-                    └────────────── Esc ────────────────────┘
+  [Inbox Table] ──r/c/n──▶ [Compose]                      │
+     ▲                       │    │                        │
+     │                       │    │ Esc (cancel)           │
+     │                       │    │                        │
+     └─────↑/j cursor nav ───┘    │                        │
+                    │              │                        │
+                    └──────────────┘                        │
 ```
 
-Three views tracked by `viewKind` enum (`viewChannels`, `viewThreads`, `viewMessages`). Navigation is strictly stack-based: Enter advances, Esc retreats. No lateral navigation.
+Single view: **Inbox Table** (tracked as `viewInbox`). Navigation is cursor-based: `↑/↓` or `j/k` moves through messages. `r`/`c`/`Enter` opens compose for reply. `n` opens compose for new thread. `L` toggles preview panel.
 
 ### State Fields
 
 | Field | Purpose |
 |-------|---------|
-| `view` | Current view kind (Channels/Threads/Messages) |
-| `cursor` | Index into current list (0-based, clamped to list length) |
+| `inbox` | All messages across channels/threads (`[]InboxMessage`) |
+| `cursor` | Index into inbox (0-based, clamped to list length) |
 | `preview` | Whether right-side preview panel is visible |
-| `selectedChannel` | Channel pointed to by cursor (pointer for thread/message views) |
-| `selectedThread` | Thread pointed to by cursor (pointer for message view) |
+| `previewThreadID` | Thread ID for deduped preview fetch |
+| `previewMessages` | Messages for preview panel (filtered replies) |
 | `compose` | Active compose modal state (or inactive) |
+| `channels` | Channel cache (for new-thread picker) |
 | `status` | Status bar text (errors, counts, hints) |
 | `width, height` | Current terminal dimensions (from `WindowSizeMsg`) |
 
@@ -93,22 +91,18 @@ Data is fetched on demand, never polled:
 
 | Event | Fetch |
 |-------|-------|
-| `Init()` | Channels |
-| Enter on channel | Threads for that channel |
-| Enter on thread | Messages for that thread |
-| After send/create | Refresh current list |
-| Preview panel active + cursor moves | Preview data for highlighted item |
+| `Init()` | `ListInbox()` — all messages across channels/threads |
+| Cursor moves to new thread | `GET /v1/threads/:id/messages` (debounced by thread ID) |
+| After send/create | `fetchInbox()` — refetch entire inbox |
+| Preview panel active + cursor moves | Preview data for highlighted item (deduped) |
 
-Preview fetching is idempotent: skips if cursor hasn't changed, or if width < 80.
+Preview fetching is idempotent: skips if cursor hasn't changed, or if width < 80, or if same thread already fetched.
 
 ### Messages (Bubble Tea Msg Types)
 
 | Msg Type | Carries | Triggers |
 |----------|---------|----------|
-| `channelsFetchedMsg` | `[]Channel`, `error` | `fetchChannels()` completes |
-| `threadsFetchedMsg` | `channelID`, `[]Thread`, `error` | `fetchThreads()` completes |
-| `messagesFetchedMsg` | `threadID`, `[]Message`, `error` | `fetchMessages()` completes |
-| `previewThreadsFetchedMsg` | `channelID`, `[]Thread`, `error` | `fetchPreviewThreads()` completes |
+| `inboxFetchedMsg` | `[]InboxMessage`, `error` | `fetchInbox()` completes |
 | `previewMessagesFetchedMsg` | `threadID`, `[]Message`, `error` | `fetchPreviewMessages()` completes |
 | `composeSendMsg` | `text`, `composeMode`, `context` | User presses Enter in compose |
 | `threadCreatedMsg` | `channelID`, `threadID`, `title`, `error` | Thread creation response |
@@ -129,25 +123,28 @@ View()
   └─ append helpView() + status
 ```
 
-### `renderListWithWidth(w int)`
+### `renderInboxWithWidth(w int)`
 
-Renders the current view as a bordered box:
+Renders the inbox as a `lipgloss/table`:
 
-1. Determines title from view kind + latest activity timestamp
-2. Renders list items with cursor indicator (`▸`) or blank prefix (`  `)
-3. Items are styled with `treeItemSelectedStyle` (cursor) or `treeItemStyle` (normal)
-4. Messages show `[timestamp] author: content` with `↳` for replies
-5. Channels show name + `(orphaned)` or `[branch] repo` + last activity
-6. Truncated to panel height, padded with empty lines if short
-7. Wrapped in rounded border via lipgloss
+1. Title: `Inbox — N messages · last <time>`
+2. Header row: `TIME | CHANNEL | THREAD | SENDER | CONTENT`
+3. Fixed column widths: time 8, channel 12, thread 16, sender 12, content fills remaining
+4. Single-line truncation for content with ellipsis
+5. Color-coded sender column (`getAuthorStyle`)
+6. Cursor row highlighted (`chatMsgSelectedStyle`)
+7. Empty state: `(no messages — press n for new thread)`
+8. Truncated to panel height, padded with empty lines if short
 
 ### `renderPreview(w int)`
 
-Renders the preview panel for the cursor-highlighted item:
+Renders the preview panel for the cursor-highlighted inbox message:
 
-- **Channels view**: shows threads of highlighted channel
-- **Threads view**: shows messages of highlighted thread
-- **Messages view**: shows full content of highlighted message
+- Title: `Preview: #channel › thread · author`
+- Full message content, truncated to Y lines (adaptive calculation)
+- Truncation marker: `... (+N lines)` if truncated
+- Last 5 replies, each one line truncated
+- Empty state: `(no message)` or `(no replies)`
 
 ### `helpView()`
 
@@ -162,13 +159,12 @@ Centers a multi-line string horizontally within `width` columns. Used for compos
 | Error | TUI Behavior |
 |-------|-------------|
 | Daemon down | `tui.Run()` returns exit code 2, prints to stderr |
-| HTTP fetch error | Status bar shows "error: ..."; user must navigate away and back |
+| HTTP fetch error | Status bar shows "error: ..."; retains prior inbox |
 | Compose send error | Compose modal header shows error; modal stays open |
 | Empty compose | Compose modal shows "cannot be empty" in red |
-| No channel selected | Status bar shows "select a channel first" |
-| No thread selected | Status bar shows "no thread — n to create" |
+| Empty inbox | Status bar shows "no messages — press n for new thread" |
 
-All errors go through the status bar or compose modal — never panic. The only panics are in `toModel()` (type assertion failure) and `minInt`/`max` helpers (never panic, just comparisons).
+All errors go through the status bar or compose modal — never panic.
 
 ## Styling System
 
@@ -201,11 +197,10 @@ model.Update(tea.KeyMsg)
   └─ no ──▶ handleKey(key)
               │
               ├─ ↑↓/j/k ──▶ cursor++, cursor-- ──▶ maybeFetchPreview()
-              ├─ Enter ──▶ advance view (channels→threads→messages) ──▶ fetch()
-              ├─ Esc ──▶ retreat view ──▶ clear selection
+              ├─ r/c/Enter ──▶ handleReply() ──▶ compose.Open(composeModeMessage)
               ├─ n ──▶ handleNewThread() ──▶ compose.Open(composeModeNewThread)
-              ├─ c ──▶ handlePost() ──▶ compose.Open(composeModeMessage)
               ├─ L/l ──▶ toggle preview ──▶ maybeFetchPreview()
+              ├─ Esc ──▶ no-op (reserved for future filter clear)
               └─ q ──▶ quitting = true ──▶ tea.Quit
   │
   ▼
@@ -218,18 +213,56 @@ tea.View() called by Bubble Tea runtime
 
 ### Unit Test (`simple_test.go`)
 
-Tests the core navigation flow: window resize → channel fetch → cursor down → Enter channel → thread fetch → Enter thread → message fetch → Esc back × 2 → new thread compose. Uses `toModel()` to extract `model` from `tea.Model` interface.
+Tests the core inbox flow: window resize → inbox fetch → cursor nav → reply compose with threadID → adaptive preview truncation. Uses `toModel()` to extract `model` from `tea.Model` interface.
 
-### Manual Testing (`tui-manual-test.md`)
+## InboxMessage Data Type
 
-Comprehensive manual test checklist covering all navigation paths, compose flows, preview toggling, and troubleshooting.
+Enriched message type joining messages→threads→channels:
+
+```go
+type InboxMessage struct {
+    Message
+    ChannelName string `json:"channel_name"`
+    ThreadTitle string `json:"thread_title"`
+    ChannelID   int64  `json:"channel_id"`
+}
+```
+
+## ListInbox Store Method
+
+`ListInbox(limit int) ([]InboxMessage, error)` — SQL joins `messages → threads → channels`, excludes archived, orders DESC then reverses to ASC. Limits capped at 200, negative defaults to 100.
+
+## GET /v1/inbox API Endpoint
+
+`GET /v1/inbox?limit=100` → `[]InboxMessage` (JSON, `Content-Type: application/json`). Reuses daemon auth. Existing `GET /v1/threads/:id/messages` serves preview.
+
+## Adaptive Preview Y
+
+```
+hAvail := previewHeight - 4
+replyReserve := 5 * 2
+Y := clamp(3, 20, hAvail - replyReserve - 2)
+```
 
 ## Design Decisions
 
-1. **Single list, not split panel**: Unlike the original spec (dual panels with independent cursors), the TUI uses one cursor shared across views. Simpler, less confusing.
-2. **Preview panel instead of tree**: The preview panel shows the next screen for the highlighted item, rather than a hierarchical tree. This avoids the complexity of expandable/collapsible tree nodes.
-3. **`c` for both post and reply**: There's no separate `r` key. `c` always appends to the end of a thread. No per-message reply targeting.
-4. **No filter/sort**: The original spec included `/` for repo filter and `s` for sort cycling. These are not implemented in the current TUI.
-5. **Preview auto-enables at ≥100 cols**: Below 100 cols, user must press `L` to enable preview. At 80-99 cols, preview is available but off by default. Below 80 cols, preview is forced off.
+1. **Flat inbox over 3-view stack**: All messages in one table. Eliminates Enter/Esc navigation for scanning. `↑↓` is the only nav.
+2. **Preview panel**: Shows full message + last 5 replies. Adaptive Y prevents overflow. Toggle with `L`.
+3. **Reply via `r`/`c`/`Enter`**: All three keys open compose. `threadID` + `parentID` set from cursor position for threaded replies.
+4. **No filter/sort**: Explicitly deferred. YAGNI.
+5. **Preview auto-enables at ≥100 cols**: Below 100 cols, user must press `L` to enable. At 80-99 cols, preview available but off by default. Below 80 cols, forced off.
 6. **Status bar at bottom**: Always visible, shows action feedback, error messages, and context-sensitive hints.
 7. **Compose modal centered**: Full width of terminal, height scales with terminal height (min 5, max 12 lines).
+8. **Channel cache retained**: Only for new-thread picker, not for inbox rendering.
+9. **Grouping via columns only**: No injected date/group headers; deferred to follow-up.
+10. **Cursor starts at top (0)**: Keeps `↑↓` natural; start-at-bottom can be added with `G` key later.
+
+## Deferred Features
+
+- Date grouping / relative timestamps
+- Reply count inline (` ↳ 5 replies`)
+- Reaction display in list view
+- Visual reply threading (indentation + tree lines)
+- Toggle density modes (compact/standard/expanded)
+- Search/filter with visual feedback
+- Unread indicators per channel/thread
