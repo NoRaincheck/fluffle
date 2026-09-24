@@ -27,78 +27,26 @@ func TestInboxSortV(t *testing.T) {
 	if filtered[0].Content != "third" || filtered[1].Content != "first" || filtered[2].Content != "second" {
 		t.Fatalf("latest-desc sort failed: got %v %v %v", filtered[0].Content, filtered[1].Content, filtered[2].Content)
 	}
-	// press v to cycle to latest-asc
+	// press v to cycle to channel/thread + time desc (still latest to oldest, but grouped)
 	nm, _ = m.Update(keyRunes("v"))
 	m = toModel(nm)
-	if m.inboxSort != inboxSortLatestAsc {
-		t.Fatalf("sort not cycled to latest-asc")
+	if m.inboxSort != inboxSortChannelThreadDesc {
+		t.Fatalf("sort not cycled to channel-thread desc")
 	}
 	filtered = m.inboxFilteredSorted()
-	// latest-asc: second (09), first (10), third (11)
-	if filtered[0].Content != "second" || filtered[1].Content != "first" || filtered[2].Content != "third" {
-		t.Fatalf("latest-asc sort failed: got %v %v %v", filtered[0].Content, filtered[1].Content, filtered[2].Content)
+	// channel A→Z, thread A→Z, time ↓: a-channel/a-thread (second 09), a-channel/b-thread (third 11), b-channel/z-thread (first 10)
+	if filtered[0].Content != "second" || filtered[1].Content != "third" || filtered[2].Content != "first" {
+		t.Fatalf("channel-thread desc sort failed: got %v %v %v", filtered[0].Content, filtered[1].Content, filtered[2].Content)
 	}
-	// cycle to channel/thread asc
-	nm, _ = m.Update(keyRunes("v"))
-	m = toModel(nm)
-	if m.inboxSort != inboxSortChannelThreadAsc {
-		t.Fatalf("sort not cycled to channel-thread asc")
-	}
-	filtered = m.inboxFilteredSorted()
-	// channel/thread asc: a-channel/a-thread (second), a-channel/b-thread (third), b-channel/z-thread (first)
-	if filtered[0].ChannelName != "a-channel" || filtered[0].ThreadTitle != "a-thread" {
-		t.Fatalf("channel/thread asc first wrong %v", filtered[0])
-	}
-	if filtered[1].ThreadTitle != "b-thread" {
-		t.Fatalf("second wrong %v", filtered[1])
-	}
-	if filtered[2].ChannelName != "b-channel" {
-		t.Fatalf("third wrong %v", filtered[2])
-	}
-	// view should contain sorted order? Check render
-	view := m.View()
-	if !strings.Contains(view, "a-channel") {
-		t.Fatalf("view missing")
-	}
-	// cycle to channel/thread asc time desc
-	nm, _ = m.Update(keyRunes("v"))
-	m = toModel(nm)
-	if m.inboxSort != inboxSortChannelThreadAscTimeDesc {
-		t.Fatalf("sort not cycled to channel-thread asc time desc")
-	}
-	filtered = m.inboxFilteredSorted()
-	// channel A→Z, thread A→Z, time newest first: a-channel/a-thread (third 11:00), a-channel/b-thread (third 11:00), b-channel/z-thread (first 10:00)
-	if filtered[0].ChannelName != "a-channel" || filtered[0].ThreadTitle != "a-thread" {
-		t.Fatalf("channel-thread asc time desc first wrong %v", filtered[0])
-	}
-	if filtered[1].ChannelName != "a-channel" || filtered[1].ThreadTitle != "b-thread" {
-		t.Fatalf("channel-thread asc time desc second wrong %v", filtered[1])
-	}
-	if filtered[2].ChannelName != "b-channel" {
-		t.Fatalf("channel-thread asc time desc third wrong %v", filtered[2])
-	}
-	// cycle to channel/thread asc time asc (oldest first)
-	nm, _ = m.Update(keyRunes("v"))
-	m = toModel(nm)
-	if m.inboxSort != inboxSortChannelThreadAscTimeAsc {
-		t.Fatalf("sort not cycled to channel-thread asc time asc")
-	}
-	filtered = m.inboxFilteredSorted()
-	// channel A→Z, thread A→Z, time oldest first: same grouping, same order for this data
-	if filtered[0].ChannelName != "a-channel" || filtered[0].ThreadTitle != "a-thread" {
-		t.Fatalf("channel-thread asc time asc first wrong %v", filtered[0])
-	}
-	if filtered[1].ChannelName != "a-channel" || filtered[1].ThreadTitle != "b-thread" {
-		t.Fatalf("channel-thread asc time asc second wrong %v", filtered[1])
-	}
-	if filtered[2].ChannelName != "b-channel" {
-		t.Fatalf("channel-thread asc time asc third wrong %v", filtered[2])
-	}
-	// cycle back to latest-desc
+	// press v again to cycle back to latest-desc
 	nm, _ = m.Update(keyRunes("v"))
 	m = toModel(nm)
 	if m.inboxSort != inboxSortLatestDesc {
-		t.Fatalf("cycle back failed")
+		t.Fatalf("cycle back to latest-desc failed")
+	}
+	filtered = m.inboxFilteredSorted()
+	if filtered[0].Content != "third" || filtered[1].Content != "first" || filtered[2].Content != "second" {
+		t.Fatalf("latest-desc sort failed after cycle: got %v %v %v", filtered[0].Content, filtered[1].Content, filtered[2].Content)
 	}
 }
 
@@ -106,43 +54,43 @@ func TestInboxSortChannelThreadTimeOrdering(t *testing.T) {
 	m := toModel(New("http://127.0.0.1:0"))
 	nm, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
 	m = toModel(nm)
-	// Multiple messages in same thread to test time ordering
+	// Multiple messages in same thread to test grouping: representative is latest msg per channel+thread
+	// channel/thread grouping should be alphabetical first, time desc second — both still latest-to-oldest
 	inbox := []store.InboxMessage{
 		{Message: store.Message{ID: 1, ThreadID: 1, Content: "old msg", CreatedAt: "2026-09-23T08:00:00Z"}, ChannelName: "general", ThreadTitle: "thread-a", ChannelID: 1},
-		{Message: store.Message{ID: 2, ThreadID: 1, Content: "new msg", CreatedAt: "2026-09-23T12:00:00Z"}, ChannelName: "general", ThreadTitle: "thread-a", ChannelID: 1},
-		{Message: store.Message{ID: 3, ThreadID: 2, Content: "mid msg", CreatedAt: "2026-09-23T10:00:00Z"}, ChannelName: "general", ThreadTitle: "thread-b", ChannelID: 1},
+		{Message: store.Message{ID: 2, ThreadID: 1, Content: "new msg", CreatedAt: "2026-09-23T09:00:00Z"}, ChannelName: "general", ThreadTitle: "thread-a", ChannelID: 1},
+		{Message: store.Message{ID: 3, ThreadID: 2, Content: "mid msg", CreatedAt: "2026-09-23T11:00:00Z"}, ChannelName: "general", ThreadTitle: "thread-b", ChannelID: 1},
 	}
 	nm, _ = m.Update(inboxFetchedMsg{inbox: inbox})
 	m = toModel(nm)
 
-	nm, _ = m.Update(keyRunes("v")) // latest-asc
-	m = toModel(nm)
-	nm, _ = m.Update(keyRunes("v")) // channel-thread-asc
-	m = toModel(nm)
-	nm, _ = m.Update(keyRunes("v")) // channel-thread-asc time desc
-	m = toModel(nm)
+	// default is latest-desc (pure time): thread-b (rep=mid 11:00) before thread-a (rep=new 09:00)
 	filtered := m.inboxFilteredSorted()
 	if len(filtered) != 2 {
 		t.Fatalf("grouped len 2 expected got %d %v", len(filtered), filtered)
 	}
-	if filtered[0].Content != "new msg" || filtered[0].ThreadTitle != "thread-a" {
-		t.Fatalf("time desc: expected new msg first in thread-a, got %v", filtered[0])
+	if filtered[0].Content != "mid msg" || filtered[0].ThreadTitle != "thread-b" {
+		t.Fatalf("latest-desc: expected mid msg (thread-b) first, got %v", filtered[0])
 	}
-	if filtered[1].Content != "mid msg" || filtered[1].ThreadTitle != "thread-b" {
-		t.Fatalf("time desc: expected mid msg in thread-b, got %v", filtered[1])
+	if filtered[1].Content != "new msg" || filtered[1].ThreadTitle != "thread-a" {
+		t.Fatalf("latest-desc: expected new msg (thread-a) second, got %v", filtered[1])
 	}
 
-	nm, _ = m.Update(keyRunes("v")) // channel-thread-asc time asc
+	// press v to toggle to channel/thread desc: thread-a (a) before thread-b (b) despite being older — both still time desc but grouped
+	nm, _ = m.Update(keyRunes("v"))
 	m = toModel(nm)
+	if m.inboxSort != inboxSortChannelThreadDesc {
+		t.Fatalf("sort not cycled to channel-thread desc")
+	}
 	filtered = m.inboxFilteredSorted()
 	if len(filtered) != 2 {
 		t.Fatalf("grouped len 2 expected got %d", len(filtered))
 	}
 	if filtered[0].Content != "new msg" || filtered[0].ThreadTitle != "thread-a" {
-		t.Fatalf("time asc: expected new msg first in thread-a, got %v", filtered[0])
+		t.Fatalf("channel-thread desc: expected new msg (thread-a) first, got %v", filtered[0])
 	}
 	if filtered[1].Content != "mid msg" || filtered[1].ThreadTitle != "thread-b" {
-		t.Fatalf("time asc: expected mid msg in thread-b, got %v", filtered[1])
+		t.Fatalf("channel-thread desc: expected mid msg (thread-b) second, got %v", filtered[1])
 	}
 }
 
@@ -256,12 +204,15 @@ func TestInboxFilterAndSortInteraction(t *testing.T) {
 	}
 	nm, _ = m.Update(inboxFetchedMsg{inbox: inbox})
 	m = toModel(nm)
-	// sort by channel/thread asc should order by thread title a before z, both same channel, so b before a in time but after sort, a thread first
+	// press v to toggle to channel/thread desc: b (thread a) before a (thread z) despite time — proves grouping
 	nm, _ = m.Update(keyRunes("v"))
 	m = toModel(nm)
+	if m.inboxSort != inboxSortChannelThreadDesc {
+		t.Fatalf("sort not cycled to channel-thread desc")
+	}
 	filtered := m.inboxFilteredSorted()
 	if filtered[0].Content != "b" {
-		t.Fatalf("sort channel/thread asc failed")
+		t.Fatalf("sort channel-thread desc failed")
 	}
 	// now filter by thread "z" should show only a
 	nm, _ = m.Update(filterAppliedMsg{text: "general/z"})

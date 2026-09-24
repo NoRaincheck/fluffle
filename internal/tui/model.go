@@ -32,10 +32,7 @@ type inboxSort int
 
 const (
 	inboxSortLatestDesc inboxSort = iota
-	inboxSortLatestAsc
-	inboxSortChannelThreadAsc
-	inboxSortChannelThreadAscTimeDesc
-	inboxSortChannelThreadAscTimeAsc
+	inboxSortChannelThreadDesc
 )
 
 type model struct {
@@ -524,16 +521,9 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleThreadReply()
 	case "v":
 		if m.view == viewInbox {
-			switch m.inboxSort {
-			case inboxSortLatestDesc:
-				m.inboxSort = inboxSortLatestAsc
-			case inboxSortLatestAsc:
-				m.inboxSort = inboxSortChannelThreadAsc
-			case inboxSortChannelThreadAsc:
-				m.inboxSort = inboxSortChannelThreadAscTimeDesc
-			case inboxSortChannelThreadAscTimeDesc:
-				m.inboxSort = inboxSortChannelThreadAscTimeAsc
-			case inboxSortChannelThreadAscTimeAsc:
+			if m.inboxSort == inboxSortLatestDesc {
+				m.inboxSort = inboxSortChannelThreadDesc
+			} else {
 				m.inboxSort = inboxSortLatestDesc
 			}
 			m.cursor = 0
@@ -1648,14 +1638,8 @@ func inboxSortName(s inboxSort) string {
 	switch s {
 	case inboxSortLatestDesc:
 		return "latest ↓"
-	case inboxSortLatestAsc:
-		return "latest ↑"
-	case inboxSortChannelThreadAsc:
-		return "channel A→Z, thread A→Z, time ↑"
-	case inboxSortChannelThreadAscTimeDesc:
+	case inboxSortChannelThreadDesc:
 		return "channel A→Z, thread A→Z, time ↓"
-	case inboxSortChannelThreadAscTimeAsc:
-		return "channel A→Z, thread A→Z, time ↑ (oldest)"
 	}
 	return ""
 }
@@ -1725,7 +1709,21 @@ func (m *model) inboxFilteredSorted() []store.InboxMessage {
 		filtered = append(filtered, im)
 	}
 	switch m.inboxSort {
-	case inboxSortChannelThreadAsc, inboxSortChannelThreadAscTimeDesc, inboxSortChannelThreadAscTimeAsc:
+	case inboxSortLatestDesc:
+		sort.SliceStable(filtered, func(i, j int) bool {
+			a, b := filtered[i], filtered[j]
+			taTime, errA := time.Parse(time.RFC3339, a.CreatedAt)
+			tbTime, errB := time.Parse(time.RFC3339, b.CreatedAt)
+			if errA == nil && errB == nil {
+				if !taTime.Equal(tbTime) {
+					return taTime.After(tbTime)
+				}
+			} else if a.CreatedAt != b.CreatedAt {
+				return a.CreatedAt > b.CreatedAt
+			}
+			return a.ID > b.ID
+		})
+	case inboxSortChannelThreadDesc:
 		sort.SliceStable(filtered, func(i, j int) bool {
 			a, b := filtered[i], filtered[j]
 			ca := strings.ToLower(a.ChannelName)
@@ -1742,57 +1740,12 @@ func (m *model) inboxFilteredSorted() []store.InboxMessage {
 			tbTime, errB := time.Parse(time.RFC3339, b.CreatedAt)
 			if errA == nil && errB == nil {
 				if !taTime.Equal(tbTime) {
-					switch m.inboxSort {
-					case inboxSortChannelThreadAsc:
-						return taTime.Before(tbTime)
-					case inboxSortChannelThreadAscTimeDesc:
-						return taTime.After(tbTime)
-					case inboxSortChannelThreadAscTimeAsc:
-						return taTime.Before(tbTime)
-					}
+					return taTime.After(tbTime)
 				}
 			} else if a.CreatedAt != b.CreatedAt {
-				switch m.inboxSort {
-				case inboxSortChannelThreadAsc:
-					return a.CreatedAt < b.CreatedAt
-				case inboxSortChannelThreadAscTimeDesc:
-					return a.CreatedAt > b.CreatedAt
-				case inboxSortChannelThreadAscTimeAsc:
-					return a.CreatedAt < b.CreatedAt
-				}
+				return a.CreatedAt > b.CreatedAt
 			}
-			switch m.inboxSort {
-			case inboxSortChannelThreadAsc:
-				return a.ID < b.ID
-			case inboxSortChannelThreadAscTimeDesc:
-				return a.ID > b.ID
-			case inboxSortChannelThreadAscTimeAsc:
-				return a.ID < b.ID
-			}
-			return false
-		})
-	case inboxSortLatestAsc, inboxSortLatestDesc:
-		sort.SliceStable(filtered, func(i, j int) bool {
-			a, b := filtered[i], filtered[j]
-			ta, errA := time.Parse(time.RFC3339, a.CreatedAt)
-			tb, errB := time.Parse(time.RFC3339, b.CreatedAt)
-			if errA == nil && errB == nil {
-				if !ta.Equal(tb) {
-					if m.inboxSort == inboxSortLatestDesc {
-						return ta.After(tb)
-					}
-					return ta.Before(tb)
-				}
-			} else if a.CreatedAt != b.CreatedAt {
-				if m.inboxSort == inboxSortLatestDesc {
-					return a.CreatedAt > b.CreatedAt
-				}
-				return a.CreatedAt < b.CreatedAt
-			}
-			if m.inboxSort == inboxSortLatestDesc {
-				return a.ID > b.ID
-			}
-			return a.ID < b.ID
+			return a.ID > b.ID
 		})
 	}
 	return filtered
