@@ -246,3 +246,54 @@ func TestInboxKeybindings(t *testing.T) {
 		t.Fatalf("Esc should be no-op in inbox, got %v", m.view)
 	}
 }
+
+func TestWrapText(t *testing.T) {
+	long := "hello world this is a very long line that should wrap"
+	lines := wrapText(long, 20)
+	for i, l := range lines {
+		if len(l) > 20 {
+			t.Fatalf("line %d too long %q len %d", i, l, len(l))
+		}
+	}
+	if len(lines) < 3 {
+		t.Fatalf("expected wrap to 3+ lines, got %d: %v", len(lines), lines)
+	}
+	w2 := wrapText("supercalifragilisticexpialidocious", 10)
+	for i, l := range w2 {
+		if len(l) > 10 {
+			t.Fatalf("break failed line %d %q", i, l)
+		}
+	}
+}
+
+func TestWrapTextPreservesParagraphs(t *testing.T) {
+	multi := "first line\nsecond line\n\nthird line"
+	lines := wrapText(multi, 20)
+	found := false
+	for _, l := range lines {
+		if l == "" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("should preserve blank paragraph, got %v", lines)
+	}
+}
+
+func TestPreviewWrapNoTruncate(t *testing.T) {
+	m := toModel(New("http://127.0.0.1:0"))
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+	m = toModel(nm)
+	m.preview = true
+	m.cursor = 0
+	inbox := []store.InboxMessage{{Message: store.Message{ID: 1, ThreadID: 10, Content: "word " + strings.Repeat("x", 40) + " end", Author: "alice", AuthorType: "human", CreatedAt: "2026-09-23T10:00:00Z"}, ChannelName: "general", ThreadTitle: "hello"}}
+	nm, _ = m.Update(inboxFetchedMsg{inbox: inbox})
+	m = toModel(nm)
+	nm, _ = m.Update(previewMessagesFetchedMsg{threadID: 10, messages: []store.Message{{ID: 2, ThreadID: 10, Seq: 2, Author: "bob", Content: "reply", CreatedAt: "2026-09-23T11:00:00Z"}}})
+	m = toModel(nm)
+	rendered := m.renderPreview(50, 30)
+	if !strings.Contains(rendered, "end") {
+		t.Fatalf("root post truncated, missing 'end' in %q", rendered)
+	}
+}

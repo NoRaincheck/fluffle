@@ -1533,6 +1533,57 @@ func truncate(s string, maxLen int) string {
 	return s[:maxLen-ellipsisReserve] + "..."
 }
 
+func wrapText(s string, width int) []string {
+	if width < 1 {
+		width = 1
+	}
+	var out []string
+	for _, para := range strings.Split(s, "\n") {
+		if para == "" {
+			out = append(out, "")
+			continue
+		}
+		words := strings.Fields(para)
+		if len(words) == 0 {
+			out = append(out, "")
+			continue
+		}
+		cur := words[0]
+		if len(cur) > width {
+			for len(cur) > width {
+				out = append(out, cur[:width])
+				cur = cur[width:]
+			}
+		}
+		for _, w := range words[1:] {
+			if len(w) > width {
+				if cur != "" {
+					out = append(out, cur)
+					cur = ""
+				}
+				for len(w) > width {
+					out = append(out, w[:width])
+					w = w[width:]
+				}
+				cur = w
+				continue
+			}
+			if cur == "" {
+				cur = w
+			} else if len(cur)+1+len(w) <= width {
+				cur += " " + w
+			} else {
+				out = append(out, cur)
+				cur = w
+			}
+		}
+		if cur != "" {
+			out = append(out, cur)
+		}
+	}
+	return out
+}
+
 func formatTime(t string) string {
 	if t == "" {
 		return ""
