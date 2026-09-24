@@ -1111,7 +1111,7 @@ func (m model) renderPreview(w, h int) string {
 			items = []string{"  (no message)"}
 		} else {
 			im := filtered[m.cursor]
-			title = fmt.Sprintf("[PREVIEW THREAD %s]", truncate(im.ThreadTitle, 30))
+			title = fmt.Sprintf("[PREVIEW THREAD]\n%s › %s", truncate(im.ChannelName, 20), truncate(im.ThreadTitle, 30))
 			hPreview := m.height - 4
 			if hPreview < 5 {
 				hPreview = 5
@@ -1176,7 +1176,11 @@ func (m model) renderPreview(w, h int) string {
 			items = []string{"  (no thread)"}
 		} else {
 			th := m.threads[m.cursor]
-			title = fmt.Sprintf("[PREVIEW THREAD] %s", truncate(th.Title, 40))
+			chName := ""
+			if m.selectedChannel != nil {
+				chName = m.selectedChannel.Name
+			}
+			title = fmt.Sprintf("[PREVIEW THREAD]\n%s › %s", truncate(chName, 20), truncate(th.Title, 30))
 			if len(m.previewMessages) == 0 {
 				if m.previewThreadID == th.ID {
 					items = []string{"  (no messages — press r to reply)"}
