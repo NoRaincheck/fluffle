@@ -330,12 +330,27 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	switch msg.Type {
 	case tea.KeyUp:
+		if m.view == viewInboxDetail {
+			if m.detailCursor > 0 {
+				m.detailCursor--
+			}
+			m.clampDetailScroll()
+			return m, nil
+		}
 		if m.cursor > 0 {
 			m.cursor--
 		}
 		m.clampCursor()
 		return m, m.maybeFetchPreview()
 	case tea.KeyDown:
+		if m.view == viewInboxDetail {
+			max := len(m.messages) - 1
+			if m.detailCursor < max {
+				m.detailCursor++
+			}
+			m.clampDetailScroll()
+			return m, nil
+		}
 		max := 0
 		switch m.view {
 		case viewInbox:
@@ -740,8 +755,19 @@ func (m model) View() string {
 		content := lipgloss.JoinVertical(lipgloss.Left, bg, "", center(composeView, m.width))
 		return content
 	}
+	if m.view == viewInboxDetail {
+		content := m.renderInboxDetail(m.width, m.height-4)
+		headerStyle := lipgloss.NewStyle().Foreground(accent).Bold(true).Width(m.width)
+		header := headerStyle.Render(" fluffle ")
+		help := m.helpView()
+		helpStyle := lipgloss.NewStyle().Width(m.width).Render(help)
+		status := statusStyle.Width(m.width).Render(m.status)
+		footer := lipgloss.JoinVertical(lipgloss.Left, helpStyle, status)
+		full := lipgloss.JoinVertical(lipgloss.Left, header, content, footer)
+		return full
+	}
 	var content string
-	if m.preview && m.width >= 80 {
+	if m.preview && m.width >= 80 && m.view != viewInboxDetail {
 		contentW := m.width - 2
 		leftW := contentW / 2
 		rightW := contentW - leftW
@@ -867,6 +893,87 @@ func (m model) renderReplyBackground(w, h int) string {
 	}
 	if start < 0 {
 		start = 0
+	}
+	visible := allItems[start:]
+	if len(visible) > visibleCap {
+		visible = visible[:visibleCap]
+	}
+	boxW := max(20, w)
+	sepLen := max(0, boxW-2)
+	headerStyleNoMargin := chatHeaderStyle.MarginBottom(0)
+	sep := headerStyleNoMargin.Render(strings.Repeat("─", sepLen))
+	lines := []string{headerStyleNoMargin.Render(title), sep}
+	lines = append(lines, visible...)
+	for len(lines) < h {
+		lines = append(lines, "")
+	}
+	if len(lines) > h {
+		lines = lines[:h]
+	}
+	return lipgloss.NewStyle().Width(boxW).Render(strings.Join(lines, "\n"))
+}
+
+func (m model) renderInboxDetail(w, h int) string {
+	if h < 5 {
+		h = 5
+	}
+	chName := ""
+	if m.selectedChannel != nil {
+		chName = m.selectedChannel.Name
+	}
+	thName := ""
+	if m.selectedThread != nil {
+		thName = m.selectedThread.Title
+	}
+	title := fmt.Sprintf("%s › %s", chName, thName)
+	if title == " › " {
+		title = "Thread"
+	}
+	if last := latestMessageTime(m.messages); last != "" {
+		title += fmt.Sprintf("  · last %s", formatTime(last))
+	}
+	var allItems []string
+	if len(m.messages) == 0 {
+		allItems = []string{"  (loading…)"}
+	} else {
+		for i, msg := range m.messages {
+			tStr := formatTime(msg.CreatedAt)
+			author := truncate(msg.Author, 15)
+			authorStyled := getAuthorStyle(msg.AuthorType).Render(author)
+			prefix := "  "
+			if i == m.detailCursor {
+				prefix = "▸ "
+			}
+			headerLine := fmt.Sprintf("%s%s  #%-4d  %s", prefix, tStr, msg.Seq, authorStyled)
+			cw := max(minContentWidth, w-6)
+			wrapped := wrapText(msg.Content, cw)
+			for j, wl := range wrapped {
+				var line string
+				if j == 0 {
+					line = headerLine + "  " + wl
+				} else {
+					line = "                    " + wl
+				}
+				if i == m.detailCursor {
+					line = chatMsgSelectedStyle.Render(line)
+				} else {
+					line = chatMsgStyle.Render(line)
+				}
+				allItems = append(allItems, line)
+			}
+			allItems = append(allItems, chatMsgStyle.Render(""))
+		}
+	}
+	visibleCap := h - 2
+	if visibleCap < 1 {
+		visibleCap = 1
+	}
+	start := m.detailScroll
+	if start < 0 {
+		start = 0
+	}
+	if start >= len(allItems) {
+		start = max(0, len(allItems)-visibleCap)
 	}
 	visible := allItems[start:]
 	if len(visible) > visibleCap {
@@ -1420,6 +1527,27 @@ func (m *model) clampCursor() {
 	}
 	if m.scroll < 0 {
 		m.scroll = 0
+	}
+}
+
+func (m *model) clampDetailScroll() {
+	if len(m.messages) == 0 {
+		m.detailScroll = 0
+		return
+	}
+	h := m.height - 4
+	visible := h - 2
+	if visible < 1 {
+		visible = 1
+	}
+	if m.detailCursor < m.detailScroll {
+		m.detailScroll = m.detailCursor
+	}
+	if m.detailCursor >= m.detailScroll+visible {
+		m.detailScroll = m.detailCursor - visible + 1
+	}
+	if m.detailScroll < 0 {
+		m.detailScroll = 0
 	}
 }
 

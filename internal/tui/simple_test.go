@@ -364,3 +364,33 @@ func TestInboxEnterNoOpWhenEmpty(t *testing.T) {
 		t.Fatalf("Enter on empty inbox should stay inbox")
 	}
 }
+
+func TestInboxDetailScrolling(t *testing.T) {
+	m := toModel(New("http://127.0.0.1:0"))
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
+	m = toModel(nm)
+	msgs := make([]store.Message, 20)
+	for i := 0; i < 20; i++ {
+		msgs[i] = store.Message{ID: int64(i + 1), ThreadID: 10, Seq: int64(i + 1), Author: "alice", AuthorType: "human", Content: fmt.Sprintf("message %d with a fairly long content that should wrap", i), CreatedAt: "2026-09-23T10:00:00Z"}
+	}
+	m.view = viewInboxDetail
+	m.detailThreadID = 10
+	m.messages = msgs
+	m.selectedChannel = &store.Channel{Name: "general"}
+	m.selectedThread = &store.Thread{Title: "hello"}
+	m.width = 80
+	m.height = 10
+	rendered := m.renderInboxDetail(80, 6)
+	lines := strings.Split(rendered, "\n")
+	if len(lines) != 6 {
+		t.Fatalf("detail height 6 expected 6 lines, got %d %q", len(lines), rendered)
+	}
+	if !strings.Contains(rendered, "message 0") {
+		t.Fatalf("should show top, got %q", rendered)
+	}
+	m.detailScroll = 10
+	rendered2 := m.renderInboxDetail(80, 6)
+	if strings.Contains(rendered2, "message 0") {
+		t.Fatalf("after scroll top should be hidden %q", rendered2)
+	}
+}
