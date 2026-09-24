@@ -1318,9 +1318,18 @@ func (m model) renderPreview(w, h int) string {
 				items = append(items, chatMsgStyle.Render("  (no replies)"))
 			} else {
 				for _, r := range replies {
-					line := fmt.Sprintf("  [%s] %s: %s", formatTime(r.CreatedAt), truncate(r.Author, 12), truncate(r.Content, max(minContentWidth, w-20)))
-					line = truncate(line, w)
-					items = append(items, chatMsgStyle.Render(line))
+					headerLine := fmt.Sprintf("  [%s] %s:", formatTime(r.CreatedAt), truncate(r.Author, 12))
+					cw := max(minContentWidth, w-6)
+					wrapped := wrapText(r.Content, cw)
+					for j, wl := range wrapped {
+						var line string
+						if j == 0 {
+							line = headerLine + " " + wl
+						} else {
+							line = "                    " + wl
+						}
+						items = append(items, chatMsgStyle.Render(line))
+					}
 				}
 			}
 		}

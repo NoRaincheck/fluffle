@@ -397,3 +397,24 @@ func TestInboxDetailScrolling(t *testing.T) {
 		t.Fatalf("after scroll top should be hidden %q", rendered2)
 	}
 }
+
+func TestPreviewRepliesNotTruncated(t *testing.T) {
+	m := toModel(New("http://127.0.0.1:0"))
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = toModel(nm)
+	longContent := strings.Repeat("x ", 50)
+	inbox := []store.InboxMessage{{Message: store.Message{ID: 1, ThreadID: 10, Seq: 1, Author: "alice", AuthorType: "human", Content: "root", CreatedAt: "2026-09-23T10:00:00Z"}, ChannelName: "general", ThreadTitle: "hello", ChannelID: 1}}
+	msgs := []store.Message{{ID: 2, ThreadID: 10, Seq: 2, Author: "bob", Content: longContent, CreatedAt: "2026-09-23T11:00:00Z"}}
+	nm, _ = m.Update(inboxFetchedMsg{inbox: inbox})
+	m = toModel(nm)
+	nm, _ = m.Update(previewMessagesFetchedMsg{threadID: 10, messages: msgs})
+	m = toModel(nm)
+	m.cursor = 0
+	rendered := m.renderPreview(50, 20)
+	if strings.Contains(rendered, "...") {
+		t.Fatalf("replies should not have ellipsis (truncation), got %q", rendered)
+	}
+	if !strings.Contains(rendered, "x x x") {
+		t.Fatalf("full reply content should be visible, got %q", rendered)
+	}
+}
