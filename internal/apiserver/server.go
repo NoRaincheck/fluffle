@@ -193,13 +193,13 @@ func NewHandler(s *store.Store) http.Handler {
 				return
 			}
 			var body struct {
-				Author, Role, Content, AgentID, CreatedAt string
-				ParentID                                  int64
+				Name, Role, Content, AgentID, CreatedAt string
+				ParentID                                int64
 			}
 			for k, v := range raw {
 				switch k {
-				case "Author", "author":
-					json.Unmarshal(v, &body.Author)
+				case "Name", "name", "Author", "author":
+					json.Unmarshal(v, &body.Name)
 				case "Role", "role":
 					json.Unmarshal(v, &body.Role)
 				case "Content", "content":
@@ -216,21 +216,21 @@ func NewHandler(s *store.Store) http.Handler {
 			if body.AgentID != "" || isAgent(r) {
 				authorType = "agent"
 			}
-			author := body.Author
-			if author == "" {
-				author = body.AgentID
+			name := body.Name
+			if name == "" {
+				name = body.AgentID
 			}
-			if author == "" {
-				author = "unknown"
+			if name == "" {
+				name = "unknown"
 			}
 			var seq int64
 			var err error
 			if body.CreatedAt != "" {
-				seq, err = s.AppendMessageAtWithParent(id, author, authorType, body.Role, body.Content, body.CreatedAt, body.ParentID)
+				seq, err = s.AppendMessageAtWithParent(id, name, authorType, body.Role, body.Content, body.CreatedAt, body.ParentID)
 			} else if body.ParentID != 0 {
-				seq, err = s.AppendMessageWithParent(id, author, authorType, body.Role, body.Content, body.ParentID)
+				seq, err = s.AppendMessageWithParent(id, name, authorType, body.Role, body.Content, body.ParentID)
 			} else {
-				seq, err = s.AppendMessage(id, author, authorType, body.Role, body.Content)
+				seq, err = s.AppendMessage(id, name, authorType, body.Role, body.Content)
 			}
 			if err == store.ErrNotFound {
 				writeErr(w, 404, "THREAD_NOT_FOUND", "no such thread")
@@ -254,7 +254,7 @@ func NewHandler(s *store.Store) http.Handler {
 		}
 		id, _ := strconv.ParseInt(parts[0], 10, 64)
 		var body struct {
-			Emoji, Author, AgentID string
+			Emoji, Name, AgentID string
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeErr(w, 400, "BAD_JSONL", err.Error())
@@ -264,14 +264,14 @@ func NewHandler(s *store.Store) http.Handler {
 		if body.AgentID != "" || isAgent(r) {
 			authorType = "agent"
 		}
-		author := body.Author
-		if author == "" {
-			author = body.AgentID
+		name := body.Name
+		if name == "" {
+			name = body.AgentID
 		}
-		if author == "" {
-			author = "unknown"
+		if name == "" {
+			name = "unknown"
 		}
-		if err := s.AddReaction(id, body.Emoji, author, authorType); err == store.ErrConflict {
+		if err := s.AddReaction(id, body.Emoji, name, authorType); err == store.ErrConflict {
 			writeErr(w, 409, "BAD_JSONL", "duplicate reaction")
 			return
 		} else if err != nil {

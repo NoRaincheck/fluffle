@@ -874,16 +874,16 @@ func (m model) renderReplyBackground(w, h int) string {
 		for i, msg := range msgs {
 			prefix := "  "
 			if i == m.cursor {
-				prefix = "▸ "
+				prefix = "> "
 			}
 			tStr := formatTime(msg.CreatedAt)
 			tStr = fmt.Sprintf("%*s", timeWidth, tStr)
-			authorStyle := getAuthorStyle(msg.AuthorType)
-			author := truncate(msg.Author, nameWidth)
-			authorRendered := authorStyle.Render(author)
+			nameStyle := getNameStyle(msg.AuthorType)
+			name := truncate(msg.Name, nameWidth)
+			nameRendered := nameStyle.Render(name)
 			seqStr := fmt.Sprintf("#%-4d", msg.Seq)
 			content := truncate(msg.Content, contentWidth)
-			line := fmt.Sprintf("%s%s  %s  %s  %s", prefix, tStr, seqStr, authorRendered, content)
+			line := fmt.Sprintf("%s%s  %s  %s  %s", prefix, tStr, seqStr, nameRendered, content)
 			if i == m.cursor {
 				line = chatMsgSelectedStyle.Render(line)
 			} else {
@@ -967,7 +967,7 @@ func (m model) renderInboxDetail(w, h int) string {
 		title += fmt.Sprintf("  · last %s", formatTime(last))
 	}
 	timeW := 12
-	nameW := 15
+	nameW := 10
 	_, _, msgW, sorted := m.detailLineCounts(w)
 	var allItems []string
 	if len(sorted) == 0 {
@@ -977,8 +977,7 @@ func (m model) renderInboxDetail(w, h int) string {
 			tStr := formatTime(msg.CreatedAt)
 			tPlain := truncate(tStr, timeW)
 			tPadded := fmt.Sprintf("%-*s", timeW, tPlain)
-			authorPlain := truncate(msg.Author, nameW)
-			authorPadded := fmt.Sprintf("%-*s", nameW, authorPlain)
+			namePlain := formatFixedName(msg.Name, nameW)
 			wrapped := wrapText(strings.ReplaceAll(msg.Content, "\n", " "), msgW)
 			if len(wrapped) == 0 {
 				wrapped = []string{""}
@@ -986,24 +985,24 @@ func (m model) renderInboxDetail(w, h int) string {
 			for j, wl := range wrapped {
 				prefix := "  "
 				if i == m.detailCursor {
-					prefix = "▸ "
+					prefix = "> "
 				}
 				var line string
 				if i == m.detailCursor {
 					if j == 0 {
-						line = fmt.Sprintf("%s%s  %s  %s", prefix, tPadded, authorPadded, wl)
+						line = fmt.Sprintf("%s%s  %s  %s", prefix, tPadded, namePlain, wl)
 					} else {
-						indent := strings.Repeat(" ", 2+timeW+2+nameW+2)
-						line = indent + wl
+						indent := strings.Repeat(" ", len(prefix)+len(tPadded)+nameW+2)
+						line = indent + "  " + wl
 					}
 					line = chatMsgSelectedStyle.Render(line)
 				} else {
-					authorRendered := getAuthorStyle(msg.AuthorType).Render(authorPadded)
+					nameRendered := getNameStyle(msg.AuthorType).Render(namePlain)
 					if j == 0 {
-						line = fmt.Sprintf("%s%s  %s  %s", prefix, tPadded, authorRendered, wl)
+						line = fmt.Sprintf("%s%s  %s  %s", prefix, tPadded, nameRendered, wl)
 					} else {
-						indent := strings.Repeat(" ", 2+timeW+2+nameW+2)
-						line = indent + wl
+						indent := strings.Repeat(" ", len(prefix)+len(tPadded)+nameW+2)
+						line = indent + "  " + wl
 					}
 					line = chatMsgStyle.Render(line)
 				}
@@ -1011,7 +1010,8 @@ func (m model) renderInboxDetail(w, h int) string {
 			}
 		}
 	}
-	headerRow := fmt.Sprintf("  %-*s  %-*s  %s", timeW, "TIME", nameW, "NAME", "MESSAGE")
+	headerNamePlain := formatFixedName("NAME", nameW)
+	headerRow := fmt.Sprintf("  %-*s  %s  %s", timeW, "TIME", headerNamePlain, "MESSAGE")
 	headerRow = truncate(headerRow, w)
 	headerStyled := lipgloss.NewStyle().Foreground(chatHeaderFg).Bold(true).Render(headerRow)
 	visibleCap := h - 3
@@ -1085,7 +1085,7 @@ func (m model) renderListWithWidth(w, h int) string {
 			for i, ch := range m.channels {
 				prefix := "  "
 				if i == m.cursor {
-					prefix = "▸ "
+					prefix = "> "
 				}
 				label := ch.Name
 				if ch.IsOrphaned {
@@ -1129,7 +1129,7 @@ func (m model) renderListWithWidth(w, h int) string {
 			for i, th := range m.threads {
 				prefix := "  "
 				if i == m.cursor {
-					prefix = "▸ "
+					prefix = "> "
 				}
 				line := prefix + fmt.Sprintf("%s  · %s", th.Title, formatTime(th.CreatedAt))
 				if i == m.cursor {
@@ -1166,18 +1166,18 @@ func (m model) renderListWithWidth(w, h int) string {
 			for i, msg := range m.messages {
 				prefix := "  "
 				if i == m.cursor {
-					prefix = "▸ "
+					prefix = "> "
 				}
 
 				tStr := formatTime(msg.CreatedAt)
 				tStr = fmt.Sprintf("%*s", timeWidth, tStr)
-				authorStyle := getAuthorStyle(msg.AuthorType)
-				author := truncate(msg.Author, nameWidth)
-				authorRendered := authorStyle.Render(author)
+				nameStyle := getNameStyle(msg.AuthorType)
+				name := truncate(msg.Name, nameWidth)
+				nameRendered := nameStyle.Render(name)
 
 				seqStr := fmt.Sprintf("#%-4d", msg.Seq)
 				content := truncate(msg.Content, contentWidth)
-				line := fmt.Sprintf("%s%s  %s  %s  %s", prefix, tStr, seqStr, authorRendered, content)
+				line := fmt.Sprintf("%s%s  %s  %s  %s", prefix, tStr, seqStr, nameRendered, content)
 
 				if i == m.cursor {
 					line = chatMsgSelectedStyle.Render(line)
@@ -1300,12 +1300,12 @@ func (m model) renderInboxWithWidth(w, h int) string {
 		globalIdx := start + i
 		prefix := "  "
 		if globalIdx == m.cursor {
-			prefix = "▸ "
+			prefix = "> "
 		}
 		tStr := fmt.Sprintf("%*s", timeW, formatTime(im.CreatedAt))
 		chanS := truncate(im.ChannelName, chanW)
 		thrS := truncate(im.ThreadTitle, threadW)
-		author := truncate(im.Author, nameW)
+		name := truncate(im.Name, nameW)
 		base := strings.ReplaceAll(im.Content, "\n", " ")
 		more := ""
 		if cnt := counts[inboxKey(im)]; cnt > 1 {
@@ -1333,7 +1333,7 @@ func (m model) renderInboxWithWidth(w, h int) string {
 		if contentPlainLen > contentW {
 			contentPlainLen = contentW
 		}
-		lineRendered := fmt.Sprintf("%s%0*d %s  %-12s  %-16s  %-12s  %s", prefix, idW, im.ID, tStr, chanS, thrS, author, contentRendered)
+		lineRendered := fmt.Sprintf("%s%0*d %s  %-12s  %-16s  %-12s  %s", prefix, idW, im.ID, tStr, chanS, thrS, name, contentRendered)
 		plainLen := 2 + idW + 1 + timeW + 2 + chanW + 2 + threadW + 2 + nameW + 2 + contentPlainLen
 		if plainLen > w {
 			excess := plainLen - w
@@ -1344,14 +1344,14 @@ func (m model) renderInboxWithWidth(w, h int) string {
 				} else {
 					contentRendered = baseTrunc
 				}
-				lineRendered = fmt.Sprintf("%s%0*d %s  %-12s  %-16s  %-12s  %s", prefix, idW, im.ID, tStr, chanS, thrS, author, contentRendered)
+				lineRendered = fmt.Sprintf("%s%0*d %s  %-12s  %-16s  %-12s  %s", prefix, idW, im.ID, tStr, chanS, thrS, name, contentRendered)
 			} else {
 				lineRendered = truncate(lineRendered, w)
 			}
 		}
 		var line string
-		coloredAuthor := getAuthorStyle(im.AuthorType).Render(author)
-		lineRendered = strings.Replace(lineRendered, author, coloredAuthor, 1)
+		coloredName := getNameStyle(im.AuthorType).Render(name)
+		lineRendered = strings.Replace(lineRendered, name, coloredName, 1)
 		if globalIdx == m.cursor {
 			line = chatMsgSelectedStyle.Render(lineRendered)
 		} else {
@@ -1408,7 +1408,7 @@ func (m model) renderPreview(w, h int) string {
 				items = append(items, chatMsgStyle.Render("  (no replies)"))
 			} else {
 				for _, r := range replies {
-					headerLine := fmt.Sprintf("  [%s] %s:", formatTime(r.CreatedAt), truncate(r.Author, 12))
+					headerLine := fmt.Sprintf("  [%s] %s:", formatTime(r.CreatedAt), truncate(r.Name, 12))
 					headerLen := len(headerLine)
 					cw := max(minContentWidth, w-headerLen-1)
 					wrapped := wrapText(r.Content, cw)
@@ -1465,9 +1465,9 @@ func (m model) renderPreview(w, h int) string {
 			} else {
 				for _, msg := range m.previewMessages {
 					tStr := formatTime(msg.CreatedAt)
-					author := truncate(msg.Author, 12)
+					name := truncate(msg.Name, 12)
 					content := truncate(msg.Content, max(minContentWidth, w-20))
-					line := fmt.Sprintf("  [%s] %s: %s", tStr, author, content)
+					line := fmt.Sprintf("  [%s] %s: %s", tStr, name, content)
 					line = truncate(line, w)
 					items = append(items, chatMsgStyle.Render(line))
 				}
@@ -1479,10 +1479,10 @@ func (m model) renderPreview(w, h int) string {
 			items = []string{"  (no message)"}
 		} else {
 			msg := m.messages[m.cursor]
-			title = fmt.Sprintf("[PREVIEW MESSAGE #%d] %s", msg.ID, truncate(msg.Author, 30))
+			title = fmt.Sprintf("[PREVIEW MESSAGE #%d] %s", msg.ID, truncate(msg.Name, 30))
 			full := fmt.Sprintf("  %s", msg.Content)
 			wrapped := truncate(full, w-4)
-			items = []string{chatMsgStyle.Render(wrapped), "", chatMsgStyle.Render(fmt.Sprintf("  · %s  · %s", formatTime(msg.CreatedAt), msg.Author))}
+			items = []string{chatMsgStyle.Render(wrapped), "", chatMsgStyle.Render(fmt.Sprintf("  · %s  · %s", formatTime(msg.CreatedAt), msg.Name))}
 		}
 	}
 	headerStyleNoMargin := chatHeaderStyle.MarginBottom(0)
@@ -1646,7 +1646,7 @@ func (m *model) clampCursor() {
 
 func (m model) detailLineCounts(w int) ([]int, int, int, []store.Message) {
 	timeW := 12
-	nameW := 15
+	nameW := 10
 	msgW := max(minContentWidth, w-timeW-nameW-10)
 	sorted := sortedMessagesDesc(m.messages)
 	if len(sorted) == 0 {
@@ -1908,6 +1908,20 @@ func truncate(s string, maxLen int) string {
 		return s[:maxLen]
 	}
 	return s[:maxLen-ellipsisReserve] + "..."
+}
+
+func formatFixedName(s string, w int) string {
+	rs := []rune(s)
+	if len(rs) < w {
+		return s + strings.Repeat(" ", w-len(rs))
+	}
+	if len(rs) == w {
+		return s
+	}
+	if w <= 2 {
+		return string(rs[:w])
+	}
+	return string(rs[:w-2]) + ".."
 }
 
 func wrapText(s string, width int) []string {

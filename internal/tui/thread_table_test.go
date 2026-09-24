@@ -11,9 +11,9 @@ import (
 
 func TestSortedMessagesLatestAtTop(t *testing.T) {
 	msgs := []store.Message{
-		{ID: 1, Seq: 1, CreatedAt: "2025-01-01T10:00:00Z", Author: "alice", Content: "first"},
-		{ID: 2, Seq: 2, CreatedAt: "2025-01-01T11:00:00Z", Author: "bob", Content: "second"},
-		{ID: 3, Seq: 3, CreatedAt: "2025-01-01T09:00:00Z", Author: "carol", Content: "third"},
+		{ID: 1, Seq: 1, CreatedAt: "2025-01-01T10:00:00Z", Name: "alice", Content: "first"},
+		{ID: 2, Seq: 2, CreatedAt: "2025-01-01T11:00:00Z", Name: "bob", Content: "second"},
+		{ID: 3, Seq: 3, CreatedAt: "2025-01-01T09:00:00Z", Name: "carol", Content: "third"},
 	}
 	sorted := sortedMessagesDesc(msgs)
 	if len(sorted) != 3 {
@@ -38,8 +38,8 @@ func TestRenderInboxDetailIsTableWithWrapping(t *testing.T) {
 		selectedChannel: &store.Channel{Name: "general"},
 		selectedThread:  &store.Thread{Title: "hello"},
 		messages: []store.Message{
-			{ID: 2, Seq: 2, CreatedAt: "2025-01-15T14:30:00Z", Author: "bob", AuthorType: "human", Content: "this is a very long message that should wrap onto multiple lines because it exceeds the available content width for the message column and must be displayed correctly"},
-			{ID: 1, Seq: 1, CreatedAt: "2025-01-15T14:00:00Z", Author: "alice", AuthorType: "human", Content: "first short"},
+			{ID: 2, Seq: 2, CreatedAt: "2025-01-15T14:30:00Z", Name: "bob", AuthorType: "human", Content: "this is a very long message that should wrap onto multiple lines because it exceeds the available content width for the message column and must be displayed correctly"},
+			{ID: 1, Seq: 1, CreatedAt: "2025-01-15T14:00:00Z", Name: "alice", AuthorType: "human", Content: "first short"},
 		},
 	}
 	m.detailCursor = 0
@@ -69,8 +69,8 @@ func TestReplyFromInboxGoesToSinglePanelTable(t *testing.T) {
 		height: 20,
 		view:   viewInbox,
 		inbox: []store.InboxMessage{
-			{Message: store.Message{ID: 10, ThreadID: 5, Seq: 2, CreatedAt: "2025-01-15T14:30:00Z", Author: "bob", Content: "latest"}, ChannelName: "general", ChannelID: 1, ThreadTitle: "hello"},
-			{Message: store.Message{ID: 9, ThreadID: 5, Seq: 1, CreatedAt: "2025-01-15T14:00:00Z", Author: "alice", Content: "first"}, ChannelName: "general", ChannelID: 1, ThreadTitle: "hello"},
+			{Message: store.Message{ID: 10, ThreadID: 5, Seq: 2, CreatedAt: "2025-01-15T14:30:00Z", Name: "bob", Content: "latest"}, ChannelName: "general", ChannelID: 1, ThreadTitle: "hello"},
+			{Message: store.Message{ID: 9, ThreadID: 5, Seq: 1, CreatedAt: "2025-01-15T14:00:00Z", Name: "alice", Content: "first"}, ChannelName: "general", ChannelID: 1, ThreadTitle: "hello"},
 		},
 		channels: []store.Channel{{ID: 1, Name: "general"}},
 		cursor:   0,
@@ -106,7 +106,7 @@ func TestEnterFromInboxGoesToSinglePanelTableWithoutCompose(t *testing.T) {
 		height: 20,
 		view:   viewInbox,
 		inbox: []store.InboxMessage{
-			{Message: store.Message{ID: 10, ThreadID: 5, Seq: 2, CreatedAt: "2025-01-15T14:30:00Z", Author: "bob", Content: "latest"}, ChannelName: "general", ChannelID: 1, ThreadTitle: "hello"},
+			{Message: store.Message{ID: 10, ThreadID: 5, Seq: 2, CreatedAt: "2025-01-15T14:30:00Z", Name: "bob", Content: "latest"}, ChannelName: "general", ChannelID: 1, ThreadTitle: "hello"},
 		},
 		channels: []store.Channel{{ID: 1, Name: "general"}},
 		cursor:   0,
@@ -135,10 +135,84 @@ func TestEnterFromInboxGoesToSinglePanelTableWithoutCompose(t *testing.T) {
 	}
 }
 
+func TestRenderInboxDetailMessageColumnAligned(t *testing.T) {
+	m := model{
+		width:           80,
+		height:          20,
+		view:            viewInboxDetail,
+		selectedChannel: &store.Channel{Name: "general"},
+		selectedThread:  &store.Thread{Title: "hello"},
+		messages: []store.Message{
+			{ID: 1, Seq: 1, CreatedAt: "2025-01-15T14:00:00Z", Name: "alice", AuthorType: "human", Content: "short"},
+			{ID: 2, Seq: 2, CreatedAt: "2025-01-15T14:01:00Z", Name: "bot-agent", AuthorType: "agent", Content: "also short"},
+			{ID: 3, Seq: 3, CreatedAt: "2025-01-15T14:02:00Z", Name: "system", AuthorType: "system", Content: "same"},
+		},
+	}
+	out := m.renderInboxDetail(m.width, m.height-4)
+
+	// Strip ANSI codes for position checking
+	stripANSI := func(s string) string {
+		var b strings.Builder
+		inEscape := false
+		for _, r := range s {
+			if r == '\x1b' {
+				inEscape = true
+				continue
+			}
+			if inEscape {
+				if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') {
+					inEscape = false
+				}
+				continue
+			}
+			b.WriteRune(r)
+		}
+		return b.String()
+	}
+
+	// Extract MESSAGE column start positions for each data row
+	// The MESSAGE column starts after the NAME column (padded to nameW=10)
+	// Format: "  TIME        NAME        MESSAGE"
+	// Expected MESSAGE column start: 2 + 12 + 2 + 10 + 2 = 28
+	const expectedMsgCol = 28
+	lines := strings.Split(out, "\n")
+	var msgPositions []int
+	for _, line := range lines {
+		plain := stripANSI(line)
+		if strings.Contains(plain, "bot-agent") || strings.Contains(plain, "alice") || strings.Contains(plain, "system") {
+			// Find the content position: look for the content word
+			var content string
+			switch {
+			case strings.Contains(plain, "system"):
+				content = "same"
+			case strings.Contains(plain, "bot-agent"):
+				content = "also"
+			case strings.Contains(plain, "alice"):
+				content = "short"
+			}
+			if content != "" {
+				msgPos := strings.Index(plain, content)
+				if msgPos >= 0 {
+					msgPositions = append(msgPositions, msgPos)
+				}
+			}
+		}
+	}
+	if len(msgPositions) < 2 {
+		t.Fatalf("expected at least 2 message positions, got %d\noutput:\n%s", len(msgPositions), out)
+	}
+	// All MESSAGE column positions should match the expected column
+	for i, pos := range msgPositions {
+		if pos != expectedMsgCol {
+			t.Errorf("row %d MESSAGE column at col %d, expected %d (not aligned)\noutput:\n%s", i+1, pos, expectedMsgCol, out)
+		}
+	}
+}
+
 func TestRenderInboxDetailShowsAllMessagesScrollable(t *testing.T) {
 	msgs := make([]store.Message, 20)
 	for i := 0; i < 20; i++ {
-		msgs[i] = store.Message{ID: int64(i + 1), Seq: int64(i + 1), CreatedAt: "2025-01-15T14:30:00Z", Author: "alice", Content: "msg"}
+		msgs[i] = store.Message{ID: int64(i + 1), Seq: int64(i + 1), CreatedAt: "2025-01-15T14:30:00Z", Name: "alice", Content: "msg"}
 	}
 	m := model{
 		width:           80,

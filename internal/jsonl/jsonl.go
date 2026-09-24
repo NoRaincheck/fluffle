@@ -5,12 +5,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 type Line struct {
 	Seq        int64          `json:"seq"`
 	Role       string         `json:"role"`
-	Author     string         `json:"author"`
+	Name       string         `json:"name"`
 	AuthorType string         `json:"author_type"`
 	Content    string         `json:"content"`
 	Timestamp  string         `json:"timestamp"`
@@ -36,8 +37,14 @@ func ParseLine(s string) (Line, error) {
 	if l.Role == "" || l.Content == "" {
 		return Line{}, fmt.Errorf("role and content required")
 	}
+	if strings.TrimSpace(l.Name) == "" {
+		return Line{}, fmt.Errorf("name required")
+	}
 	if l.Metadata == nil {
 		l.Metadata = map[string]any{}
+	}
+	if l.AuthorType == "" {
+		l.AuthorType = "human"
 	}
 	return l, nil
 }

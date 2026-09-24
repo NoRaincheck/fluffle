@@ -3,7 +3,7 @@ package jsonl
 import "testing"
 
 func TestRoundTripPreservesFields(t *testing.T) {
-	in := []Line{{Seq: 99, Role: "assistant", Author: "pi-agent", AuthorType: "agent", Content: "hi", Timestamp: "2026-09-22T00:00:00Z", Metadata: map[string]any{}}}
+	in := []Line{{Seq: 99, Role: "assistant", Name: "pi-agent", AuthorType: "agent", Content: "hi", Timestamp: "2026-09-22T00:00:00Z", Metadata: map[string]any{}}}
 	data := EncodeLines(in)
 	out, err := ParseLines(data)
 	if err != nil {

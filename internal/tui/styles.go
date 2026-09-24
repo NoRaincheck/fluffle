@@ -111,19 +111,19 @@ var (
 	hintKeyStyle = lipgloss.NewStyle().
 			Foreground(accent).
 			Bold(true)
-	humanAuthorStyle  = lipgloss.NewStyle().Foreground(humanColor)
-	agentAuthorStyle  = lipgloss.NewStyle().Foreground(agentColor)
-	systemAuthorStyle = lipgloss.NewStyle().Foreground(systemColor)
-	inboxMoreStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#fab387")).Italic(true)
+	humanNameStyle  = lipgloss.NewStyle().Foreground(humanColor)
+	agentNameStyle  = lipgloss.NewStyle().Foreground(agentColor)
+	systemNameStyle = lipgloss.NewStyle().Foreground(systemColor)
+	inboxMoreStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#fab387")).Italic(true)
 )
 
-func getAuthorStyle(authorType string) lipgloss.Style {
+func getNameStyle(authorType string) lipgloss.Style {
 	switch authorType {
 	case "human":
-		return humanAuthorStyle
+		return humanNameStyle
 	case "agent":
-		return agentAuthorStyle
+		return agentNameStyle
 	default:
-		return systemAuthorStyle
+		return systemNameStyle
 	}
 }

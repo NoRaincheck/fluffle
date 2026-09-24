@@ -122,7 +122,7 @@ func (m composeModel) View() string {
 	if m.state.cursor >= len(m.state.text) {
 		cursorChar = "│ "
 	}
-	inputLine := "▸ " + m.state.text + cursorChar
+	inputLine := "> " + m.state.text + cursorChar
 	lines = append(lines, inputLine)
 
 	if m.state.error != "" {
@@ -271,7 +271,7 @@ func (m filterModel) View() string {
 	if m.cursor >= len(m.text) {
 		cursorChar = "│ "
 	}
-	inputLine := "▸ " + m.text + cursorChar
+	inputLine := "> " + m.text + cursorChar
 	lines := []string{title, inputLine, "", modalHintStyle.Render("Enter to apply, Esc to cancel")}
 	return lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).

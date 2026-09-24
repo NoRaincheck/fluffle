@@ -63,7 +63,7 @@ func TestSimpleFlow(t *testing.T) {
 	}
 	nm, _ = m.Update(keyType(tea.KeyEnter))
 	m = toModel(nm)
-	msgs := []store.Message{{ID: 1, ThreadID: 10, Seq: 1, Author: "alice", AuthorType: "human", Role: "user", Content: "hi", CreatedAt: "2026-09-23T00:00:00Z"}}
+	msgs := []store.Message{{ID: 1, ThreadID: 10, Seq: 1, Name: "alice", AuthorType: "human", Role: "user", Content: "hi", CreatedAt: "2026-09-23T00:00:00Z"}}
 	nm, _ = m.Update(messagesFetchedMsg{threadID: 10, messages: msgs})
 	m = toModel(nm)
 	if m.view != viewMessages {
@@ -123,8 +123,8 @@ func TestInboxFlow(t *testing.T) {
 	nm, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
 	m = toModel(nm)
 	inbox := []store.InboxMessage{
-		{Message: store.Message{ID: 1, ThreadID: 10, Seq: 1, Author: "alice", AuthorType: "human", Content: "first line\nsecond", CreatedAt: "2026-09-23T10:00:00Z"}, ChannelName: "general", ThreadTitle: "hello", ChannelID: 1},
-		{Message: store.Message{ID: 2, ThreadID: 11, Seq: 1, Author: "bob", AuthorType: "human", Content: "second", CreatedAt: "2026-09-23T11:00:00Z"}, ChannelName: "random", ThreadTitle: "world", ChannelID: 2},
+		{Message: store.Message{ID: 1, ThreadID: 10, Seq: 1, Name: "alice", AuthorType: "human", Content: "first line\nsecond", CreatedAt: "2026-09-23T10:00:00Z"}, ChannelName: "general", ThreadTitle: "hello", ChannelID: 1},
+		{Message: store.Message{ID: 2, ThreadID: 11, Seq: 1, Name: "bob", AuthorType: "human", Content: "second", CreatedAt: "2026-09-23T11:00:00Z"}, ChannelName: "random", ThreadTitle: "world", ChannelID: 2},
 	}
 	nm, _ = m.Update(inboxFetchedMsg{inbox: inbox})
 	m = toModel(nm)
@@ -169,10 +169,10 @@ func TestAdaptivePreviewTruncation(t *testing.T) {
 	nm, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
 	m = toModel(nm)
 	long := strings.Repeat("line\n", 20)
-	inbox := []store.InboxMessage{{Message: store.Message{ID: 1, ThreadID: 10, Content: long, Author: "alice", AuthorType: "human", CreatedAt: "2026-09-23T10:00:00Z"}, ChannelName: "general", ThreadTitle: "hello"}}
+	inbox := []store.InboxMessage{{Message: store.Message{ID: 1, ThreadID: 10, Content: long, Name: "alice", AuthorType: "human", CreatedAt: "2026-09-23T10:00:00Z"}, ChannelName: "general", ThreadTitle: "hello"}}
 	previewMsgs := make([]store.Message, 10)
 	for i := 0; i < 10; i++ {
-		previewMsgs[i] = store.Message{ID: int64(2 + i), ThreadID: 10, Seq: int64(2 + i), Author: "bob", Content: fmt.Sprintf("reply %d", i), CreatedAt: "2026-09-23T11:00:00Z"}
+		previewMsgs[i] = store.Message{ID: int64(2 + i), ThreadID: 10, Seq: int64(2 + i), Name: "bob", Content: fmt.Sprintf("reply %d", i), CreatedAt: "2026-09-23T11:00:00Z"}
 	}
 	nm, _ = m.Update(inboxFetchedMsg{inbox: inbox})
 	m = toModel(nm)
@@ -291,10 +291,10 @@ func TestPreviewWrapNoTruncate(t *testing.T) {
 	m = toModel(nm)
 	m.preview = true
 	m.cursor = 0
-	inbox := []store.InboxMessage{{Message: store.Message{ID: 1, ThreadID: 10, Content: "word " + strings.Repeat("x", 40) + " end", Author: "alice", AuthorType: "human", CreatedAt: "2026-09-23T10:00:00Z"}, ChannelName: "general", ThreadTitle: "hello"}}
+	inbox := []store.InboxMessage{{Message: store.Message{ID: 1, ThreadID: 10, Content: "word " + strings.Repeat("x", 40) + " end", Name: "alice", AuthorType: "human", CreatedAt: "2026-09-23T10:00:00Z"}, ChannelName: "general", ThreadTitle: "hello"}}
 	nm, _ = m.Update(inboxFetchedMsg{inbox: inbox})
 	m = toModel(nm)
-	nm, _ = m.Update(previewMessagesFetchedMsg{threadID: 10, messages: []store.Message{{ID: 2, ThreadID: 10, Seq: 2, Author: "bob", Content: "reply", CreatedAt: "2026-09-23T11:00:00Z"}}})
+	nm, _ = m.Update(previewMessagesFetchedMsg{threadID: 10, messages: []store.Message{{ID: 2, ThreadID: 10, Seq: 2, Name: "bob", Content: "reply", CreatedAt: "2026-09-23T11:00:00Z"}}})
 	m = toModel(nm)
 	rendered := m.renderPreview(50, 30)
 	if !strings.Contains(rendered, "end") {
@@ -306,10 +306,10 @@ func TestInboxPreviewFillToHeight(t *testing.T) {
 	m := toModel(New("http://127.0.0.1:0"))
 	nm, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
 	m = toModel(nm)
-	inbox := []store.InboxMessage{{Message: store.Message{ID: 1, ThreadID: 10, Content: "root line one\nroot line two", Author: "alice", AuthorType: "human", CreatedAt: "2026-09-23T10:00:00Z"}, ChannelName: "general", ThreadTitle: "hello"}}
+	inbox := []store.InboxMessage{{Message: store.Message{ID: 1, ThreadID: 10, Content: "root line one\nroot line two", Name: "alice", AuthorType: "human", CreatedAt: "2026-09-23T10:00:00Z"}, ChannelName: "general", ThreadTitle: "hello"}}
 	var msgs []store.Message
 	for i := 0; i < 10; i++ {
-		msgs = append(msgs, store.Message{ID: int64(2 + i), ThreadID: 10, Seq: int64(2 + i), Author: "bob", Content: fmt.Sprintf("reply %d", i), CreatedAt: "2026-09-23T11:00:00Z"})
+		msgs = append(msgs, store.Message{ID: int64(2 + i), ThreadID: 10, Seq: int64(2 + i), Name: "bob", Content: fmt.Sprintf("reply %d", i), CreatedAt: "2026-09-23T11:00:00Z"})
 	}
 	nm, _ = m.Update(inboxFetchedMsg{inbox: inbox})
 	m = toModel(nm)
@@ -341,7 +341,7 @@ func TestInboxEnterDetailView(t *testing.T) {
 	nm, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
 	m = toModel(nm)
 	inbox := []store.InboxMessage{
-		{Message: store.Message{ID: 1, ThreadID: 10, Seq: 1, Author: "alice", AuthorType: "human", Content: "root", CreatedAt: "2026-09-23T10:00:00Z"}, ChannelName: "general", ThreadTitle: "hello", ChannelID: 1},
+		{Message: store.Message{ID: 1, ThreadID: 10, Seq: 1, Name: "alice", AuthorType: "human", Content: "root", CreatedAt: "2026-09-23T10:00:00Z"}, ChannelName: "general", ThreadTitle: "hello", ChannelID: 1},
 	}
 	nm, _ = m.Update(inboxFetchedMsg{inbox: inbox})
 	m = toModel(nm)
@@ -375,7 +375,7 @@ func TestInboxDetailScrolling(t *testing.T) {
 	m = toModel(nm)
 	msgs := make([]store.Message, 20)
 	for i := 0; i < 20; i++ {
-		msgs[i] = store.Message{ID: int64(i + 1), ThreadID: 10, Seq: int64(i + 1), Author: "alice", AuthorType: "human", Content: fmt.Sprintf("message %d with a fairly long content that should wrap", i), CreatedAt: "2026-09-23T10:00:00Z"}
+		msgs[i] = store.Message{ID: int64(i + 1), ThreadID: 10, Seq: int64(i + 1), Name: "alice", AuthorType: "human", Content: fmt.Sprintf("message %d with a fairly long content that should wrap", i), CreatedAt: "2026-09-23T10:00:00Z"}
 	}
 	m.view = viewInboxDetail
 	m.detailThreadID = 10
@@ -407,8 +407,8 @@ func TestPreviewRepliesNotTruncated(t *testing.T) {
 	nm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m = toModel(nm)
 	longContent := strings.Repeat("x ", 50)
-	inbox := []store.InboxMessage{{Message: store.Message{ID: 1, ThreadID: 10, Seq: 1, Author: "alice", AuthorType: "human", Content: "root", CreatedAt: "2026-09-23T10:00:00Z"}, ChannelName: "general", ThreadTitle: "hello", ChannelID: 1}}
-	msgs := []store.Message{{ID: 2, ThreadID: 10, Seq: 2, Author: "bob", Content: longContent, CreatedAt: "2026-09-23T11:00:00Z"}}
+	inbox := []store.InboxMessage{{Message: store.Message{ID: 1, ThreadID: 10, Seq: 1, Name: "alice", AuthorType: "human", Content: "root", CreatedAt: "2026-09-23T10:00:00Z"}, ChannelName: "general", ThreadTitle: "hello", ChannelID: 1}}
+	msgs := []store.Message{{ID: 2, ThreadID: 10, Seq: 2, Name: "bob", Content: longContent, CreatedAt: "2026-09-23T11:00:00Z"}}
 	nm, _ = m.Update(inboxFetchedMsg{inbox: inbox})
 	m = toModel(nm)
 	nm, _ = m.Update(previewMessagesFetchedMsg{threadID: 10, messages: msgs})
@@ -433,8 +433,8 @@ func TestPreviewLinesFitWidth(t *testing.T) {
 		m := toModel(New("http://127.0.0.1:0"))
 		nm, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
 		m = toModel(nm)
-		inbox := []store.InboxMessage{{Message: store.Message{ID: 1, ThreadID: 10, Seq: 1, Author: "alice", AuthorType: "human", Content: "root", CreatedAt: "2026-09-23T10:00:00Z"}, ChannelName: "general", ThreadTitle: "hello", ChannelID: 1}}
-		msgs := []store.Message{{ID: 2, ThreadID: 10, Seq: 2, Author: "alice", Content: content, CreatedAt: "2026-09-23T11:00:00Z"}}
+		inbox := []store.InboxMessage{{Message: store.Message{ID: 1, ThreadID: 10, Seq: 1, Name: "alice", AuthorType: "human", Content: "root", CreatedAt: "2026-09-23T10:00:00Z"}, ChannelName: "general", ThreadTitle: "hello", ChannelID: 1}}
+		msgs := []store.Message{{ID: 2, ThreadID: 10, Seq: 2, Name: "alice", Content: content, CreatedAt: "2026-09-23T11:00:00Z"}}
 		nm, _ = m.Update(inboxFetchedMsg{inbox: inbox})
 		m = toModel(nm)
 		nm, _ = m.Update(previewMessagesFetchedMsg{threadID: 10, messages: msgs})
