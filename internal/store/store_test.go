@@ -209,6 +209,40 @@ func TestListMessagesAfterReturnsEmptyAtCurrentCursor(t *testing.T) {
 	}
 }
 
+func TestListMessagesLastNWithParentRows(t *testing.T) {
+	s, _, threadID := newStoreWithThread(t, ":memory:")
+	defer s.Close()
+	rootSeq, err := s.AppendMessage(threadID, "alice", "human", "user", "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootID, err := s.MessageIDBySeq(threadID, rootSeq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	childSeq, _, err := s.AppendMessageByParentSeq(threadID, rootSeq, "pi-agent", "agent", "assistant", "reply", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AppendMessage(threadID, "alice", "human", "user", "latest"); err != nil {
+		t.Fatal(err)
+	}
+
+	messages, err := s.ListMessages(threadID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("got %d messages, want 2", len(messages))
+	}
+	if messages[0].Seq != childSeq || !messages[0].ParentSeq.Valid || messages[0].ParentSeq.Int64 != rootSeq || messages[0].ParentIDValue() != rootID {
+		t.Fatalf("lastN child = %+v, want seq %d parent seq/id %d/%d", messages[0], childSeq, rootSeq, rootID)
+	}
+	if messages[1].Seq != 3 || messages[1].Content != "latest" || messages[1].ParentSeq.Valid {
+		t.Fatalf("lastN latest = %+v", messages[1])
+	}
+}
+
 func TestFileStorePersistsParentSequenceProjection(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "store.db")
 	s, _, threadID := newStoreWithThread(t, path)
@@ -305,6 +339,39 @@ func TestAppendMessageByParentSeqRejectsNegativeSequence(t *testing.T) {
 	}
 	if len(messages) != 0 {
 		t.Fatalf("invalid parent sequence created messages: %+v", messages)
+	}
+}
+
+func TestAppendMessageByParentSeqRejectsMissingAndCrossThreadParents(t *testing.T) {
+	s, channelID, threadID := newStoreWithThread(t, ":memory:")
+	defer s.Close()
+	otherThreadID, err := s.CreateThread(channelID, "other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AppendMessage(otherThreadID, "alice", "human", "user", "other"); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tt := range []struct {
+		name      string
+		parentSeq int64
+	}{
+		{name: "cross thread", parentSeq: 1},
+		{name: "missing", parentSeq: 999},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, _, err := s.AppendMessageByParentSeq(threadID, tt.parentSeq, "pi-agent", "agent", "assistant", "reply", ""); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("parent seq %d error = %v, want ErrNotFound", tt.parentSeq, err)
+			}
+		})
+	}
+	messages, err := s.ListMessages(threadID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 0 {
+		t.Fatalf("invalid parents created messages: %+v", messages)
 	}
 }
 
@@ -466,6 +533,71 @@ func TestAppendBatchRemapsSourceSequencesAndReferences(t *testing.T) {
 	}
 }
 
+func TestAppendBatchMapsEveryMessageDestination(t *testing.T) {
+	s, _, threadID := newStoreWithThread(t, ":memory:")
+	defer s.Close()
+	events := []AppendEvent{
+		{Type: "message", SourceSeq: 0, Name: "alice", AuthorType: "human", Role: "user", Content: "live first"},
+		{Type: "message", SourceSeq: 10, Name: "alice", AuthorType: "human", Role: "user", Content: "imported parent"},
+		{Type: "message", SourceSeq: 20, ParentSeq: 10, Name: "pi-agent", AuthorType: "agent", Role: "assistant", Content: "imported reply"},
+		{Type: "reaction", MessageSeq: 10, Name: "bob", AuthorType: "human", Emoji: "+1"},
+	}
+
+	results, err := s.AppendBatch(threadID, events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 4 {
+		t.Fatalf("got %d results, want 4", len(results))
+	}
+	if results[0].Seq != 1 || results[1].Seq != 2 || results[2].Seq != 3 {
+		t.Fatalf("message destination sequences = %d, %d, %d", results[0].Seq, results[1].Seq, results[2].Seq)
+	}
+
+	messages, err := s.ListMessagesAfter(threadID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 3 {
+		t.Fatalf("got %d messages, want 3", len(messages))
+	}
+	if !messages[2].ParentSeq.Valid || messages[2].ParentSeq.Int64 != 2 || messages[2].ParentIDValue() != results[1].MessageID {
+		t.Fatalf("mapped parent = seq %+v id %d, want seq 2 id %d", messages[2].ParentSeq, messages[2].ParentIDValue(), results[1].MessageID)
+	}
+	reactions, err := s.ListReactions(threadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reactions) != 1 || reactions[0].MessageID != results[1].MessageID || reactions[0].MessageSeq != 2 {
+		t.Fatalf("mapped reaction = %+v, want message id %d seq 2", reactions, results[1].MessageID)
+	}
+}
+
+func TestAppendBatchPreservesUnsequencedLiveAppends(t *testing.T) {
+	s, _, threadID := newStoreWithThread(t, ":memory:")
+	defer s.Close()
+	events := []AppendEvent{
+		{Type: "message", Name: "alice", AuthorType: "human", Role: "user", Content: "live first"},
+		{Type: "message", Name: "alice", AuthorType: "human", Role: "user", Content: "live second"},
+		{Type: "reaction", MessageSeq: 1, Name: "bob", AuthorType: "human", Emoji: "+1"},
+	}
+
+	results, err := s.AppendBatch(threadID, events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 3 || results[0].Seq != 1 || results[1].Seq != 2 || results[2].MessageID != results[0].MessageID {
+		t.Fatalf("live batch results = %+v", results)
+	}
+	messages, err := s.ListMessagesAfter(threadID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 2 || messages[0].ParentSeq.Valid || messages[1].ParentSeq.Valid {
+		t.Fatalf("live messages gained parents: %+v", messages)
+	}
+}
+
 func TestAppendBatchRollsBackLateInvalidReference(t *testing.T) {
 	s, _, threadID := newStoreWithThread(t, ":memory:")
 	defer s.Close()
@@ -536,6 +668,26 @@ func TestAppendBatchRejectsDuplicateSourceSequences(t *testing.T) {
 	}
 	if len(messages) != 0 {
 		t.Fatalf("invalid batch left messages: %+v", messages)
+	}
+}
+
+func TestAppendBatchRejectsUnsortedMessageSourceSequences(t *testing.T) {
+	s, _, threadID := newStoreWithThread(t, ":memory:")
+	defer s.Close()
+	events := []AppendEvent{
+		{Type: "message", SourceSeq: 20, Name: "alice", AuthorType: "human", Role: "user", Content: "out of order parent"},
+		{Type: "message", SourceSeq: 10, ParentSeq: 20, Name: "pi-agent", AuthorType: "agent", Role: "assistant", Content: "out of order reply"},
+	}
+
+	if _, err := s.AppendBatch(threadID, events); err == nil {
+		t.Fatal("expected unsorted source sequence error")
+	}
+	messages, err := s.ListMessages(threadID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 0 {
+		t.Fatalf("unsorted batch left messages: %+v", messages)
 	}
 }
 

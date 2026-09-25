@@ -708,15 +708,24 @@ func nextThreadSeqTx(tx *sql.Tx, threadID int64) (int64, error) {
 
 func buildSourceSequenceMap(events []AppendEvent, nextSeq int64) (map[int64]int64, error) {
 	mapped := make(map[int64]int64)
+	var lastSourceSeq int64
 	for _, event := range events {
-		if event.Type != "message" || event.SourceSeq == 0 {
+		if event.Type != "message" {
+			continue
+		}
+		destinationSeq := nextSeq
+		nextSeq++
+		if event.SourceSeq == 0 {
 			continue
 		}
 		if _, exists := mapped[event.SourceSeq]; exists {
 			return nil, errors.New("duplicate source_seq")
 		}
-		mapped[event.SourceSeq] = nextSeq
-		nextSeq++
+		if event.SourceSeq < lastSourceSeq {
+			return nil, errors.New("unsorted source_seq")
+		}
+		mapped[event.SourceSeq] = destinationSeq
+		lastSourceSeq = event.SourceSeq
 	}
 	return mapped, nil
 }
