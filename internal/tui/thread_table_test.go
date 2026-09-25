@@ -47,13 +47,16 @@ func TestRenderInboxDetailIsTableWithWrapping(t *testing.T) {
 	if !strings.Contains(out, "TIME") || !strings.Contains(out, "NAME") || !strings.Contains(out, "MESSAGE") {
 		t.Fatalf("renderInboxDetail should contain table header TIME/NAME/MESSAGE, got:\n%s", out)
 	}
+	if !strings.Contains(out, "Original Post") {
+		t.Fatalf("renderInboxDetail should contain Original Post header, got:\n%s", out)
+	}
 	bobIdx := strings.Index(out, "bob")
 	aliceIdx := strings.Index(out, "alice")
 	if bobIdx == -1 || aliceIdx == -1 {
 		t.Fatalf("both authors should be in output, got:\n%s", out)
 	}
-	if bobIdx > aliceIdx {
-		t.Errorf("latest at top: bob (latest) should appear before alice, got bobIdx %d aliceIdx %d\noutput:\n%s", bobIdx, aliceIdx, out)
+	if aliceIdx > bobIdx {
+		t.Errorf("OP first: alice (original post) should appear before bob (reply), got aliceIdx %d bobIdx %d\noutput:\n%s", aliceIdx, bobIdx, out)
 	}
 	if !strings.Contains(out, "very long message") {
 		t.Fatalf("message content missing:\n%s", out)
@@ -171,10 +174,9 @@ func TestRenderInboxDetailMessageColumnAligned(t *testing.T) {
 	}
 
 	// Extract MESSAGE column start positions for each data row
-	// The MESSAGE column starts after the NAME column (padded to nameW=10)
-	// Format: "  TIME        NAME        MESSAGE"
-	// Expected MESSAGE column start: 2 + 12 + 2 + 10 + 2 = 28
-	const expectedMsgCol = 28
+	// Detail view has row number column: "  #  TIME        NAME        MESSAGE"
+	// Expected MESSAGE column start: 1 + 4 + 2 + 12 + 2 + 10 + 2 = 33
+	const expectedMsgCol = 33
 	lines := strings.Split(out, "\n")
 	var msgPositions []int
 	for _, line := range lines {

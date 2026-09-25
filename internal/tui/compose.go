@@ -136,7 +136,6 @@ func (m composeModel) View() string {
 	return lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(modalBorder).
-		Background(modalBg).
 		Foreground(modalFg).
 		Padding(0, 2).
 		Width(m.width).
@@ -207,6 +206,11 @@ func (m *filterModel) Open(initial string, maxW int) {
 	m.cursor = len(initial)
 	if maxW < 30 {
 		maxW = 60
+	} else {
+		maxW = maxW * 80 / 100
+		if maxW < 30 {
+			maxW = 30
+		}
 	}
 	m.width = maxW
 	m.height = 4
@@ -276,7 +280,6 @@ func (m filterModel) View() string {
 	return lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(modalBorder).
-		Background(modalBg).
 		Foreground(modalFg).
 		Padding(0, 2).
 		Width(m.width).

@@ -183,17 +183,17 @@ func TestAdaptivePreviewTruncation(t *testing.T) {
 	m.height = 24
 	m.cursor = 0
 	rendered := m.renderPreview(50, 40)
-	if strings.Contains(rendered, "(+") {
-		t.Fatalf("should not have truncation marker, got %q", rendered)
+	if strings.Contains(rendered, "hidden") {
+		t.Fatalf("should not have truncation marker when fits, got %q", rendered)
 	}
 	if strings.Count(rendered, "reply") < 10 {
 		t.Fatalf("should show all 10 replies, got %d", strings.Count(rendered, "reply"))
 	}
-	if !strings.Contains(rendered, "PREVIEW THREAD") {
-		t.Fatalf("preview header missing, got %q", rendered)
+	if !strings.Contains(rendered, "Original Post") {
+		t.Fatalf("preview header missing Original Post, got %q", rendered)
 	}
 	small := m.renderPreview(50, 10)
-	if !strings.Contains(small, "PREVIEW THREAD") {
+	if !strings.Contains(small, "Original Post") {
 		t.Fatalf("preview header should remain visible when clipped, got %q", small)
 	}
 	tbl := m.renderInboxWithWidth(100, 20)
@@ -324,8 +324,11 @@ func TestInboxPreviewFillToHeight(t *testing.T) {
 		t.Fatalf("root not fully shown %q", tall)
 	}
 	short := m.renderPreview(50, 10)
-	if !strings.Contains(short, "PREVIEW THREAD") {
+	if !strings.Contains(short, "Original Post") {
 		t.Fatalf("header clipped %q", short)
+	}
+	if !strings.Contains(short, "general") {
+		t.Fatalf("thread title clipped %q", short)
 	}
 	lines := strings.Split(strings.TrimSuffix(short, "\n"), "\n")
 	if len(lines) != 10 {
@@ -333,6 +336,9 @@ func TestInboxPreviewFillToHeight(t *testing.T) {
 	}
 	if !strings.Contains(short, "root line one") {
 		t.Fatalf("short preview should keep root post, got %q", short)
+	}
+	if !strings.Contains(short, "…") || !strings.Contains(short, "hidden") {
+		t.Fatalf("short preview should truncate middle with hidden indicator, got %q", short)
 	}
 }
 
@@ -383,22 +389,32 @@ func TestInboxDetailScrolling(t *testing.T) {
 	m.selectedChannel = &store.Channel{Name: "general"}
 	m.selectedThread = &store.Thread{Title: "hello"}
 	m.width = 80
-	m.height = 10
-	rendered := m.renderInboxDetail(80, 6)
+	m.height = 16
+	rendered := m.renderInboxDetail(80, 12)
 	lines := strings.Split(rendered, "\n")
-	if len(lines) != 6 {
-		t.Fatalf("detail height 6 expected 6 lines, got %d %q", len(lines), rendered)
+	if len(lines) != 12 {
+		t.Fatalf("detail height 12 expected 12 lines, got %d %q", len(lines), rendered)
 	}
 	if !strings.Contains(rendered, "TIME") || !strings.Contains(rendered, "NAME") || !strings.Contains(rendered, "MESSAGE") {
 		t.Fatalf("should show table header, got %q", rendered)
 	}
-	if !strings.Contains(rendered, "message 19") {
-		t.Fatalf("latest at top: should show message 19, got %q", rendered)
+	if !strings.Contains(rendered, "Original Post") {
+		t.Fatalf("should show Original Post pinned, got %q", rendered)
 	}
-	m.detailScroll = 10
-	rendered2 := m.renderInboxDetail(80, 6)
-	if strings.Contains(rendered2, "message 19") {
-		t.Fatalf("after scroll top should be hidden %q", rendered2)
+	if !strings.Contains(rendered, "message 0") {
+		t.Fatalf("OP (message 0) should be pinned at top, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "message 1") {
+		t.Fatalf("earliest reply (message 1) should be at top of replies, got %q", rendered)
+	}
+	m.detailScroll = 5
+	rendered2 := m.renderInboxDetail(80, 12)
+	if strings.Contains(rendered2, "message 0") && strings.Contains(rendered2, "Original Post") {
+	} else {
+		t.Fatalf("OP should stay pinned after scroll %q", rendered2)
+	}
+	if !strings.Contains(rendered2, "message") {
+		t.Fatalf("replies should scroll %q", rendered2)
 	}
 }
 
@@ -415,8 +431,20 @@ func TestPreviewRepliesNotTruncated(t *testing.T) {
 	m = toModel(nm)
 	m.cursor = 0
 	rendered := m.renderPreview(50, 20)
-	if strings.Contains(rendered, "...") {
-		t.Fatalf("replies should not have ellipsis (truncation), got %q", rendered)
+	lines := strings.Split(rendered, "\n")
+	var contentLines []string
+	for _, l := range lines {
+		if strings.Contains(l, "x x x") {
+			contentLines = append(contentLines, l)
+		}
+	}
+	if len(contentLines) == 0 {
+		t.Fatalf("full reply content should be visible, got %q", rendered)
+	}
+	for _, l := range contentLines {
+		if strings.Contains(l, "...") {
+			t.Fatalf("reply content should not be truncated with ellipsis, got %q", l)
+		}
 	}
 	if !strings.Contains(rendered, "x x x") {
 		t.Fatalf("full reply content should be visible, got %q", rendered)
