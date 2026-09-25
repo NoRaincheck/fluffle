@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 
@@ -18,7 +19,7 @@ type apiClient struct {
 }
 
 func NewAPIClient(base string) *apiClient {
-	return &apiClient{base: base, http: &http.Client{}}
+	return &apiClient{base: base, http: client.NewHTTPClient()}
 }
 
 func (c *apiClient) EnsureDaemon() error {
@@ -35,7 +36,7 @@ func (c *apiClient) ListChannels(ctx context.Context, repo, filter string) ([]st
 	if repo != "" {
 		url += "&repo=" + repo
 	}
-	resp, err := c.http.Get(url)
+	resp, err := c.do(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("DAEMON_DOWN: %w", err)
 	}
@@ -62,12 +63,12 @@ func (c *apiClient) CreateChannel(ctx context.Context, name, repo, branch string
 		body["RepoAbsPath"] = repo
 		body["RepoHeadBranch"] = branch
 	}
-	return c.doJSON(c.base+"/v1/channels", "POST", body)
+	return c.doJSON(ctx, c.base+"/v1/channels", http.MethodPost, body)
 }
 
 func (c *apiClient) ListThreads(ctx context.Context, channelID int64) ([]store.Thread, error) {
 	url := c.base + "/v1/channels/" + fmt.Sprintf("%d", channelID) + "/threads"
-	resp, err := c.http.Get(url)
+	resp, err := c.do(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("DAEMON_DOWN: %w", err)
 	}
@@ -86,12 +87,12 @@ func (c *apiClient) ListThreads(ctx context.Context, channelID int64) ([]store.T
 }
 
 func (c *apiClient) CreateThread(ctx context.Context, channelID int64, title string) (int64, error) {
-	return c.doJSON(c.base+"/v1/channels/"+fmt.Sprintf("%d", channelID)+"/threads", "POST", map[string]any{"Title": title})
+	return c.doJSON(ctx, c.base+"/v1/channels/"+fmt.Sprintf("%d", channelID)+"/threads", http.MethodPost, map[string]any{"Title": title})
 }
 
 func (c *apiClient) ListMessages(ctx context.Context, threadID int64) ([]store.Message, error) {
 	url := c.base + "/v1/threads/" + fmt.Sprintf("%d", threadID) + "/messages"
-	resp, err := c.http.Get(url)
+	resp, err := c.do(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("DAEMON_DOWN: %w", err)
 	}
@@ -114,7 +115,7 @@ func (c *apiClient) ListInbox(ctx context.Context, limit int) ([]store.InboxMess
 		limit = 100
 	}
 	url := fmt.Sprintf("%s/v1/inbox?limit=%d", c.base, limit)
-	resp, err := c.http.Get(url)
+	resp, err := c.do(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("DAEMON_DOWN: %w", err)
 	}
@@ -134,7 +135,7 @@ func (c *apiClient) ListInbox(ctx context.Context, limit int) ([]store.InboxMess
 
 func (c *apiClient) SendMessage(ctx context.Context, threadID, parentID int64, text string) error {
 	body := map[string]any{"Name": "you", "Role": "user", "Content": text, "ParentID": parentID}
-	resp, err := c.http.Post(c.base+"/v1/threads/"+fmt.Sprintf("%d", threadID)+"/messages", "application/json", jsonBody(body))
+	resp, err := c.do(ctx, http.MethodPost, c.base+"/v1/threads/"+fmt.Sprintf("%d", threadID)+"/messages", jsonBody(body))
 	if err != nil {
 		return fmt.Errorf("DAEMON_DOWN: %w", err)
 	}
@@ -147,7 +148,7 @@ func (c *apiClient) SendMessage(ctx context.Context, threadID, parentID int64, t
 
 func (c *apiClient) AddReaction(ctx context.Context, messageID int64, emoji string) error {
 	body := map[string]any{"Emoji": emoji, "Name": "you"}
-	resp, err := c.http.Post(c.base+"/v1/messages/"+fmt.Sprintf("%d", messageID)+"/reactions", "application/json", jsonBody(body))
+	resp, err := c.do(ctx, http.MethodPost, c.base+"/v1/messages/"+fmt.Sprintf("%d", messageID)+"/reactions", jsonBody(body))
 	if err != nil {
 		return fmt.Errorf("DAEMON_DOWN: %w", err)
 	}
@@ -158,8 +159,26 @@ func (c *apiClient) AddReaction(ctx context.Context, messageID int64, emoji stri
 	return nil
 }
 
-func (c *apiClient) doJSON(url, method string, body any) (int64, error) {
-	resp, err := c.http.Post(url, "application/json", jsonBody(body))
+func (c *apiClient) do(ctx context.Context, method, url string, body io.Reader) (*http.Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, method, url, body)
+	if err != nil {
+		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+func (c *apiClient) doJSON(ctx context.Context, url, method string, body any) (int64, error) {
+	resp, err := c.do(ctx, method, url, jsonBody(body))
 	if err != nil {
 		return 0, fmt.Errorf("DAEMON_DOWN: %w", err)
 	}

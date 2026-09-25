@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,16 +12,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/NoRaincheck/fluffle/internal/jsonl"
 )
-
-type roundTripFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
-	return f(req)
-}
 
 type recordedCLIRequest struct {
 	Method   string
@@ -225,18 +220,67 @@ func TestCLIAPIGetMalformedResponseIsDaemonError(t *testing.T) {
 }
 
 func TestCLIAPIPostTransportFailureIsDeliveryUnknown(t *testing.T) {
-	originalClient := http.DefaultClient
-	http.DefaultClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		return nil, errors.New("connection reset")
-	})}
-	t.Cleanup(func() { http.DefaultClient = originalClient })
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	url := server.URL
+	server.Close()
+
 	code, output := captureStderr(t, func() int {
-		return apiPost("http://127.0.0.1/messages", "", map[string]any{"content": "hello"}, nil)
+		return apiPost(url, "", map[string]any{"content": "hello"}, nil)
 	})
 	if code != 2 {
 		t.Fatalf("exit = %d, want 2", code)
 	}
 	assertCLIErrorEnvelope(t, output, "DELIVERY_UNKNOWN")
+}
+
+func TestCLIAPIPostTimeoutIsDeliveryUnknownWithoutRetry(t *testing.T) {
+	var attempts atomic.Int32
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseRequest := func() {
+		releaseOnce.Do(func() {
+			close(release)
+		})
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer func() {
+		releaseRequest()
+		server.Close()
+	}()
+
+	type result struct {
+		code   int
+		output string
+	}
+	done := make(chan result, 1)
+	go func() {
+		code, output := captureStderr(t, func() int {
+			return apiPost(server.URL, "", map[string]any{"content": "hello"}, nil)
+		})
+		done <- result{code: code, output: output}
+	}()
+
+	var got result
+	select {
+	case got = <-done:
+	case <-time.After(7 * time.Second):
+		releaseRequest()
+		<-done
+		t.Fatal("stalled post did not hit the finite client timeout")
+	}
+	if got.code != 2 {
+		t.Fatalf("exit = %d, want 2", got.code)
+	}
+	assertCLIErrorEnvelope(t, got.output, "DELIVERY_UNKNOWN")
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("post attempts = %d, want 1", got)
+	}
 }
 
 func TestCLIAPIPostMalformedSuccessBodyIsDeliveryUnknown(t *testing.T) {

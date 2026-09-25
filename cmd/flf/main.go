@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -78,14 +79,14 @@ func printAPIError(resp *http.Response) int {
 }
 
 func apiGet(u, agentID string, out any) int {
-	req, err := http.NewRequest(http.MethodGet, u, nil)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, u, nil)
 	if err != nil {
 		return fail("DAEMON_ERROR", err.Error())
 	}
 	if agentID != "" {
 		req.Header.Set("X-Fluffle-Agent", agentID)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.NewHTTPClient().Do(req)
 	if err != nil {
 		return fail("DAEMON_DOWN", err.Error())
 	}
@@ -125,7 +126,7 @@ func apiPost(u, agentID string, payload any, out any) int {
 	if err != nil {
 		return fail("BAD_REQUEST", err.Error())
 	}
-	req, err := http.NewRequest(http.MethodPost, u, bytes.NewReader(raw))
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, u, bytes.NewReader(raw))
 	if err != nil {
 		return fail("BAD_REQUEST", err.Error())
 	}
@@ -133,7 +134,7 @@ func apiPost(u, agentID string, payload any, out any) int {
 	if agentID != "" {
 		req.Header.Set("X-Fluffle-Agent", agentID)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.NewHTTPClient().Do(req)
 	if err != nil {
 		return fail("DELIVERY_UNKNOWN", fmt.Sprintf("read the thread before retrying: %v", err))
 	}
