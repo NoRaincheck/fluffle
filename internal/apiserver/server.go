@@ -2,17 +2,30 @@ package apiserver
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
 
+	"github.com/NoRaincheck/fluffle/internal/jsonl"
 	"github.com/NoRaincheck/fluffle/internal/store"
+)
+
+const (
+	maxBatchBodyBytes = 1 << 20
+	maxBatchEvents    = 1000
 )
 
 type errBody struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+}
+
+type batchRequest struct {
+	Events []jsonl.Line `json:"events"`
+	Import bool         `json:"import"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
@@ -88,6 +101,264 @@ func jsonMuxHandler(mux *http.ServeMux) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mux.ServeHTTP(&jsonResponseWriter{ResponseWriter: w}, r)
 	})
+}
+
+func liveAuthorType(r *http.Request) string {
+	if isAgent(r) {
+		return "agent"
+	}
+	return "human"
+}
+
+func listThreadMessages(s *store.Store, threadID int64, w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
+		return
+	}
+	query := r.URL.Query()
+	afterValues, hasAfter := query["after_seq"]
+	_, hasLast := query["last"]
+	if hasAfter && hasLast {
+		writeErr(w, http.StatusBadRequest, "BAD_JSONL", "after_seq and last are mutually exclusive")
+		return
+	}
+
+	var (
+		messages []store.Message
+		err      error
+	)
+	if hasAfter {
+		if len(afterValues) != 1 {
+			writeErr(w, http.StatusBadRequest, "BAD_JSONL", "after_seq must be a non-negative integer")
+			return
+		}
+		afterSeq, parseErr := strconv.ParseInt(afterValues[0], 10, 64)
+		if parseErr != nil || afterSeq < 0 {
+			writeErr(w, http.StatusBadRequest, "BAD_JSONL", "after_seq must be a non-negative integer")
+			return
+		}
+		messages, err = s.ListMessagesAfter(threadID, afterSeq)
+	} else {
+		last, _ := strconv.Atoi(query.Get("last"))
+		messages, err = s.ListMessages(threadID, last)
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "DAEMON_ERROR", err.Error())
+		return
+	}
+	if messages == nil {
+		messages = []store.Message{}
+	}
+	writeJSON(w, http.StatusOK, messages)
+}
+
+func appendThreadMessage(s *store.Store, threadID int64, w http.ResponseWriter, r *http.Request) {
+	var raw map[string]json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		writeErr(w, http.StatusBadRequest, "BAD_JSONL", err.Error())
+		return
+	}
+	var body struct {
+		Name, Role, Content, AgentID, CreatedAt string
+		ParentID, ParentSeq                     int64
+	}
+	for key, value := range raw {
+		var target any
+		switch key {
+		case "Name", "name", "Author", "author":
+			target = &body.Name
+		case "Role", "role":
+			target = &body.Role
+		case "Content", "content":
+			target = &body.Content
+		case "AgentID", "agent_id":
+			target = &body.AgentID
+		case "CreatedAt", "created_at":
+			target = &body.CreatedAt
+		case "ParentID", "parent_id", "parentId":
+			target = &body.ParentID
+		case "ParentSeq", "parent_seq", "parentSeq":
+			target = &body.ParentSeq
+		default:
+			continue
+		}
+		if err := json.Unmarshal(value, target); err != nil {
+			writeErr(w, http.StatusBadRequest, "BAD_JSONL", err.Error())
+			return
+		}
+	}
+
+	name := body.Name
+	if name == "" {
+		name = body.AgentID
+	}
+	if name == "" {
+		name = "unknown"
+	}
+	authorType := liveAuthorType(r)
+	var (
+		seq int64
+		err error
+	)
+	switch {
+	case body.ParentSeq != 0:
+		seq, _, err = s.AppendMessageByParentSeq(threadID, body.ParentSeq, name, authorType, body.Role, body.Content, body.CreatedAt)
+	case body.CreatedAt != "":
+		seq, err = s.AppendMessageAtWithParent(threadID, name, authorType, body.Role, body.Content, body.CreatedAt, body.ParentID)
+	case body.ParentID != 0:
+		seq, err = s.AppendMessageWithParent(threadID, name, authorType, body.Role, body.Content, body.ParentID)
+	default:
+		seq, err = s.AppendMessage(threadID, name, authorType, body.Role, body.Content)
+	}
+	if err != nil {
+		writeThreadMutationError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"seq": seq})
+}
+
+func listThreadReactions(s *store.Store, threadID int64, w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
+		return
+	}
+	reactions, err := s.ListReactions(threadID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "DAEMON_ERROR", err.Error())
+		return
+	}
+	if reactions == nil {
+		reactions = []store.Reaction{}
+	}
+	writeJSON(w, http.StatusOK, reactions)
+}
+
+func appendThreadReaction(s *store.Store, threadID, messageSeq int64, w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
+		return
+	}
+	var body struct {
+		Emoji, Name, AgentID string
+		AgentIDSnake         string `json:"agent_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "BAD_JSONL", err.Error())
+		return
+	}
+	name := body.Name
+	if name == "" {
+		name = body.AgentID
+	}
+	if name == "" {
+		name = body.AgentIDSnake
+	}
+	if name == "" {
+		name = "unknown"
+	}
+	if err := s.AddReactionBySeq(threadID, messageSeq, body.Emoji, name, liveAuthorType(r)); err != nil {
+		writeThreadMutationError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func appendThreadEvents(s *store.Store, threadID int64, w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxBatchBodyBytes)
+	decoder := json.NewDecoder(r.Body)
+	var body batchRequest
+	if err := decoder.Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "BAD_JSONL", err.Error())
+		return
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			err = errors.New("multiple JSON values")
+		}
+		writeErr(w, http.StatusBadRequest, "BAD_JSONL", err.Error())
+		return
+	}
+	if len(body.Events) == 0 {
+		writeErr(w, http.StatusBadRequest, "BAD_JSONL", "events must not be empty")
+		return
+	}
+	if len(body.Events) > maxBatchEvents {
+		writeErr(w, http.StatusBadRequest, "BAD_JSONL", "too many events")
+		return
+	}
+
+	agentRequest := isAgent(r)
+	events := make([]store.AppendEvent, len(body.Events))
+	for i, line := range body.Events {
+		authorType := "human"
+		if agentRequest {
+			authorType = "agent"
+		}
+		if body.Import && !agentRequest {
+			authorType = line.AuthorType
+			if authorType == "" {
+				authorType = "human"
+			}
+		}
+		events[i] = store.AppendEvent{
+			Type:       line.Type,
+			SourceSeq:  line.Seq,
+			ParentSeq:  line.ParentSeq,
+			MessageSeq: line.MessageSeq,
+			Name:       line.Name,
+			AuthorType: authorType,
+			Role:       line.Role,
+			Content:    line.Content,
+			Emoji:      line.Emoji,
+			CreatedAt:  line.Timestamp,
+		}
+	}
+	results, err := s.AppendBatch(threadID, events)
+	if err != nil {
+		writeThreadMutationError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, results)
+}
+
+func writeThreadMutationError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		writeErr(w, http.StatusNotFound, "THREAD_NOT_FOUND", "thread or event target not found")
+	case errors.Is(err, store.ErrConflict):
+		writeErr(w, http.StatusConflict, "BAD_JSONL", "duplicate reaction")
+	case isClientMutationError(err):
+		writeErr(w, http.StatusBadRequest, "BAD_JSONL", err.Error())
+	default:
+		writeErr(w, http.StatusInternalServerError, "DAEMON_ERROR", err.Error())
+	}
+}
+
+func isClientMutationError(err error) bool {
+	if strings.HasPrefix(err.Error(), "parsing time ") {
+		return true
+	}
+	switch err.Error() {
+	case "name and content required",
+		"bad author_type",
+		"bad role",
+		"parent_seq must be non-negative",
+		"parent message not in this thread",
+		"emoji and name required",
+		"source_seq must be non-negative",
+		"message_seq must be positive",
+		"unknown event type",
+		"duplicate source_seq",
+		"unsorted source_seq":
+		return true
+	default:
+		return false
+	}
 }
 
 func NewHandler(s *store.Store) http.Handler {
@@ -202,80 +473,34 @@ func NewHandler(s *store.Store) http.Handler {
 	mux.HandleFunc("/v1/threads/", func(w http.ResponseWriter, r *http.Request) {
 		rest := strings.TrimPrefix(r.URL.Path, "/v1/threads/")
 		parts := strings.Split(rest, "/")
-		if len(parts) != 2 || parts[1] != "messages" {
-			writeErr(w, 404, "THREAD_NOT_FOUND", "unknown route")
+		if len(parts) < 2 {
+			writeErr(w, http.StatusNotFound, "THREAD_NOT_FOUND", "unknown route")
 			return
 		}
-		id, _ := strconv.ParseInt(parts[0], 10, 64)
-		switch r.Method {
-		case "GET":
-			last, _ := strconv.Atoi(r.URL.Query().Get("last"))
-			msgs, err := s.ListMessages(id, last)
-			if err != nil {
-				writeErr(w, 500, "DAEMON_ERROR", err.Error())
+		threadID, _ := strconv.ParseInt(parts[0], 10, 64)
+		switch {
+		case len(parts) == 2 && parts[1] == "messages":
+			switch r.Method {
+			case http.MethodGet:
+				listThreadMessages(s, threadID, w, r)
+			case http.MethodPost:
+				appendThreadMessage(s, threadID, w, r)
+			default:
+				writeErr(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
+			}
+		case len(parts) == 2 && parts[1] == "reactions":
+			listThreadReactions(s, threadID, w, r)
+		case len(parts) == 2 && parts[1] == "events":
+			appendThreadEvents(s, threadID, w, r)
+		case len(parts) == 4 && parts[1] == "messages" && parts[3] == "reactions":
+			messageSeq, err := strconv.ParseInt(parts[2], 10, 64)
+			if err != nil || messageSeq <= 0 {
+				writeErr(w, http.StatusBadRequest, "BAD_JSONL", "message sequence must be a positive integer")
 				return
 			}
-			if msgs == nil {
-				msgs = []store.Message{}
-			}
-			writeJSON(w, http.StatusOK, msgs)
-		case "POST":
-			var raw map[string]json.RawMessage
-			if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
-				writeErr(w, 400, "BAD_JSONL", err.Error())
-				return
-			}
-			var body struct {
-				Name, Role, Content, AgentID, CreatedAt string
-				ParentID                                int64
-			}
-			for k, v := range raw {
-				switch k {
-				case "Name", "name", "Author", "author":
-					json.Unmarshal(v, &body.Name)
-				case "Role", "role":
-					json.Unmarshal(v, &body.Role)
-				case "Content", "content":
-					json.Unmarshal(v, &body.Content)
-				case "AgentID", "agent_id":
-					json.Unmarshal(v, &body.AgentID)
-				case "CreatedAt", "created_at":
-					json.Unmarshal(v, &body.CreatedAt)
-				case "ParentID", "parent_id", "parentId":
-					json.Unmarshal(v, &body.ParentID)
-				}
-			}
-			authorType := "human"
-			if body.AgentID != "" || isAgent(r) {
-				authorType = "agent"
-			}
-			name := body.Name
-			if name == "" {
-				name = body.AgentID
-			}
-			if name == "" {
-				name = "unknown"
-			}
-			var seq int64
-			var err error
-			if body.CreatedAt != "" {
-				seq, err = s.AppendMessageAtWithParent(id, name, authorType, body.Role, body.Content, body.CreatedAt, body.ParentID)
-			} else if body.ParentID != 0 {
-				seq, err = s.AppendMessageWithParent(id, name, authorType, body.Role, body.Content, body.ParentID)
-			} else {
-				seq, err = s.AppendMessage(id, name, authorType, body.Role, body.Content)
-			}
-			if err == store.ErrNotFound {
-				writeErr(w, 404, "THREAD_NOT_FOUND", "no such thread")
-				return
-			}
-			if err != nil {
-				writeErr(w, 400, "BAD_JSONL", err.Error())
-				return
-			}
-			writeJSON(w, http.StatusOK, map[string]any{"seq": seq})
+			appendThreadReaction(s, threadID, messageSeq, w, r)
 		default:
-			writeErr(w, 405, "METHOD_NOT_ALLOWED", "method not allowed")
+			writeErr(w, http.StatusNotFound, "THREAD_NOT_FOUND", "unknown route")
 		}
 	})
 	mux.HandleFunc("/v1/messages/", func(w http.ResponseWriter, r *http.Request) {
@@ -288,18 +513,19 @@ func NewHandler(s *store.Store) http.Handler {
 		id, _ := strconv.ParseInt(parts[0], 10, 64)
 		var body struct {
 			Emoji, Name, AgentID string
+			AgentIDSnake         string `json:"agent_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeErr(w, 400, "BAD_JSONL", err.Error())
 			return
 		}
-		authorType := "human"
-		if body.AgentID != "" || isAgent(r) {
-			authorType = "agent"
-		}
+		authorType := liveAuthorType(r)
 		name := body.Name
 		if name == "" {
 			name = body.AgentID
+		}
+		if name == "" {
+			name = body.AgentIDSnake
 		}
 		if name == "" {
 			name = "unknown"
