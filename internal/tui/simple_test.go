@@ -239,10 +239,10 @@ func TestInboxKeybindings(t *testing.T) {
 	m.view = viewInbox
 	m.cursor = 0
 	had := m.preview
-	nm, _ = m.Update(keyRunes("L"))
+	nm, _ = m.Update(keyRunes("p"))
 	m = toModel(nm)
 	if m.preview == had {
-		t.Fatalf("L toggle failed")
+		t.Fatalf("p toggle failed")
 	}
 	nm, _ = m.Update(keyType(tea.KeyEsc))
 	m = toModel(nm)

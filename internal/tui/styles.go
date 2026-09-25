@@ -122,6 +122,7 @@ var (
 	agentNameStyle  = lipgloss.NewStyle().Foreground(agentColor)
 	systemNameStyle = lipgloss.NewStyle().Foreground(systemColor)
 	inboxMoreStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#fab387")).Italic(true)
+	inboxReplyStyle = lipgloss.NewStyle().Foreground(threadRepliesFg)
 
 	threadTitleStyle = lipgloss.NewStyle().
 				Foreground(threadOpHeaderFg).

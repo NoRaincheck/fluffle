@@ -5,20 +5,38 @@ Bubble Tea v2 terminal UI for Fluffle. Flat inbox table with right-side preview 
 ## Overview
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│ Inbox — 42 messages · last 2m ago                                │
-├──────┬──────────┬─────────┬──────────┬──────────────────────────┤
-│ TIME │ CHANNEL  │ THREAD  │ SENDER   │ CONTENT                  │
-├──────┼──────────┼─────────┼──────────┼──────────────────────────┤
-│ 11:05│ ▸general │ hello   │ 👤alice  │ looks great!             │
-│ 11:00│ random   │ pr-rev  │ 🤖ci-bot │ ✅ build passed          │
-│ 10:45│ general  │ hello   │ 👤bob    │ check out this PR        │
-├──────┴──────────┴─────────┴──────────┴──────────────────────────┤
-│ ↑↓ nav · r reply · n new thread · L preview · q quit            │
-└──────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────────┐
+│ fluffle                                                                       │
+├────────────────────────────────────────────────────────────────────────────────┤
+│Inbox — 3 messages · sort:latest ↓ · layout:compact                             │
+│  42         TIME  CHANNEL       THREAD            NAME          CONTENT          │
+│────────────────────────────────────────────────────────────────────────────────│
+│> 42 Sep 23 15:04  eng     pr-review         ci-bot    ✅ build passed           │
+│  17 Sep 23 11:00  eng     hello             alice     looks great!   (4+)     │
+│                                        │                                      │
+│                                        │ Preview: eng › hello                  │
+│                                        │ Original Post #2 · Sep 23 09:12 …    │
+│                                        │ wraps with no truncation              │
+│                                        │ ───────────────────────────────────  │
+│                                        │   TIME     NAME     MESSAGE          │
+│                                        │  10:00    bob      ship it           │
+│                                        │  11:00    ci-bot   ✅ build passed    │
+├────────────────────────────────────────────────────────────────────────────────┤
+│ ↑↓/j/k nav  Enter view  r reply  v sort  f filter  l layout  p hide preview  q  │
+└────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Single flat **Global Inbox** table showing all messages across all channels/threads. `L` toggles a right-side preview panel showing the full selected message + last 5 replies. Preview auto-enables at ≥100 cols, respects toggle at ≥80 cols, forced off below 80.
+Press `l` for the full layout, where each group expands to its original post plus one `> `-prefixed line per reply:
+
+```
+│  42 Sep 23 15:04  eng  pr-review  ci-bot  ✅ build passed                        │
+│  17 Sep 23 11:00  eng  hello      alice   looks great!                          │
+│                                         > ship it                              │
+│                                         > ✅ build passed                      │
+│                                         > one more thing                       │
+```
+
+Single flat **Global Inbox** table showing all channels/threads, one row per channel/thread group. `l` toggles between two layouts: **compact** (default — one line per group, most recent message) and **full** (original post plus every reply, inline). `p` toggles a right-side preview panel showing the word-wrapped original post + replies. Preview auto-enables at ≥100 cols, respects toggle at ≥80 cols, forced off below 80, and is suppressed in the detail view and in the full layout.
 
 ## Package Structure
 
@@ -70,14 +88,17 @@ No new external dependencies beyond the Bubble Tea ecosystem. The TUI reuses `in
                     └─────Esc──────┘                        │
 ```
 
-Single view: **Inbox Table** (tracked as `viewInbox`). Navigation is cursor-based: `↑/↓` or `j/k` moves through messages. `r`/`c` opens compose for reply. `n` opens compose for new thread. `Enter` opens detail view. `L` toggles preview panel.
+Single view: **Inbox Table** (tracked as `viewInbox`). Navigation is cursor-based: `↑/↓` or `j/k` moves through groups. `r`/`c` opens compose for reply. `Enter` opens detail view. `v` toggles sort, `f` opens the filter, `l`/`L` toggles layout, `p` toggles the preview panel.
 
 ### State Fields
 
 | Field | Purpose |
 |-------|---------|
 | `inbox` | All messages across channels/threads (`[]InboxMessage`) |
-| `cursor` | Index into inbox (0-based, clamped to list length) |
+| `cursor` | Index into the filtered/sorted group list (0-based, clamped to list length) |
+| `inboxSort` | `inboxSortLatestDesc` or `inboxSortChannelThreadDesc` |
+| `inboxLayout` | `inboxLayoutCompact` or `inboxLayoutFull` |
+| `fullThreads` | Cache of `threadID → []Message` backing the full layout (nil = not fetched) |
 | `preview` | Whether right-side preview panel is visible |
 | `previewThreadID` | Thread ID for deduped preview fetch |
 | `previewMessages` | Messages for preview panel (filtered replies) |
@@ -94,10 +115,42 @@ Data is fetched on demand, never polled:
 |-------|-------|
 | `Init()` | `ListInbox()` — all messages across channels/threads |
 | Cursor moves to new thread | `GET /v1/threads/:id/messages` (debounced by thread ID) |
-| After send/create | `fetchInbox()` — refetch entire inbox |
+| Full layout, viewport intersects an uncached group | `GET /v1/threads/:id/messages` for every such group, batched concurrently |
+| Cursor moves while the preview is visible | `GET /v1/threads/:id/messages` (debounced by thread ID) |
+| After send/create | `fetchInbox()` — refetch entire inbox, clears `fullThreads` |
 | Preview panel active + cursor moves | Preview data for highlighted item (deduped) |
 
-Preview fetching is idempotent: skips if cursor hasn't changed, or if width < 80, or if same thread already fetched.
+Preview fetching is idempotent and gated on `previewVisible()`: skips if the cursor hasn't changed, if width < 80, if the same thread is already cached, or if the pane is not actually drawn (detail view, or full inbox layout).
+
+`syncVisibleData()` is the single entry point for cursor-move-driven fetches. It returns `tea.Batch(maybeFetchPreview(), maybeFetchFullRows())`; `tea.Batch` returns the sole non-nil command directly, so it degrades to a single fetch when only one layout needs data.
+
+## Inbox Layouts
+
+`inboxLayout` selects the row renderer. Both layouts group by channel/thread, share column widths, the title, and the cursor model.
+
+| Aspect | Compact | Full |
+|--------|---------|------|
+| Lines per group | 1 | 1 + reply count (1 extra while loading) |
+| Content column shows | Most recent message | Original post (lowest `seq`) |
+| Reply count marker | `(N+)` | none — replies are listed |
+| `scroll` unit | Rows (== groups) | Rendered lines |
+| Thread messages needed | No | Yes — `GET /v1/threads/:id/messages` |
+
+**Key functions:**
+
+| Function | Role |
+|----------|------|
+| `inboxFullBlocks()` | One `inboxFullBlock` per group: `im` (group representative, carries channel/thread), `head` (OP), `replies`, `loading` |
+| `inboxFullBlockRanges()` | Start/end line offsets per group — width-independent, since every reply is exactly one line |
+| `inboxFullGeometry(w, idW)` | Column layout for the current pane width; drops NAME → CHANNEL → THREAD → TIME until the content column has `minContentWidth` |
+| `renderInboxFullWithWidth(w, h)` | Flattens all groups to styled lines tagged with their group index, then windows by line |
+| `clampInboxFullScroll()` | Full-layout branch of `clampCursor`; keeps the cursor's whole block on screen |
+
+`inboxContentCol(idW)` and `inboxRowLine(...)` are shared by both layouts so the compact and full CONTENT columns land on the same offset. `splitPaneWidths(totalW)` is shared between `baseView()` and `inboxListWidth()` so the geometry used for fetch decisions cannot drift from what is drawn.
+
+### Preview Visibility
+
+`previewVisible()` is the single predicate for "is the right-side pane drawn". It is false when the preference is off, below 80 cols, in the detail view, and in the full inbox layout. `baseView()`, `inboxListWidth()`, `listHeight()`, and `maybeFetchPreview()` all consult it, so the pane cannot be drawn at one width while fetch decisions assume another. The `p` preference is untouched by layout switches: toggling `l` never clears it.
 
 ### Messages (Bubble Tea Msg Types)
 
@@ -105,6 +158,7 @@ Preview fetching is idempotent: skips if cursor hasn't changed, or if width < 80
 |----------|---------|----------|
 | `inboxFetchedMsg` | `[]InboxMessage`, `error` | `fetchInbox()` completes |
 | `previewMessagesFetchedMsg` | `threadID`, `[]Message`, `error` | `fetchPreviewMessages()` completes |
+| `fullRowsFetchedMsg` | `map[threadID][]Message`, `error` | `fetchFullRows()` completes |
 | `composeSendMsg` | `text`, `composeMode`, `context` | User presses Enter in compose |
 | `threadCreatedMsg` | `channelID`, `threadID`, `title`, `error` | Thread creation response |
 | `tea.WindowSizeMsg` | `Width`, `Height` | Terminal resize |
@@ -126,25 +180,24 @@ View()
 
 ### `renderInboxWithWidth(w int)`
 
-Renders the inbox as a `lipgloss/table`:
+Renders the inbox in the active layout (`inboxLayoutFull` dispatches to `renderInboxFullWithWidth`):
 
-1. Title: `Inbox — N messages · last <time>`
-2. Header row: `TIME | CHANNEL | THREAD | SENDER | CONTENT`
-3. Fixed column widths: time 8, channel 12, thread 16, sender 12, content fills remaining
+1. Title: `Inbox — N messages · sort:<sort> · layout:<layout>`
+2. Header row: `TIME | CHANNEL | THREAD | NAME | CONTENT`
+3. Fixed column widths: time 12, channel 12, thread 16, name 12, content fills remaining
 4. Single-line truncation for content with ellipsis
-5. Color-coded sender column (`getAuthorStyle`)
+5. Color-coded name column (`getNameStyle`)
 6. Cursor row highlighted (`chatMsgSelectedStyle`)
-7. Empty state: `(no messages — press n for new thread)`
+7. Empty state: `(no messages)` or `(no messages — filtered, press f to clear)`
 8. Truncated to panel height, padded with empty lines if short
 
 ### `renderPreview(w int)`
 
-Renders the preview panel for the cursor-highlighted inbox message:
+Renders the preview panel for the cursor-highlighted inbox group:
 
-- Title: `Preview: #channel › thread · author`
+- Title: `#channel › thread · last <time> · N replies`
 - Root post: word-wrapped fully with `wrapText`, no truncation
 - Replies: fill remaining height, newest-tail truncation when space runs out
-- Adaptive Y calculation for available space
 - Empty state: `(no message)` or `(no replies)`
 
 ### `helpView()`
@@ -199,11 +252,12 @@ model.Update(tea.KeyMsg)
   │
   └─ no ──▶ handleKey(key)
               │
-              ├─ ↑↓/j/k ──▶ cursor++, cursor-- ──▶ maybeFetchPreview()
+              ├─ ↑↓/j/k ──▶ cursor++, cursor-- ──▶ syncVisibleData()
               ├─ r/c ──▶ handleReply() ──▶ compose.Open(composeModeMessage)
               ├─ Enter ──▶ viewInboxDetail (fullscreen thread)
               ├─ n ──▶ handleNewThread() ──▶ compose.Open(composeModeNewThread)
-              ├─ L/l ──▶ toggle preview ──▶ maybeFetchPreview()
+              ├─ l/L ──▶ toggle inbox layout ──▶ syncVisibleData()
+              ├─ p ──▶ toggle preview ──▶ syncVisibleData()
               ├─ Esc ──▶ no-op (inbox) / return to inbox (detail)
               └─ q ──▶ quitting = true ──▶ tea.Quit
   │
@@ -274,13 +328,13 @@ Y := clamp(3, 20, hAvail - replyReserve - 2)
 ## Design Decisions
 
 1. **Flat inbox over 3-view stack**: All messages in one table. Eliminates Enter/Esc navigation for scanning. `↑↓` is the only nav.
-2. **Preview panel**: Shows full message + last 5 replies. Adaptive Y prevents overflow. Toggle with `L`.
+2. **Preview panel**: Shows the word-wrapped original post + replies. Adaptive Y prevents overflow. Toggle with `p`.
 3. **Reply via `r`/`c`**: Opens compose with `threadID` + `parentID` set from cursor position for threaded replies.
 4. **Enter opens detail view**: On inbox, `Enter` opens the selected thread in a fullscreen scrollable detail view. `Esc` returns to inbox, preserving cursor position. Detail view is read-only; `r` from detail opens compose for reply.
 5. **Full-post wrapping in preview and detail**: Preview root post is word-wrapped with no truncation (via `wrapText`), replies fill remaining pane height with newest-tail truncation. Detail view wraps all messages fully — no ellipsis truncation on message content.
 6. **Fill-to-height preview**: Replies in the preview pane fill available space; when content exceeds height, oldest replies are dropped and newest are kept (tail truncation).
 7. **No filter/sort**: Explicitly deferred. YAGNI.
-8. **Preview auto-enables at ≥100 cols**: Below 100 cols, user must press `L` to enable. At 80-99 cols, preview available but off by default. Below 80 cols, forced off.
+8. **Preview auto-enables at ≥100 cols**: Below 100 cols, user must press `p` to enable. At 80-99 cols, preview available but off by default. Below 80 cols, forced off.
 9. **Status bar at bottom**: Always visible, shows action feedback, error messages, and context-sensitive hints.
 10. **Compose modal centered**: Full width of terminal, height scales with terminal height (min 5, max 12 lines).
 11. **Channel cache retained**: Only for new-thread picker, not for inbox rendering.
@@ -289,6 +343,7 @@ Y := clamp(3, 20, hAvail - replyReserve - 2)
 14. **Detail view hides preview**: When in detail view, the split-pane preview is suppressed — the thread fills the full terminal width.
 15. **Inbox cursor preserved on Esc**: Entering detail saves `cursor`/`scroll`; returning via `Esc` restores them.
 16. **Preview panel hidden in detail**: `View()` early-returns for `viewInboxDetail` with single-pane rendering; the preview split condition guards `&& m.view != viewInboxDetail`.
+17. **Preview suppressed in the full layout**: full layout already inlines the original post and every reply, and a split pane is too narrow for the content column, so the rows take the full width. `previewVisible()` holds the rule; the `p` preference survives the switch.
 
 ## wrapText Helper
 
@@ -300,7 +355,7 @@ Y := clamp(3, 20, hAvail - replyReserve - 2)
 - Reply count inline (` ↳ 5 replies`)
 - Reaction display in list view
 - Visual reply threading (indentation + tree lines)
-- Toggle density modes (compact/standard/expanded)
+- Density modes beyond the compact/full inbox layouts
 - Search/filter with visual feedback
 - Unread indicators per channel/thread
 - Start-at-bottom cursor (e.g. `G` key)
