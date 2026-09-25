@@ -109,6 +109,6 @@ Centered overlay. Activated by `r`, `c`, or `n`.
 Always visible at the bottom. Shows:
 
 - **Normal**: `inbox — N messages · ↑↓ nav · Enter view · r reply · n new thread · L preview`
-- **Error**: `error: DAEMON_DOWN: ...`
+- **Error**: `error: DAEMON_DOWN: ...` (unreachable daemon), `error: DAEMON_ERROR: ...` (undecodable response), or `error: DELIVERY_UNKNOWN: ...` (a write that may have committed)
 - **Empty state**: `no messages — press n for new thread`
 - **Action feedback**: `sent`, `thread "name" created`

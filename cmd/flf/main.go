@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -66,6 +68,8 @@ type apiErrBody struct {
 	Message string `json:"message"`
 }
 
+type apiResponseCheck func() error
+
 func printAPIError(resp *http.Response) int {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -78,7 +82,7 @@ func printAPIError(resp *http.Response) int {
 	return fail(eb.Code, eb.Message)
 }
 
-func apiGet(u, agentID string, out any) int {
+func apiGet(u, agentID string, out any, check apiResponseCheck) int {
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, u, nil)
 	if err != nil {
 		return fail("DAEMON_ERROR", err.Error())
@@ -94,8 +98,14 @@ func apiGet(u, agentID string, out any) int {
 	if resp.StatusCode >= 400 {
 		return printAPIError(resp)
 	}
-	if out != nil {
-		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+	if out == nil {
+		return 0
+	}
+	if err := decodeStrictJSON(resp.Body, out); err != nil {
+		return fail("DAEMON_ERROR", err.Error())
+	}
+	if check != nil {
+		if err := check(); err != nil {
 			return fail("DAEMON_ERROR", err.Error())
 		}
 	}
@@ -121,7 +131,7 @@ func decodeStrictJSON(r io.Reader, out any) error {
 	return json.Unmarshal(raw, out)
 }
 
-func apiPost(u, agentID string, payload any, out any) int {
+func apiPost(u, agentID string, payload any, out any, check apiResponseCheck) int {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return fail("BAD_REQUEST", err.Error())
@@ -142,12 +152,152 @@ func apiPost(u, agentID string, payload any, out any) int {
 	if resp.StatusCode >= 400 {
 		return printAPIError(resp)
 	}
-	if out != nil {
-		if err := decodeStrictJSON(resp.Body, out); err != nil {
+	if out == nil {
+		return 0
+	}
+	if err := decodeStrictJSON(resp.Body, out); err != nil {
+		return fail("DELIVERY_UNKNOWN", fmt.Sprintf("read the thread before retrying: %v", err))
+	}
+	if check != nil {
+		if err := check(); err != nil {
 			return fail("DELIVERY_UNKNOWN", fmt.Sprintf("read the thread before retrying: %v", err))
 		}
 	}
 	return 0
+}
+
+func validateList[T any](list *[]T, check func(T) error) apiResponseCheck {
+	return func() error {
+		for i, item := range *list {
+			if err := check(item); err != nil {
+				return fmt.Errorf("entry %d: %w", i, err)
+			}
+		}
+		return nil
+	}
+}
+
+func validateChannels(list *[]store.Channel) apiResponseCheck {
+	return validateList(list, func(channel store.Channel) error {
+		if channel.ID <= 0 {
+			return fmt.Errorf("channel has invalid id %d", channel.ID)
+		}
+		if strings.TrimSpace(channel.Name) == "" {
+			return errors.New("channel has an empty name")
+		}
+		return nil
+	})
+}
+
+func validateThreads(list *[]store.Thread) apiResponseCheck {
+	return validateList(list, func(thread store.Thread) error {
+		if thread.ID <= 0 || thread.ChannelID <= 0 {
+			return fmt.Errorf("thread has invalid identity %d/%d", thread.ID, thread.ChannelID)
+		}
+		if strings.TrimSpace(thread.Title) == "" {
+			return errors.New("thread has an empty title")
+		}
+		return nil
+	})
+}
+
+func validateMessages(list *[]store.Message) apiResponseCheck {
+	return validateList(list, func(message store.Message) error {
+		if message.ID <= 0 || message.ThreadID <= 0 || message.Seq <= 0 {
+			return fmt.Errorf("message has invalid reference %d/%d/%d", message.ID, message.ThreadID, message.Seq)
+		}
+		if strings.TrimSpace(message.Name) == "" || strings.TrimSpace(message.Content) == "" {
+			return errors.New("message has an empty name or content")
+		}
+		if message.AuthorType != "human" && message.AuthorType != "agent" {
+			return fmt.Errorf("message has unknown author_type %q", message.AuthorType)
+		}
+		return nil
+	})
+}
+
+func validateReactions(list *[]store.Reaction) apiResponseCheck {
+	return validateList(list, func(reaction store.Reaction) error {
+		if reaction.ID <= 0 || reaction.MessageID <= 0 || reaction.MessageSeq <= 0 {
+			return fmt.Errorf("reaction has invalid reference %d/%d/%d", reaction.ID, reaction.MessageID, reaction.MessageSeq)
+		}
+		if strings.TrimSpace(reaction.Emoji) == "" || strings.TrimSpace(reaction.Name) == "" {
+			return errors.New("reaction has an empty emoji or name")
+		}
+		return nil
+	})
+}
+
+func validateInbox(list *[]store.InboxMessage) apiResponseCheck {
+	return validateList(list, func(entry store.InboxMessage) error {
+		if entry.ID <= 0 || entry.ThreadID <= 0 || entry.Seq <= 0 || entry.ChannelID <= 0 {
+			return fmt.Errorf("inbox entry has invalid reference %d/%d/%d/%d", entry.ID, entry.ThreadID, entry.Seq, entry.ChannelID)
+		}
+		if strings.TrimSpace(entry.Name) == "" || strings.TrimSpace(entry.Content) == "" {
+			return errors.New("inbox entry has an empty name or content")
+		}
+		if strings.TrimSpace(entry.ChannelName) == "" || strings.TrimSpace(entry.ThreadTitle) == "" {
+			return errors.New("inbox entry has an empty channel name or thread title")
+		}
+		return nil
+	})
+}
+
+func validateCreatedID(id *int64) apiResponseCheck {
+	return func() error {
+		if *id <= 0 {
+			return errors.New("daemon acknowledged creation without an id")
+		}
+		return nil
+	}
+}
+
+func validateAssignedSeq(seq *int64) apiResponseCheck {
+	return func() error {
+		if *seq <= 0 {
+			return errors.New("daemon acknowledged a message without an assigned sequence")
+		}
+		return nil
+	}
+}
+
+type reactionAck struct {
+	OK *bool `json:"ok"`
+}
+
+func validateReactionAck(ack *reactionAck) apiResponseCheck {
+	return func() error {
+		if ack.OK == nil {
+			return errors.New("reaction response did not acknowledge the write")
+		}
+		if !*ack.OK {
+			return errors.New("reaction response reported failure")
+		}
+		return nil
+	}
+}
+
+func validateBatchResults(events []jsonl.Line, results *batchResults) apiResponseCheck {
+	return func() error {
+		if len(*results) != len(events) {
+			return fmt.Errorf("batch returned %d results for %d events", len(*results), len(events))
+		}
+		for i, result := range *results {
+			if result.MessageID <= 0 {
+				return fmt.Errorf("batch result %d has no message id", i)
+			}
+			if events[i].Type == "reaction" {
+				if result.ReactionID <= 0 {
+					return fmt.Errorf("batch result %d has no reaction id", i)
+				}
+				continue
+			}
+			if result.Seq <= 0 {
+				return fmt.Errorf("batch result %d has no assigned sequence", i)
+			}
+		}
+		return nil
+	}
 }
 
 func newFlagSet(name string) *flag.FlagSet {
@@ -206,7 +356,7 @@ func inboxCmd(args []string) int {
 	}
 	var messages []store.InboxMessage
 	u := base + "/v1/inbox?limit=" + strconv.Itoa(*limit)
-	if code := apiGet(u, "", &messages); code != 0 {
+	if code := apiGet(u, "", &messages, validateInbox(&messages)); code != 0 {
 		return code
 	}
 	if messages == nil {
@@ -267,7 +417,7 @@ func channelListCmd(args []string) int {
 	if abs != "" {
 		u += "&repo=" + url.QueryEscape(abs)
 	}
-	if code := apiGet(u, "", &list); code != 0 {
+	if code := apiGet(u, "", &list, validateChannels(&list)); code != 0 {
 		return code
 	}
 	if list == nil {
@@ -329,13 +479,13 @@ func channelCreateCmd(args []string) int {
 	var out struct {
 		ID int64 `json:"id"`
 	}
-	if code := apiPost(base+"/v1/channels", "", body, &out); code != 0 {
+	if code := apiPost(base+"/v1/channels", "", body, &out, validateCreatedID(&out.ID)); code != 0 {
 		return code
 	}
 	if *jsonOut {
 		var list []store.Channel
 		u := base + "/v1/channels?include-orphaned=1"
-		if code := apiGet(u, "", &list); code != 0 {
+		if code := apiGet(u, "", &list, validateChannels(&list)); code != 0 {
 			return code
 		}
 		for _, c := range list {
@@ -381,7 +531,7 @@ func resolveChannelID(base, abs, name string, orphaned bool) (int64, int) {
 	} else {
 		u = base + "/v1/channels?repo=" + url.QueryEscape(abs)
 	}
-	if code := apiGet(u, "", &list); code != 0 {
+	if code := apiGet(u, "", &list, validateChannels(&list)); code != 0 {
 		return 0, code
 	}
 	for _, c := range list {
@@ -436,7 +586,7 @@ func threadListCmd(args []string) int {
 		return code
 	}
 	var list []store.Thread
-	if code := apiGet(base+"/v1/channels/"+strconv.FormatInt(id, 10)+"/threads", "", &list); code != 0 {
+	if code := apiGet(base+"/v1/channels/"+strconv.FormatInt(id, 10)+"/threads", "", &list, validateThreads(&list)); code != 0 {
 		return code
 	}
 	if list == nil {
@@ -498,7 +648,7 @@ func threadNewCmd(args []string) int {
 		ID int64 `json:"id"`
 	}
 	body := map[string]any{"Title": *title}
-	if code := apiPost(base+"/v1/channels/"+strconv.FormatInt(id, 10)+"/threads", "", body, &out); code != 0 {
+	if code := apiPost(base+"/v1/channels/"+strconv.FormatInt(id, 10)+"/threads", "", body, &out, validateCreatedID(&out.ID)); code != 0 {
 		return code
 	}
 	if *jsonOut {
@@ -527,18 +677,16 @@ func threadMessagesURL(base string, threadID int64, last int, afterSeq int64) st
 
 func dumpThreadMessages(base string, threadID int64, last int, afterSeq int64, agentID string) int {
 	var msgs []store.Message
-	if code := apiGet(threadMessagesURL(base, threadID, last, afterSeq), agentID, &msgs); code != 0 {
+	if code := apiGet(threadMessagesURL(base, threadID, last, afterSeq), agentID, &msgs, validateMessages(&msgs)); code != 0 {
 		return code
 	}
 	seqByID := make(map[int64]int64, len(msgs))
-	selectedIDs := make(map[int64]struct{}, len(msgs))
 	for _, message := range msgs {
 		seqByID[message.ID] = message.Seq
-		selectedIDs[message.ID] = struct{}{}
 	}
 	if afterSeq > 0 || last > 0 {
 		var allMessages []store.Message
-		if code := apiGet(threadMessagesURL(base, threadID, 0, -1), agentID, &allMessages); code != 0 {
+		if code := apiGet(threadMessagesURL(base, threadID, 0, -1), agentID, &allMessages, validateMessages(&allMessages)); code != 0 {
 			return code
 		}
 		for _, message := range allMessages {
@@ -560,13 +708,10 @@ func dumpThreadMessages(base string, threadID int64, last int, afterSeq int64, a
 		})
 	}
 	var reactions []store.Reaction
-	if code := apiGet(base+"/v1/threads/"+strconv.FormatInt(threadID, 10)+"/reactions", agentID, &reactions); code != 0 {
+	if code := apiGet(base+"/v1/threads/"+strconv.FormatInt(threadID, 10)+"/reactions", agentID, &reactions, validateReactions(&reactions)); code != 0 {
 		return code
 	}
 	for _, reaction := range reactions {
-		if _, selected := selectedIDs[reaction.MessageID]; !selected {
-			continue
-		}
 		messageSeq := reaction.MessageSeq
 		if messageSeq == 0 {
 			messageSeq = seqByID[reaction.MessageID]
@@ -651,13 +796,7 @@ func postJSONLBatch(base string, threadID int64, lines []jsonl.Line, agentID str
 		Import bool         `json:"import"`
 	}{Events: lines, Import: importEvents}
 	var out batchResults
-	if code := apiPost(u, agentID, body, &out); code != 0 {
-		return code
-	}
-	if len(out) != len(lines) {
-		return fail("DELIVERY_UNKNOWN", fmt.Sprintf("read the thread before retrying: batch returned %d results for %d events", len(out), len(lines)))
-	}
-	return 0
+	return apiPost(u, agentID, body, &out, validateBatchResults(lines, &out))
 }
 
 func agentCmd(args []string) int {
@@ -690,7 +829,7 @@ func agentReadCmd(args []string) int {
 	if flagWasSet(fs, "after-seq") && *afterSeq < 0 {
 		return fail("BAD_ARGS", "after-seq must be a non-negative integer")
 	}
-	if *afterSeq >= 0 && *last > 0 {
+	if flagWasSet(fs, "after-seq") && flagWasSet(fs, "last") {
 		return fail("BAD_ARGS", "after-seq and last are mutually exclusive")
 	}
 	base, err := client.EnsureDaemon()
@@ -701,7 +840,7 @@ func agentReadCmd(args []string) int {
 		return dumpThreadMessages(base, *threadID, *last, *afterSeq, *agentID)
 	}
 	var msgs []store.Message
-	if code := apiGet(threadMessagesURL(base, *threadID, *last, *afterSeq), *agentID, &msgs); code != 0 {
+	if code := apiGet(threadMessagesURL(base, *threadID, *last, *afterSeq), *agentID, &msgs, validateMessages(&msgs)); code != 0 {
 		return code
 	}
 	enc := json.NewEncoder(os.Stdout)
@@ -755,7 +894,7 @@ func threadExportCmd(args []string) int {
 func ensureImportChannel(base, name, repoPath string, orphaned bool) (int64, int) {
 	if orphaned {
 		var list []store.Channel
-		if code := apiGet(base+"/v1/channels?include-orphaned=1", "", &list); code != 0 {
+		if code := apiGet(base+"/v1/channels?include-orphaned=1", "", &list, validateChannels(&list)); code != 0 {
 			return 0, code
 		}
 		for _, c := range list {
@@ -767,7 +906,7 @@ func ensureImportChannel(base, name, repoPath string, orphaned bool) (int64, int
 			ID int64 `json:"id"`
 		}
 		body := map[string]any{"Name": name, "Orphaned": true}
-		if code := apiPost(base+"/v1/channels", "", body, &out); code != 0 {
+		if code := apiPost(base+"/v1/channels", "", body, &out, validateCreatedID(&out.ID)); code != 0 {
 			return 0, code
 		}
 		return out.ID, 0
@@ -777,7 +916,7 @@ func ensureImportChannel(base, name, repoPath string, orphaned bool) (int64, int
 		return 0, fail("NOT_A_GIT_REPO", repoPath)
 	}
 	var list []store.Channel
-	if code := apiGet(base+"/v1/channels?repo="+url.QueryEscape(abs), "", &list); code != 0 {
+	if code := apiGet(base+"/v1/channels?repo="+url.QueryEscape(abs), "", &list, validateChannels(&list)); code != 0 {
 		return 0, code
 	}
 	for _, c := range list {
@@ -793,7 +932,7 @@ func ensureImportChannel(base, name, repoPath string, orphaned bool) (int64, int
 		ID int64 `json:"id"`
 	}
 	body := map[string]any{"Name": name, "RepoAbsPath": abs, "RepoRemote": remote, "RepoHeadSHA": head, "Orphaned": false}
-	if code := apiPost(base+"/v1/channels", "", body, &out); code != 0 {
+	if code := apiPost(base+"/v1/channels", "", body, &out, validateCreatedID(&out.ID)); code != 0 {
 		return 0, code
 	}
 	return out.ID, 0
@@ -842,7 +981,7 @@ func threadImportCmd(args []string) int {
 	}
 	title := "import " + filepath.Base(*file)
 	body := map[string]any{"Title": title}
-	if code := apiPost(base+"/v1/channels/"+strconv.FormatInt(chID, 10)+"/threads", "", body, &out); code != 0 {
+	if code := apiPost(base+"/v1/channels/"+strconv.FormatInt(chID, 10)+"/threads", "", body, &out, validateCreatedID(&out.ID)); code != 0 {
 		return code
 	}
 	if code := postJSONLBatch(base, out.ID, lines, "", true); code != 0 {
@@ -920,7 +1059,7 @@ func messageSendCmd(args []string) int {
 		Seq int64 `json:"seq"`
 	}
 	u := base + "/v1/threads/" + strconv.FormatInt(*threadID, 10) + "/messages"
-	if code := apiPost(u, *agentID, body, &out); code != 0 {
+	if code := apiPost(u, *agentID, body, &out, validateAssignedSeq(&out.Seq)); code != 0 {
 		return code
 	}
 	if *jsonOut {
@@ -973,14 +1112,14 @@ func reactAddCmd(args []string) int {
 	}
 	name := defaultName(*as)
 	body := map[string]any{"Emoji": *emoji, "Name": name, "AgentID": *agentID}
-	var out map[string]any
+	var out reactionAck
 	var u string
 	if *messageSeq > 0 {
 		u = base + "/v1/threads/" + strconv.FormatInt(*threadID, 10) + "/messages/" + strconv.FormatInt(*messageSeq, 10) + "/reactions"
 	} else {
 		u = base + "/v1/messages/" + strconv.FormatInt(*messageID, 10) + "/reactions"
 	}
-	if code := apiPost(u, *agentID, body, &out); code != 0 {
+	if code := apiPost(u, *agentID, body, &out, validateReactionAck(&out)); code != 0 {
 		return code
 	}
 	fmt.Println("ok")
@@ -1099,19 +1238,35 @@ func daemonStartBackground() int {
 	if err := cmd.Start(); err != nil {
 		return fail("DAEMON_ERROR", err.Error())
 	}
-	// Wait briefly for the child to write daemon.json so we can report the port.
-	for i := 0; i < 50; i++ {
+	childExit := make(chan error, 1)
+	go func() { childExit <- cmd.Wait() }()
+
+	port, err := awaitDaemonPort(home, 50, 100*time.Millisecond, childExit)
+	if err != nil {
+		return fail("DAEMON_ERROR", err.Error())
+	}
+	fmt.Println("daemon started on 127.0.0.1:" + strconv.Itoa(port))
+	return 0
+}
+
+func awaitDaemonPort(home string, attempts int, delay time.Duration, childExit <-chan error) (int, error) {
+	for i := 0; i < attempts; i++ {
 		if data, err := os.ReadFile(filepath.Join(home, "daemon.json")); err == nil {
 			var df struct {
 				Port int `json:"port"`
 			}
 			if json.Unmarshal(data, &df) == nil && df.Port > 0 {
-				fmt.Println("daemon started on 127.0.0.1:" + strconv.Itoa(df.Port))
-				return 0
+				return df.Port, nil
 			}
 		}
-		time.Sleep(100 * time.Millisecond)
+		select {
+		case err := <-childExit:
+			if err == nil {
+				err = errors.New("child exited before publishing its port")
+			}
+			return 0, fmt.Errorf("daemon child failed: %w", err)
+		case <-time.After(delay):
+		}
 	}
-	fmt.Println("daemon started (port unknown)")
-	return 0
+	return 0, errors.New("daemon did not become ready with a published port")
 }

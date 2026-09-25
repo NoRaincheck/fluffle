@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -11,6 +12,11 @@ import (
 
 var ErrConflict = errors.New("conflict")
 var ErrNotFound = errors.New("not found")
+var ErrInvalid = errors.New("invalid")
+
+func invalid(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", ErrInvalid, fmt.Sprintf(format, args...))
+}
 
 const schema = `
 CREATE TABLE IF NOT EXISTS channels(
@@ -120,19 +126,19 @@ func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) CreateChannel(name, repoAbsPath, repoRemote, repoHeadSHA, repoHeadBranch string, orphaned bool) (int64, error) {
 	if strings.TrimSpace(name) == "" {
-		return 0, errors.New("channel name required")
+		return 0, invalid("channel name required")
 	}
 	var abs any
 	var isOrphan int
 	if orphaned {
 		if repoAbsPath != "" {
-			return 0, errors.New("orphaned channel must not have repo path")
+			return 0, invalid("orphaned channel must not have repo path")
 		}
 		abs = nil
 		isOrphan = 1
 	} else {
 		if strings.TrimSpace(repoAbsPath) == "" {
-			return 0, errors.New("repo path required")
+			return 0, invalid("repo path required")
 		}
 		abs = repoAbsPath
 	}
@@ -234,7 +240,7 @@ type InboxMessage struct {
 
 func (s *Store) CreateThread(channelID int64, title string) (int64, error) {
 	if strings.TrimSpace(title) == "" {
-		return 0, errors.New("title required")
+		return 0, invalid("title required")
 	}
 	var n int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM channels WHERE id = ? AND archived_at IS NULL`, channelID).Scan(&n); err != nil {
@@ -313,7 +319,7 @@ func (s *Store) AppendMessageByParentSeq(threadID, parentSeq int64, name, author
 
 func appendMessageByParentSeqTx(tx *sql.Tx, threadID, parentSeq int64, name, authorType, role, content, createdAt string) (int64, int64, error) {
 	if parentSeq < 0 {
-		return 0, 0, errors.New("parent_seq must be non-negative")
+		return 0, 0, invalid("parent_seq must be non-negative")
 	}
 	var parentID int64
 	if parentSeq > 0 {
@@ -351,14 +357,14 @@ func appendMessageTx(tx *sql.Tx, threadID int64, name, authorType, role, content
 			return 0, 0, ErrNotFound
 		}
 		if parentThreadID != threadID {
-			return 0, 0, errors.New("parent message not in this thread")
+			return 0, 0, invalid("parent message not in this thread")
 		}
 	}
 	var res sql.Result
 	var err error
 	if createdAt != "" {
 		if _, err := time.Parse(time.RFC3339, createdAt); err != nil {
-			return 0, 0, err
+			return 0, 0, invalid("created_at %q is not RFC3339: %v", createdAt, err)
 		}
 		res, err = tx.Exec(`INSERT INTO messages(thread_id, seq, parent_id, name, author_type, role, content, created_at) VALUES(?,?,?,?,?,?,?,?)`, threadID, seq, nullIfInt64(parentID), name, authorType, role, content, createdAt)
 		if err != nil {
@@ -379,13 +385,13 @@ func appendMessageTx(tx *sql.Tx, threadID int64, name, authorType, role, content
 
 func validateMessage(name, authorType, role, content string) error {
 	if strings.TrimSpace(name) == "" || strings.TrimSpace(content) == "" {
-		return errors.New("name and content required")
+		return invalid("name and content required")
 	}
 	if authorType != "human" && authorType != "agent" {
-		return errors.New("bad author_type")
+		return invalid("bad author_type %q", authorType)
 	}
 	if role != "user" && role != "assistant" && role != "system" {
-		return errors.New("bad role")
+		return invalid("bad role %q", role)
 	}
 	return nil
 }
@@ -530,21 +536,41 @@ func (s *Store) AddReaction(messageID int64, emoji, name, authorType string) err
 	if err := validateReaction(emoji, name, authorType); err != nil {
 		return err
 	}
-	if _, err := s.db.Exec(`INSERT INTO reactions(message_id, emoji, name, author_type) VALUES(?,?,?,?)`, messageID, emoji, name, authorType); err != nil {
-		if strings.Contains(err.Error(), "UNIQUE") {
-			return ErrConflict
-		}
+	tx, err := s.db.Begin()
+	if err != nil {
 		return err
 	}
-	return nil
+	defer tx.Rollback()
+	if _, err := messageThreadIDTx(tx, messageID); err != nil {
+		return err
+	}
+	if _, _, err := addReactionTx(tx, messageID, emoji, name, authorType, ""); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func messageThreadIDTx(tx *sql.Tx, messageID int64) (int64, error) {
+	if messageID <= 0 {
+		return 0, ErrNotFound
+	}
+	var threadID int64
+	err := tx.QueryRow(`SELECT thread_id FROM messages WHERE id = ?`, messageID).Scan(&threadID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	if err != nil {
+		return 0, err
+	}
+	return threadID, nil
 }
 
 func validateReaction(emoji, name, authorType string) error {
 	if strings.TrimSpace(emoji) == "" || strings.TrimSpace(name) == "" {
-		return errors.New("emoji and name required")
+		return invalid("emoji and name required")
 	}
 	if authorType != "human" && authorType != "agent" {
-		return errors.New("bad author_type")
+		return invalid("bad author_type %q", authorType)
 	}
 	return nil
 }
@@ -586,10 +612,20 @@ func addReactionBySeqTx(tx *sql.Tx, threadID, messageSeq int64, emoji, name, aut
 	if err != nil {
 		return 0, 0, err
 	}
-	var res sql.Result
+	return addReactionTx(tx, messageID, emoji, name, authorType, createdAt)
+}
+
+func addReactionTx(tx *sql.Tx, messageID int64, emoji, name, authorType, createdAt string) (int64, int64, error) {
+	if err := validateReaction(emoji, name, authorType); err != nil {
+		return 0, 0, err
+	}
+	var (
+		res sql.Result
+		err error
+	)
 	if createdAt != "" {
 		if _, err := time.Parse(time.RFC3339, createdAt); err != nil {
-			return 0, 0, err
+			return 0, 0, invalid("created_at %q is not RFC3339: %v", createdAt, err)
 		}
 		res, err = tx.Exec(`INSERT INTO reactions(message_id, emoji, name, author_type, created_at) VALUES(?,?,?,?,?)`, messageID, emoji, name, authorType, createdAt)
 	} else {
@@ -660,29 +696,29 @@ func (s *Store) AppendBatch(threadID int64, events []AppendEvent) ([]AppendResul
 
 func validateAppendEvent(event AppendEvent) error {
 	if event.SourceSeq < 0 {
-		return errors.New("source_seq must be non-negative")
+		return invalid("source_seq must be non-negative")
 	}
 	switch event.Type {
 	case "message":
 		if event.ParentSeq < 0 {
-			return errors.New("parent_seq must be non-negative")
+			return invalid("parent_seq must be non-negative")
 		}
 		if err := validateMessage(event.Name, event.AuthorType, event.Role, event.Content); err != nil {
 			return err
 		}
 	case "reaction":
 		if event.MessageSeq <= 0 {
-			return errors.New("message_seq must be positive")
+			return invalid("message_seq must be positive")
 		}
 		if err := validateReaction(event.Emoji, event.Name, event.AuthorType); err != nil {
 			return err
 		}
 	default:
-		return errors.New("unknown event type")
+		return invalid("unknown event type %q", event.Type)
 	}
 	if event.CreatedAt != "" {
 		if _, err := time.Parse(time.RFC3339, event.CreatedAt); err != nil {
-			return err
+			return invalid("created_at %q is not RFC3339: %v", event.CreatedAt, err)
 		}
 	}
 	return nil
@@ -719,10 +755,10 @@ func buildSourceSequenceMap(events []AppendEvent, nextSeq int64) (map[int64]int6
 			continue
 		}
 		if _, exists := mapped[event.SourceSeq]; exists {
-			return nil, errors.New("duplicate source_seq")
+			return nil, invalid("duplicate source_seq %d", event.SourceSeq)
 		}
 		if event.SourceSeq < lastSourceSeq {
-			return nil, errors.New("unsorted source_seq")
+			return nil, invalid("unsorted source_seq %d", event.SourceSeq)
 		}
 		mapped[event.SourceSeq] = destinationSeq
 		lastSourceSeq = event.SourceSeq

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -45,8 +46,8 @@ func (c *apiClient) ListChannels(ctx context.Context, repo, filter string) ([]st
 		return nil, readAPIError(resp)
 	}
 	var channels []store.Channel
-	if err := json.NewDecoder(resp.Body).Decode(&channels); err != nil {
-		return nil, fmt.Errorf("DAEMON_DOWN: %w", err)
+	if err := decodeStrictJSON(resp.Body, &channels); err != nil {
+		return nil, fmt.Errorf("DAEMON_ERROR: %w", err)
 	}
 	if channels == nil {
 		channels = []store.Channel{}
@@ -77,8 +78,8 @@ func (c *apiClient) ListThreads(ctx context.Context, channelID int64) ([]store.T
 		return nil, readAPIError(resp)
 	}
 	var threads []store.Thread
-	if err := json.NewDecoder(resp.Body).Decode(&threads); err != nil {
-		return nil, fmt.Errorf("DAEMON_DOWN: %w", err)
+	if err := decodeStrictJSON(resp.Body, &threads); err != nil {
+		return nil, fmt.Errorf("DAEMON_ERROR: %w", err)
 	}
 	if threads == nil {
 		threads = []store.Thread{}
@@ -101,8 +102,8 @@ func (c *apiClient) ListMessages(ctx context.Context, threadID int64) ([]store.M
 		return nil, readAPIError(resp)
 	}
 	var msgs []store.Message
-	if err := json.NewDecoder(resp.Body).Decode(&msgs); err != nil {
-		return nil, fmt.Errorf("DAEMON_DOWN: %w", err)
+	if err := decodeStrictJSON(resp.Body, &msgs); err != nil {
+		return nil, fmt.Errorf("DAEMON_ERROR: %w", err)
 	}
 	if msgs == nil {
 		msgs = []store.Message{}
@@ -124,8 +125,8 @@ func (c *apiClient) ListInbox(ctx context.Context, limit int) ([]store.InboxMess
 		return nil, readAPIError(resp)
 	}
 	var msgs []store.InboxMessage
-	if err := json.NewDecoder(resp.Body).Decode(&msgs); err != nil {
-		return nil, fmt.Errorf("DAEMON_DOWN: %w", err)
+	if err := decodeStrictJSON(resp.Body, &msgs); err != nil {
+		return nil, fmt.Errorf("DAEMON_ERROR: %w", err)
 	}
 	if msgs == nil {
 		msgs = []store.InboxMessage{}
@@ -137,11 +138,20 @@ func (c *apiClient) SendMessage(ctx context.Context, threadID, parentID int64, t
 	body := map[string]any{"Name": "you", "Role": "user", "Content": text, "ParentID": parentID}
 	resp, err := c.do(ctx, http.MethodPost, c.base+"/v1/threads/"+fmt.Sprintf("%d", threadID)+"/messages", jsonBody(body))
 	if err != nil {
-		return fmt.Errorf("DAEMON_DOWN: %w", err)
+		return fmt.Errorf("DELIVERY_UNKNOWN: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		return readAPIError(resp)
+	}
+	var ack struct {
+		Seq int64 `json:"seq"`
+	}
+	if err := decodeStrictJSON(resp.Body, &ack); err != nil {
+		return fmt.Errorf("DELIVERY_UNKNOWN: %w", err)
+	}
+	if ack.Seq <= 0 {
+		return fmt.Errorf("DELIVERY_UNKNOWN: message acknowledgement without an assigned sequence")
 	}
 	return nil
 }
@@ -150,11 +160,20 @@ func (c *apiClient) AddReaction(ctx context.Context, messageID int64, emoji stri
 	body := map[string]any{"Emoji": emoji, "Name": "you"}
 	resp, err := c.do(ctx, http.MethodPost, c.base+"/v1/messages/"+fmt.Sprintf("%d", messageID)+"/reactions", jsonBody(body))
 	if err != nil {
-		return fmt.Errorf("DAEMON_DOWN: %w", err)
+		return fmt.Errorf("DELIVERY_UNKNOWN: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		return readAPIError(resp)
+	}
+	var ack struct {
+		OK *bool `json:"ok"`
+	}
+	if err := decodeStrictJSON(resp.Body, &ack); err != nil {
+		return fmt.Errorf("DELIVERY_UNKNOWN: %w", err)
+	}
+	if ack.OK == nil || !*ack.OK {
+		return fmt.Errorf("DELIVERY_UNKNOWN: reaction response did not acknowledge the write")
 	}
 	return nil
 }
@@ -180,7 +199,7 @@ func (c *apiClient) do(ctx context.Context, method, url string, body io.Reader) 
 func (c *apiClient) doJSON(ctx context.Context, url, method string, body any) (int64, error) {
 	resp, err := c.do(ctx, method, url, jsonBody(body))
 	if err != nil {
-		return 0, fmt.Errorf("DAEMON_DOWN: %w", err)
+		return 0, fmt.Errorf("DELIVERY_UNKNOWN: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
@@ -189,8 +208,11 @@ func (c *apiClient) doJSON(ctx context.Context, url, method string, body any) (i
 	var out struct {
 		ID int64 `json:"id"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return 0, fmt.Errorf("DAEMON_DOWN: %w", err)
+	if err := decodeStrictJSON(resp.Body, &out); err != nil {
+		return 0, fmt.Errorf("DELIVERY_UNKNOWN: %w", err)
+	}
+	if out.ID <= 0 {
+		return 0, fmt.Errorf("DELIVERY_UNKNOWN: creation acknowledged without an id")
 	}
 	return out.ID, nil
 }
@@ -205,10 +227,29 @@ func readAPIError(resp *http.Response) error {
 		Code    string `json:"code"`
 		Message string `json:"message"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&eb); err != nil {
-		return fmt.Errorf("DAEMON_DOWN: status %d", resp.StatusCode)
+	if err := json.NewDecoder(resp.Body).Decode(&eb); err != nil || eb.Code == "" {
+		return fmt.Errorf("DAEMON_ERROR: status %d without a readable error envelope", resp.StatusCode)
 	}
 	return fmt.Errorf("%s: %s", eb.Code, eb.Message)
+}
+
+func decodeStrictJSON(r io.Reader, out any) error {
+	decoder := json.NewDecoder(r)
+	var raw json.RawMessage
+	if err := decoder.Decode(&raw); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return errors.New("multiple JSON values")
+		}
+		return err
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return errors.New("null JSON response")
+	}
+	return json.Unmarshal(raw, out)
 }
 
 func filterChannels(channels []store.Channel, filter string) []store.Channel {

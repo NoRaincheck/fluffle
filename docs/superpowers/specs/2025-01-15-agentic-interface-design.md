@@ -118,7 +118,8 @@ Semantics:
 - `after_seq=0` or an absent value means read according to the existing `last` behavior.
 - `after_seq=N` returns messages with `seq > N`, in ascending order.
 - The CLI uses the `seq` of the last returned message as the next cursor; an empty result leaves the cursor unchanged.
-- `after_seq` and `last` are mutually exclusive; an invalid combination is a client error.
+- `after_seq` and `last` are mutually exclusive; an invalid combination is a client error. An explicit `--last 0` is treated as present, so `--after-seq 0 --last 0` is a client error rather than a silent precedence choice.
+- The cursor bounds message events only. Reactions have no independent cursor, so every JSONL read emits the complete reaction snapshot for the thread, including reactions added after the cursor on older messages. Silently filtering those reactions would drop context the cursor cannot express.
 
 ### 6.2 Inbox
 
@@ -139,7 +140,7 @@ flf message send --thread 42 --reply-to-seq 12 --text - --agent-id reviewer
 flf react add --thread 42 --message-seq 12 --emoji 👀 --agent-id reviewer
 ```
 
-The existing database-ID forms may remain for humans, but the agent-facing forms must be usable from JSONL output without an out-of-band HTTP lookup.
+The existing database-ID forms may remain for humans, but the agent-facing forms must be usable from JSONL output without an out-of-band HTTP lookup. Both reaction routes validate their target inside the write transaction — SQLite foreign keys are not enabled — and a missing target is a client error, not a silent success.
 
 ## 7. Write interfaces
 
@@ -152,7 +153,7 @@ printf '%s\n' "response" | flf message send --thread 42 --text -
 cat response.jsonl | flf agent append --thread 42 --file -
 ```
 
-`agent append` accepts a complete JSONL stream on stdin. The command parses the entire stream before the first daemon write.
+`agent append` accepts a complete JSONL stream on stdin. The command parses the entire stream before the first daemon write. The HTTP batch route runs every submitted line through the same JSONL codec, so a missing `type`, the legacy `author` alias, and per-type required fields behave identically for the CLI and for any other local client.
 
 ### 7.2 Batch safety
 
@@ -169,7 +170,8 @@ Until the contract has an idempotency key or an equivalent duplicate-detection r
 - Use finite timeouts for daemon probes and API calls.
 - Pass request context through CLI operations and TUI operations.
 - Keep startup polling bounded and distinguish startup failure from a request failure.
-- Use `DAEMON_ERROR` for server-side failures and reserve `DAEMON_DOWN` for inability to reach a daemon.
+- Use `DAEMON_ERROR` for server-side failures and reserve `DAEMON_DOWN` for inability to reach a daemon. A creation or mutation store failure is always `DAEMON_ERROR`; only typed validation and conflict errors are client errors.
+- Validate every CLI and TUI response before reporting success. Reject `null`, wrong shapes, trailing JSON, zero IDs or sequences, and unacknowledged mutations. Reads that fail validation are `DAEMON_ERROR`; mutations are `DELIVERY_UNKNOWN` because the write may already have committed. A false success is never printed.
 - Return `METHOD_NOT_ALLOWED` as a client error, not as a daemon-down condition.
 - Emit JSON errors on stderr for every CLI error path, with exactly `code` and `message`.
 - Set `Content-Type: application/json` on success responses as well as error responses.
@@ -215,7 +217,9 @@ Each step must preserve the existing daemon lifecycle, SQLite connection rule, a
 
 - Unit-test JSONL parsing, serialization, sequence references, reaction targets, and import mapping.
 - Integration-test an agent reading a thread and appending a reply plus reaction without raw HTTP lookups.
-- Verify `after_seq` returns strictly newer messages in order and handles an empty result.
+- Verify `after_seq` returns strictly newer messages in order, handles an empty result, and still returns a reaction added after the cursor on an older message.
+- Verify a reaction added to a message that does not exist is a client error and creates no row.
+- Verify CLI and TUI reads reject `null`, wrong shapes, trailing JSON, and zero identifiers, and that ambiguous mutation acknowledgements are `DELIVERY_UNKNOWN` rather than success.
 - Force a failure during a multi-line append and verify that no partial batch is committed.
 - Verify duplicate reactions and invalid cross-thread references return client errors.
 - Verify every CLI error path emits the two-field JSON envelope and the correct exit code.

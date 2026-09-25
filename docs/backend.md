@@ -89,7 +89,7 @@ The daemon binds `127.0.0.1:0` (ephemeral port) and persists `{port, pid, starte
 **CLI probe:** read `daemon.json`, `GET /v1/health`. On failure, spawn detached `flf daemon start --background`, retry probe 3x (1s between attempts). Health probes have a 1-second finite timeout; the shared CLI/TUI HTTP client has a 5-second finite request timeout. Startup polling is bounded, and write requests are never retried automatically.
 
 **Explicit control:**
-- `flf daemon start` — binds, writes `daemon.json`, serves. With `--background`, runs detached.
+- `flf daemon start` — binds, writes `daemon.json`, serves. With `--background`, forks a detached child, waits for a published port, and prints it. If the child exits or no port is published within the bounded wait, the command fails with `DAEMON_ERROR` (exit 2) instead of reporting success with an unknown port.
 - `flf daemon stop` — reads PID from `daemon.json`, `os.FindProcess(pid).Kill()`, removes `daemon.json`.
 - `flf daemon status` — probes `/v1/health`, prints address or "daemon down".
 
@@ -107,13 +107,13 @@ Returns `{"ok":true}` with status 200.
 
 **`GET /v1/channels?repo=&include-orphaned=1`** — List channels. `repo` filters by canonical path. `include-orphaned=1` includes orphaned channels. Returns `[]Channel`.
 
-**`POST /v1/channels`** — Create channel. Body: `{"name":"...", "repo_abs_path":"...", "repo_remote":"...", "repo_head_sha":"...", "orphaned":false}`. Agents get 403. Returns `{"id":1}`.
+**`POST /v1/channels`** — Create channel. Body keys are matched case-insensitively against the field names the daemon decodes: `Name`, `RepoAbsPath`, `RepoRemote`, `RepoHeadSHA`, `RepoHeadBranch`, `Orphaned`. Agents get 403. An invalid payload (blank name, missing repo path, orphaned channel with a repo path) is `400 BAD_JSONL`; a duplicate channel is `409 CHANNEL_EXISTS`; a storage failure is `500 DAEMON_ERROR`. Returns `{"id":1}`.
 
 ### Threads
 
 **`GET /v1/channels/:id/threads`** — List threads in a channel. Returns `[]Thread`.
 
-**`POST /v1/channels/:id/threads`** — Create thread. Body: `{"title":"..."}`. Agents get 403. Returns `{"id":1}`.
+**`POST /v1/channels/:id/threads`** — Create thread. Body: `{"title":"..."}`. Agents get 403. A blank title is `400 BAD_JSONL`, an unknown channel is `404 CHANNEL_NOT_FOUND`, and a storage failure is `500 DAEMON_ERROR`. Returns `{"id":1}`.
 
 ### Inbox
 
@@ -133,11 +133,15 @@ Returns `{"ok":true}` with status 200.
 
 **`POST /v1/threads/:id/messages/:message_seq/reactions`** — Add a reaction using a thread-local message sequence. The target must be a message in the same thread. Body: `{"emoji":"...", "name":"...", "agent_id":"..."}`.
 
-**`POST /v1/messages/:id/reactions`** — Legacy database-ID form of reaction creation. It remains available for humans and agents. The `(message_id, emoji, name)` uniqueness constraint still applies.
+**`POST /v1/messages/:id/reactions`** — Legacy database-ID form of reaction creation. It remains available for humans and agents. The target message must exist: the daemon validates it inside the write transaction because SQLite foreign keys are not enabled. A missing target is `404 MESSAGE_NOT_FOUND`, a duplicate is `409 BAD_JSONL`, and a storage failure is `500 DAEMON_ERROR`. The `(message_id, emoji, name)` uniqueness constraint still applies.
 
 ### Events
 
-**`POST /v1/threads/:id/events`** — Append a complete JSONL event batch. Body: `{"events":[...],"import":false}`. The daemon validates and commits the batch in one transaction. `import=true` is reserved for a human-controlled import and preserves serialized attribution as provenance; it does not grant permissions. Live agent requests derive every event's `author_type` from `X-Fluffle-Agent`.
+**`POST /v1/threads/:id/events`** — Append a complete JSONL event batch. Body: `{"events":[...],"import":false}`. Each element is normalized by the same JSONL codec the CLI uses: a missing `type` defaults to `message`, the legacy `author` key is accepted as a name alias, and per-type required fields (`name` plus `role`/`content` for messages, `name` plus `message_seq`/`emoji` for reactions) are enforced before any write. Bounded decoding is unchanged: a 1 MiB body cap, a 1000-event cap, and rejection of trailing JSON. The daemon then validates and commits the batch in one transaction. `import=true` is reserved for a human-controlled import and preserves serialized attribution as provenance; it does not grant permissions. Live agent requests derive every event's `author_type` from `X-Fluffle-Agent`.
+
+### Daemon control
+
+**`POST /api/shutdown`** — Stop the daemon. Humans only: a request carrying `X-Fluffle-Agent` is rejected with `403 AGENT_FORBIDDEN` and the daemon keeps running.
 
 ## CLI reference
 
@@ -163,7 +167,7 @@ flf react add (--message ID | --thread ID --message-seq N) --emoji E [--as NAME]
 flf agent read --thread ID [--last N | --after-seq N] [--json] [--agent-id ID]
 flf agent append --thread ID (--file F | --file -) [--agent-id ID]
 
-flf tui  # deferred: exits 1 with "backend-only milestone: tui deferred"
+flf tui  # Bubble Tea TUI; exits 2 with DAEMON_DOWN when the daemon cannot be discovered, 1 on a local TUI error
 ```
 
 `--as` defaults to `$USER`. `--agent-id` sets the `X-Fluffle-Agent` header; it does not grant permission to create channels or threads.
@@ -194,7 +198,12 @@ Reads and parses the complete JSONL file before starting daemon work. With `--ch
 
 ### `agent read`
 
-Fetches messages using the selected `last` or exclusive `after_seq` cursor. With `--json`, it emits portable JSONL: message lines include `type`, `seq`, `parent_seq`, `role`, `name`, `author_type`, `content`, and `timestamp`, while reaction lines include `type`, `message_seq`, `name`, `author_type`, `emoji`, and `timestamp`. Without `--json`, it retains the existing indented JSON array of raw message records. A cursor response contains only messages newer than the cursor and, in portable mode, reactions targeting those messages. An empty result is valid.
+Fetches messages using the selected `last` or exclusive `after_seq` cursor. With `--json`, it emits portable JSONL: message lines include `type`, `seq`, `parent_seq`, `role`, `name`, `author_type`, `content`, and `timestamp`, while reaction lines include `type`, `message_seq`, `name`, `author_type`, `emoji`, and `timestamp`. Without `--json`, it retains the existing indented JSON array of raw message records. An empty result is valid.
+
+Cursor and reaction rules:
+
+- `--after-seq N` returns only messages with `seq > N`; `--last` and `--after-seq` are mutually exclusive, and an explicit `--last 0` counts as present.
+- Reactions have no independent cursor. Every `--json` read emits the complete reaction snapshot for the thread, including reactions created after the cursor on older messages. Filtering a reaction out would silently drop context that a message cursor cannot represent, and the thread-local `message_seq` on each reaction line is the only reference an agent needs.
 
 ### `agent append`
 
@@ -218,14 +227,21 @@ With `--text -`, reads the complete stdin value before contacting the daemon. `-
 | `BAD_ARGS` | invalid flags, missing required flags, or mutually exclusive sequence/ID flags | 1 |
 | `BAD_JSONL` | JSONL parse/validation failure, invalid API body, or duplicate reaction | 1 |
 | `FILE_READ` | local file or stdin cannot be read | 1 |
-| `NOT_A_GIT_REPO` | a repo-scoped command was given a path without `.git` | 1 |
-| `AGENT_FORBIDDEN` | an agent attempts a human-only channel or thread creation | 1 |
+| `NOT_A_GIT_REPO` | a repo-scoped CLI command was given a path without `.git` (client-side check) | 1 |
+| `AGENT_FORBIDDEN` | an agent attempts a human-only channel or thread creation, or daemon shutdown | 1 |
 | `THREAD_NOT_FOUND` | thread or referenced event target is missing | 1 |
+| `MESSAGE_NOT_FOUND` | legacy `POST /v1/messages/:id/reactions` target message does not exist | 1 |
 | `CHANNEL_NOT_FOUND` / `CHANNEL_EXISTS` | channel lookup or uniqueness failure | 1 |
 | `METHOD_NOT_ALLOWED` | HTTP method is not valid for a known route | 1 |
 | Other client codes | local validation or request errors | 1 |
 
 Every CLI error is emitted on stderr as exactly one JSON object with `code` and `message`; successful output remains on stdout. The exit contract is `0` for success, `1` for client errors, and `2` for daemon or transport errors. Read transport failures are `DAEMON_DOWN`; write transport failures are `DELIVERY_UNKNOWN` and are not retried automatically.
+
+### Response validation
+
+Every CLI API response is strictly decoded and then checked semantically before it can report success. A `null` body, a wrong JSON shape, a trailing JSON value, a zero database ID or sequence, a blank required field, an unknown `author_type`, a batch result count that does not match the submitted events, a missing reaction ID, a message acknowledgement without an assigned sequence, and an unacknowledged reaction are all rejected. Reads that fail this check are `DAEMON_ERROR`; mutations that fail it are `DELIVERY_UNKNOWN`, because the write may already have committed. The CLI never prints a success line for a response it cannot verify.
+
+The TUI applies the same classification: a read that cannot reach the daemon is `DAEMON_DOWN`, a read response that cannot be decoded is `DAEMON_ERROR`, and any mutation transport or acknowledgement failure is `DELIVERY_UNKNOWN`. Daemon discovery at startup stays `DAEMON_DOWN`.
 
 ## Agent contract
 

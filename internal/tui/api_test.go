@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -78,4 +79,139 @@ func TestAPIContextCancellationReturnsPromptly(t *testing.T) {
 		<-result
 		t.Fatal("canceled request did not return promptly")
 	}
+}
+
+func assertErrorCode(t *testing.T, err error, wantCode string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected %s error", wantCode)
+	}
+	if !strings.HasPrefix(err.Error(), wantCode+":") {
+		t.Fatalf("error = %q, want %s classification", err.Error(), wantCode)
+	}
+}
+
+func TestAPIMutationTransportFailuresAreDeliveryUnknown(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	base := server.URL
+	server.Close()
+	c := NewAPIClient(base)
+
+	assertErrorCode(t, c.SendMessage(nil, 1, 0, "hello"), "DELIVERY_UNKNOWN")
+	assertErrorCode(t, c.AddReaction(nil, 1, "👀"), "DELIVERY_UNKNOWN")
+	if _, err := c.CreateChannel(nil, "name", "", "", false); err == nil || !strings.HasPrefix(err.Error(), "DELIVERY_UNKNOWN:") {
+		t.Fatalf("CreateChannel error = %v", err)
+	}
+	if _, err := c.CreateThread(nil, 1, "title"); err == nil || !strings.HasPrefix(err.Error(), "DELIVERY_UNKNOWN:") {
+		t.Fatalf("CreateThread error = %v", err)
+	}
+}
+
+func TestAPIReadDecodeFailuresAreDaemonErrors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/channels":
+			_, _ = w.Write([]byte(`{"not":"a list"}`))
+		case "/v1/channels/1/threads":
+			_, _ = w.Write([]byte("not-json"))
+		case "/v1/threads/1/messages":
+			_, _ = w.Write([]byte(`null`))
+		case "/v1/inbox":
+			_, _ = w.Write([]byte("not-json"))
+		case "/v1/broken-error":
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("not-json"))
+		default:
+			_, _ = w.Write([]byte("not-json"))
+		}
+	}))
+	defer server.Close()
+	c := NewAPIClient(server.URL)
+
+	if _, err := c.ListChannels(nil, "", ""); err == nil || !strings.HasPrefix(err.Error(), "DAEMON_ERROR:") {
+		t.Fatalf("ListChannels error = %v", err)
+	}
+	if _, err := c.ListThreads(nil, 1); err == nil || !strings.HasPrefix(err.Error(), "DAEMON_ERROR:") {
+		t.Fatalf("ListThreads error = %v", err)
+	}
+	if _, err := c.ListMessages(nil, 1); err == nil || !strings.HasPrefix(err.Error(), "DAEMON_ERROR:") {
+		t.Fatalf("ListMessages error = %v", err)
+	}
+	if _, err := c.ListInbox(nil, 10); err == nil || !strings.HasPrefix(err.Error(), "DAEMON_ERROR:") {
+		t.Fatalf("ListInbox error = %v", err)
+	}
+}
+
+func TestAPIReadTransportFailuresRemainDaemonDown(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	base := server.URL
+	server.Close()
+	c := NewAPIClient(base)
+
+	if _, err := c.ListChannels(nil, "", ""); err == nil || !strings.HasPrefix(err.Error(), "DAEMON_DOWN:") {
+		t.Fatalf("ListChannels error = %v", err)
+	}
+}
+
+func TestAPIMalformedMutationAcksAreDeliveryUnknown(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "empty object", body: `{}`},
+		{name: "null", body: `null`},
+		{name: "trailing json", body: `{"ok":true} {}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer server.Close()
+			c := NewAPIClient(server.URL)
+
+			assertErrorCode(t, c.SendMessage(nil, 1, 0, "hello"), "DELIVERY_UNKNOWN")
+			assertErrorCode(t, c.AddReaction(nil, 1, "👀"), "DELIVERY_UNKNOWN")
+			if _, err := c.CreateChannel(nil, "name", "", "", false); err == nil || !strings.HasPrefix(err.Error(), "DELIVERY_UNKNOWN:") {
+				t.Fatalf("CreateChannel error = %v", err)
+			}
+		})
+	}
+}
+
+func TestAPIMutationZeroAcknowledgementIsDeliveryUnknown(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/threads/1/messages":
+			_, _ = w.Write([]byte(`{"seq":0}`))
+		case "/v1/messages/1/reactions":
+			_, _ = w.Write([]byte(`{"ok":false}`))
+		default:
+			_, _ = w.Write([]byte(`{"id":0}`))
+		}
+	}))
+	defer server.Close()
+	c := NewAPIClient(server.URL)
+
+	assertErrorCode(t, c.SendMessage(nil, 1, 0, "hello"), "DELIVERY_UNKNOWN")
+	assertErrorCode(t, c.AddReaction(nil, 1, "👀"), "DELIVERY_UNKNOWN")
+	if _, err := c.CreateThread(nil, 1, "title"); err == nil || !strings.HasPrefix(err.Error(), "DELIVERY_UNKNOWN:") {
+		t.Fatalf("CreateThread error = %v", err)
+	}
+}
+
+func TestAPIErrorResponsesWithoutEnvelopeAreDaemonErrors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("not-json"))
+	}))
+	defer server.Close()
+	c := NewAPIClient(server.URL)
+
+	if _, err := c.ListMessages(nil, 1); err == nil || !strings.HasPrefix(err.Error(), "DAEMON_ERROR:") {
+		t.Fatalf("ListMessages error = %v", err)
+	}
+	assertErrorCode(t, c.SendMessage(nil, 1, 0, "hello"), "DAEMON_ERROR")
 }

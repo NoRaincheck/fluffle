@@ -3,6 +3,7 @@ package apiserver
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -25,8 +26,8 @@ type errBody struct {
 }
 
 type batchRequest struct {
-	Events []jsonl.Line `json:"events"`
-	Import bool         `json:"import"`
+	Events []json.RawMessage `json:"events"`
+	Import bool              `json:"import"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
@@ -56,6 +57,10 @@ func shutdownHandler(s *store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeErr(w, 405, "METHOD_NOT_ALLOWED", "method not allowed")
+			return
+		}
+		if isAgent(r) {
+			writeErr(w, 403, "AGENT_FORBIDDEN", "agents cannot stop the daemon")
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "shutting_down"})
@@ -304,7 +309,12 @@ func appendThreadEvents(s *store.Store, threadID int64, w http.ResponseWriter, r
 
 	agentRequest := isAgent(r)
 	events := make([]store.AppendEvent, len(body.Events))
-	for i, line := range body.Events {
+	for i, raw := range body.Events {
+		line, err := jsonl.ParseLine(string(raw))
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "BAD_JSONL", fmt.Sprintf("event %d: %v", i, err))
+			return
+		}
 		authorType := "human"
 		if agentRequest {
 			authorType = "agent"
@@ -346,32 +356,10 @@ func writeThreadMutationError(w http.ResponseWriter, err error) {
 		writeErr(w, http.StatusNotFound, "THREAD_NOT_FOUND", "thread or event target not found")
 	case errors.Is(err, store.ErrConflict):
 		writeErr(w, http.StatusConflict, "BAD_JSONL", "duplicate reaction")
-	case isClientMutationError(err):
+	case errors.Is(err, store.ErrInvalid):
 		writeErr(w, http.StatusBadRequest, "BAD_JSONL", err.Error())
 	default:
 		writeErr(w, http.StatusInternalServerError, "DAEMON_ERROR", err.Error())
-	}
-}
-
-func isClientMutationError(err error) bool {
-	if strings.HasPrefix(err.Error(), "parsing time ") {
-		return true
-	}
-	switch err.Error() {
-	case "name and content required",
-		"bad author_type",
-		"bad role",
-		"parent_seq must be non-negative",
-		"parent message not in this thread",
-		"emoji and name required",
-		"source_seq must be non-negative",
-		"message_seq must be positive",
-		"unknown event type",
-		"duplicate source_seq",
-		"unsorted source_seq":
-		return true
-	default:
-		return false
 	}
 }
 
@@ -426,12 +414,16 @@ func NewHandler(s *store.Store) http.Handler {
 				return
 			}
 			id, err := s.CreateChannel(body.Name, body.RepoAbsPath, body.RepoRemote, body.RepoHeadSHA, body.RepoHeadBranch, body.Orphaned)
-			if err == store.ErrConflict {
-				writeErr(w, 409, "CHANNEL_EXISTS", "channel exists")
+			switch {
+			case err == nil:
+			case errors.Is(err, store.ErrConflict):
+				writeErr(w, http.StatusConflict, "CHANNEL_EXISTS", "channel exists")
 				return
-			}
-			if err != nil {
-				writeErr(w, 400, "NOT_A_GIT_REPO", err.Error())
+			case errors.Is(err, store.ErrInvalid):
+				writeErr(w, http.StatusBadRequest, "BAD_JSONL", err.Error())
+				return
+			default:
+				writeErr(w, http.StatusInternalServerError, "DAEMON_ERROR", err.Error())
 				return
 			}
 			writeJSON(w, http.StatusOK, map[string]any{"id": id})
@@ -471,12 +463,16 @@ func NewHandler(s *store.Store) http.Handler {
 				return
 			}
 			tid, err := s.CreateThread(id, body.Title)
-			if err == store.ErrNotFound {
-				writeErr(w, 404, "CHANNEL_NOT_FOUND", "no such channel")
+			switch {
+			case err == nil:
+			case errors.Is(err, store.ErrNotFound):
+				writeErr(w, http.StatusNotFound, "CHANNEL_NOT_FOUND", "no such channel")
 				return
-			}
-			if err != nil {
-				writeErr(w, 400, "BAD_JSONL", err.Error())
+			case errors.Is(err, store.ErrInvalid):
+				writeErr(w, http.StatusBadRequest, "BAD_JSONL", err.Error())
+				return
+			default:
+				writeErr(w, http.StatusInternalServerError, "DAEMON_ERROR", err.Error())
 				return
 			}
 			writeJSON(w, http.StatusOK, map[string]any{"id": tid})
@@ -563,9 +559,14 @@ func NewHandler(s *store.Store) http.Handler {
 			return
 		}
 		if err := s.AddReaction(id, body.Emoji, name, authorType); err != nil {
-			if errors.Is(err, store.ErrConflict) {
+			switch {
+			case errors.Is(err, store.ErrNotFound):
+				writeErr(w, http.StatusNotFound, "MESSAGE_NOT_FOUND", "no such message")
+			case errors.Is(err, store.ErrConflict):
 				writeErr(w, http.StatusConflict, "BAD_JSONL", "duplicate reaction")
-			} else {
+			case errors.Is(err, store.ErrInvalid):
+				writeErr(w, http.StatusBadRequest, "BAD_JSONL", err.Error())
+			default:
 				writeErr(w, http.StatusInternalServerError, "DAEMON_ERROR", err.Error())
 			}
 			return

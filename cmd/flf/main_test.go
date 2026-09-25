@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -211,7 +212,7 @@ func TestCLIAPIGetMalformedResponseIsDaemonError(t *testing.T) {
 	defer server.Close()
 	code, output := captureStderr(t, func() int {
 		var out any
-		return apiGet(server.URL, "", &out)
+		return apiGet(server.URL, "", &out, nil)
 	})
 	if code != 2 {
 		t.Fatalf("exit = %d, want 2", code)
@@ -225,7 +226,7 @@ func TestCLIAPIPostTransportFailureIsDeliveryUnknown(t *testing.T) {
 	server.Close()
 
 	code, output := captureStderr(t, func() int {
-		return apiPost(url, "", map[string]any{"content": "hello"}, nil)
+		return apiPost(url, "", map[string]any{"content": "hello"}, nil, nil)
 	})
 	if code != 2 {
 		t.Fatalf("exit = %d, want 2", code)
@@ -261,7 +262,7 @@ func TestCLIAPIPostTimeoutIsDeliveryUnknownWithoutRetry(t *testing.T) {
 	done := make(chan result, 1)
 	go func() {
 		code, output := captureStderr(t, func() int {
-			return apiPost(server.URL, "", map[string]any{"content": "hello"}, nil)
+			return apiPost(server.URL, "", map[string]any{"content": "hello"}, nil, nil)
 		})
 		done <- result{code: code, output: output}
 	}()
@@ -292,7 +293,7 @@ func TestCLIAPIPostMalformedSuccessBodyIsDeliveryUnknown(t *testing.T) {
 		ID int64 `json:"id"`
 	}
 	code, output := captureStderr(t, func() int {
-		return apiPost(server.URL, "", map[string]any{"name": "test"}, &out)
+		return apiPost(server.URL, "", map[string]any{"name": "test"}, &out, nil)
 	})
 	if code != 2 {
 		t.Fatalf("exit = %d, want 2", code)
@@ -345,7 +346,7 @@ func TestCLIChannelCreateJSONReturnsEnrichmentFailure(t *testing.T) {
 
 func TestCLIAPIPostLocalFailureIsClientError(t *testing.T) {
 	code, output := captureStderr(t, func() int {
-		return apiPost("http://127.0.0.1/messages", "", map[string]any{"bad": make(chan struct{})}, nil)
+		return apiPost("http://127.0.0.1/messages", "", map[string]any{"bad": make(chan struct{})}, nil, nil)
 	})
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1", code)
@@ -514,7 +515,7 @@ func TestInboxTextIncludesPortableMessageFields(t *testing.T) {
 	}
 }
 
-func TestAgentReadAfterSeqBuildsStrictCursorAndFiltersReactions(t *testing.T) {
+func TestAgentReadAfterSeqReturnsCompleteReactionSnapshot(t *testing.T) {
 	var requests []recordedCLIRequest
 	var mu sync.Mutex
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -538,7 +539,7 @@ func TestAgentReadAfterSeqBuildsStrictCursorAndFiltersReactions(t *testing.T) {
 			]`))
 		case "/v1/threads/7/reactions":
 			_, _ = w.Write([]byte(`[
-				{"ID":1,"MessageID":41,"MessageSeq":1,"Emoji":"old","Name":"alice","AuthorType":"human","CreatedAt":"2026-09-25T00:01:30Z"},
+				{"ID":1,"MessageID":41,"MessageSeq":1,"Emoji":"late","Name":"alice","AuthorType":"human","CreatedAt":"2026-09-25T00:05:00Z"},
 				{"ID":2,"MessageID":42,"MessageSeq":2,"Emoji":"new","Name":"bob","AuthorType":"human","CreatedAt":"2026-09-25T00:02:30Z"},
 				{"ID":3,"MessageID":43,"MessageSeq":3,"Emoji":"latest","Name":"carol","AuthorType":"human","CreatedAt":"2026-09-25T00:03:30Z"}
 			]`))
@@ -569,8 +570,8 @@ func TestAgentReadAfterSeqBuildsStrictCursorAndFiltersReactions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(lines) != 4 {
-		t.Fatalf("lines = %d, want 2 messages and 2 reactions: %s", len(lines), stdout)
+	if len(lines) != 5 {
+		t.Fatalf("lines = %d, want 2 cursor messages and the full reaction snapshot: %s", len(lines), stdout)
 	}
 	if lines[0].Type != "message" || lines[0].Seq != 2 || lines[0].ParentSeq != 1 {
 		t.Fatalf("first line = %+v", lines[0])
@@ -578,11 +579,14 @@ func TestAgentReadAfterSeqBuildsStrictCursorAndFiltersReactions(t *testing.T) {
 	if lines[1].Type != "message" || lines[1].Seq != 3 || lines[1].ParentSeq != 2 {
 		t.Fatalf("second line = %+v", lines[1])
 	}
-	if lines[2].Type != "reaction" || lines[2].MessageSeq != 2 || lines[2].Emoji != "new" {
-		t.Fatalf("third line = %+v", lines[2])
+	if lines[2].Type != "reaction" || lines[2].MessageSeq != 1 || lines[2].Emoji != "late" {
+		t.Fatalf("reaction on an older message is missing: %+v", lines[2])
 	}
-	if lines[3].Type != "reaction" || lines[3].MessageSeq != 3 || lines[3].Emoji != "latest" {
+	if lines[3].Type != "reaction" || lines[3].MessageSeq != 2 || lines[3].Emoji != "new" {
 		t.Fatalf("fourth line = %+v", lines[3])
+	}
+	if lines[4].Type != "reaction" || lines[4].MessageSeq != 3 || lines[4].Emoji != "latest" {
+		t.Fatalf("fifth line = %+v", lines[4])
 	}
 }
 
@@ -1268,4 +1272,441 @@ func TestSequenceExplicitZeroLegacyIDsAreMutuallyExclusive(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCLIReadResponsesAreSemanticallyValidated(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []string
+		responses map[string]string
+	}{
+		{
+			name: "inbox null",
+			args: []string{"inbox", "--json"},
+			responses: map[string]string{
+				"/v1/inbox": `null`,
+			},
+		},
+		{
+			name: "inbox object instead of array",
+			args: []string{"inbox", "--json"},
+			responses: map[string]string{
+				"/v1/inbox": `{"items":[]}`,
+			},
+		},
+		{
+			name: "inbox trailing json",
+			args: []string{"inbox", "--json"},
+			responses: map[string]string{
+				"/v1/inbox": `[] {}`,
+			},
+		},
+		{
+			name: "inbox zero id",
+			args: []string{"inbox", "--json"},
+			responses: map[string]string{
+				"/v1/inbox": `[{"ID":0,"ThreadID":3,"Seq":1,"Name":"","AuthorType":"human","Role":"user","Content":"x","channel_name":"dev","channel_id":4,"thread_title":"t"}]`,
+			},
+		},
+		{
+			name: "inbox missing content",
+			args: []string{"inbox", "--json"},
+			responses: map[string]string{
+				"/v1/inbox": `[{"ID":9,"ThreadID":3,"Seq":1,"Name":"alice","AuthorType":"human","Role":"user","channel_name":"dev","channel_id":4,"thread_title":"t"}]`,
+			},
+		},
+		{
+			name: "channel list null",
+			args: []string{"channel", "list", "--json"},
+			responses: map[string]string{
+				"/v1/channels": `null`,
+			},
+		},
+		{
+			name: "channel list zero id",
+			args: []string{"channel", "list", "--json"},
+			responses: map[string]string{
+				"/v1/channels": `[{"ID":0,"Name":"broken"}]`,
+			},
+		},
+		{
+			name: "channel list blank name",
+			args: []string{"channel", "list", "--json"},
+			responses: map[string]string{
+				"/v1/channels": `[{"ID":4,"Name":"  "}]`,
+			},
+		},
+		{
+			name: "thread list zero channel",
+			args: []string{"thread", "list", "--channel", "dev", "--orphaned", "--json"},
+			responses: map[string]string{
+				"/v1/channels":           `[{"ID":5,"Name":"dev","IsOrphaned":true}]`,
+				"/v1/channels/5/threads": `[{"ID":0,"ChannelID":5,"Title":"broken"}]`,
+			},
+		},
+		{
+			name: "message read zero sequence",
+			args: []string{"agent", "read", "--thread", "7", "--json"},
+			responses: map[string]string{
+				"/v1/threads/7/messages":  `[{"ID":0,"ThreadID":7,"Seq":1,"Name":"alice","AuthorType":"human","Role":"user","Content":"x"}]`,
+				"/v1/threads/7/reactions": `[]`,
+			},
+		},
+		{
+			name: "message read null",
+			args: []string{"agent", "read", "--thread", "7", "--json"},
+			responses: map[string]string{
+				"/v1/threads/7/messages":  `null`,
+				"/v1/threads/7/reactions": `[]`,
+			},
+		},
+		{
+			name: "reaction read null",
+			args: []string{"agent", "read", "--thread", "7", "--json"},
+			responses: map[string]string{
+				"/v1/threads/7/messages":  `[]`,
+				"/v1/threads/7/reactions": `null`,
+			},
+		},
+		{
+			name: "reaction read missing target",
+			args: []string{"agent", "read", "--thread", "7", "--json"},
+			responses: map[string]string{
+				"/v1/threads/7/messages":  `[]`,
+				"/v1/threads/7/reactions": `[{"ID":1,"MessageID":0,"MessageSeq":0,"Emoji":"+1","Name":"bob","AuthorType":"human"}]`,
+			},
+		},
+		{
+			name: "message read trailing json",
+			args: []string{"agent", "read", "--thread", "7"},
+			responses: map[string]string{
+				"/v1/threads/7/messages": `[] []`,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newResponseServer(t, tt.responses)
+			defer server.Close()
+			useTestDaemon(t, server)
+
+			code, stdout, stderr := captureOutput(t, func() int {
+				return run(tt.args)
+			})
+			if code != 2 {
+				t.Fatalf("exit = %d, want 2; stdout=%q stderr=%q", code, stdout, stderr)
+			}
+			assertCLIErrorEnvelope(t, stderr, "DAEMON_ERROR")
+			if stdout != "" {
+				t.Fatalf("stdout = %q, want empty", stdout)
+			}
+		})
+	}
+}
+
+func TestCLIMutationResponsesAreSemanticallyValidated(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []string
+		responses map[string]string
+	}{
+		{
+			name: "channel create missing id",
+			args: []string{"channel", "create", "--name", "test", "--orphaned"},
+			responses: map[string]string{
+				"/v1/channels": `{}`,
+			},
+		},
+		{
+			name: "channel create zero id",
+			args: []string{"channel", "create", "--name", "test", "--orphaned"},
+			responses: map[string]string{
+				"/v1/channels": `{"id":0}`,
+			},
+		},
+		{
+			name: "thread create zero id",
+			args: []string{"thread", "new", "--channel", "dev", "--orphaned", "--title", "t"},
+			responses: map[string]string{
+				"/v1/channels":           `[{"ID":5,"Name":"dev","IsOrphaned":true}]`,
+				"/v1/channels/5/threads": `{"id":0}`,
+			},
+		},
+		{
+			name: "message send zero sequence",
+			args: []string{"message", "send", "--thread", "7", "--text", "hello"},
+			responses: map[string]string{
+				"/v1/threads/7/messages": `{"seq":0}`,
+			},
+		},
+		{
+			name: "message send null",
+			args: []string{"message", "send", "--thread", "7", "--text", "hello"},
+			responses: map[string]string{
+				"/v1/threads/7/messages": `null`,
+			},
+		},
+		{
+			name: "legacy reaction not acknowledged",
+			args: []string{"react", "add", "--message", "9", "--emoji", "+1"},
+			responses: map[string]string{
+				"/v1/messages/9/reactions": `{}`,
+			},
+		},
+		{
+			name: "sequence reaction rejected ack",
+			args: []string{"react", "add", "--thread", "7", "--message-seq", "3", "--emoji", "+1"},
+			responses: map[string]string{
+				"/v1/threads/7/messages/3/reactions": `{"ok":false}`,
+			},
+		},
+		{
+			name: "batch message without assigned sequence",
+			args: []string{"agent", "append", "--thread", "7", "--file", "-"},
+			responses: map[string]string{
+				"/v1/threads/7/events": `[{"SourceSeq":0,"Seq":0,"MessageID":9,"ReactionID":0},{"SourceSeq":0,"Seq":0,"MessageID":9,"ReactionID":12}]`,
+			},
+		},
+		{
+			name: "batch reaction without reaction id",
+			args: []string{"agent", "append", "--thread", "7", "--file", "-"},
+			responses: map[string]string{
+				"/v1/threads/7/events": `[{"SourceSeq":0,"Seq":3,"MessageID":11,"ReactionID":0},{"SourceSeq":0,"Seq":0,"MessageID":11,"ReactionID":0}]`,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newResponseServer(t, tt.responses)
+			defer server.Close()
+			useTestDaemon(t, server)
+			input := "{\"type\":\"message\",\"name\":\"alice\",\"role\":\"user\",\"content\":\"one\"}\n{\"type\":\"reaction\",\"message_seq\":1,\"name\":\"bob\",\"emoji\":\"+1\"}\n"
+			setTestStdin(t, stdinFile(t, input))
+
+			code, stdout, stderr := captureOutput(t, func() int {
+				return run(tt.args)
+			})
+			if code != 2 {
+				t.Fatalf("exit = %d, want 2; stdout=%q stderr=%q", code, stdout, stderr)
+			}
+			assertCLIErrorEnvelope(t, stderr, "DELIVERY_UNKNOWN")
+			if stdout != "" {
+				t.Fatalf("stdout = %q, want no false success", stdout)
+			}
+		})
+	}
+}
+
+func TestCLIAcceptsWellFormedMutationResponses(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []string
+		stdin     string
+		responses map[string]string
+	}{
+		{
+			name: "channel create",
+			args: []string{"channel", "create", "--name", "ok", "--orphaned"},
+			responses: map[string]string{
+				"/v1/channels": `{"id":5}`,
+			},
+		},
+		{
+			name: "thread new",
+			args: []string{"thread", "new", "--channel", "ok", "--orphaned", "--title", "t"},
+			responses: map[string]string{
+				"/v1/channels":           `[{"ID":5,"Name":"ok","IsOrphaned":true}]`,
+				"/v1/channels/5/threads": `{"id":9}`,
+			},
+		},
+		{
+			name: "message send",
+			args: []string{"message", "send", "--thread", "9", "--text", "hello"},
+			responses: map[string]string{
+				"/v1/threads/9/messages": `{"seq":2}`,
+			},
+		},
+		{
+			name: "react add",
+			args: []string{"react", "add", "--thread", "9", "--message-seq", "2", "--emoji", "+1"},
+			responses: map[string]string{
+				"/v1/threads/9/messages/2/reactions": `{"ok":true}`,
+			},
+		},
+		{
+			name:  "agent append",
+			args:  []string{"agent", "append", "--thread", "9", "--file", "-"},
+			stdin: "{\"type\":\"message\",\"name\":\"alice\",\"role\":\"user\",\"content\":\"one\"}\n{\"type\":\"reaction\",\"message_seq\":1,\"name\":\"bob\",\"emoji\":\"+1\"}\n",
+			responses: map[string]string{
+				"/v1/threads/9/events": `[{"SourceSeq":0,"Seq":3,"MessageID":11,"ReactionID":0},{"SourceSeq":0,"Seq":0,"MessageID":11,"ReactionID":12}]`,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newResponseServer(t, tt.responses)
+			defer server.Close()
+			useTestDaemon(t, server)
+			if tt.stdin != "" {
+				setTestStdin(t, stdinFile(t, tt.stdin))
+			}
+
+			code, stdout, stderr := captureOutput(t, func() int {
+				return run(tt.args)
+			})
+			if code != 0 {
+				t.Fatalf("exit = %d, want 0: %s", code, stderr)
+			}
+			if tt.name == "agent append" && stdout != "" {
+				t.Fatalf("stdout = %q, want empty", stdout)
+			}
+		})
+	}
+}
+
+func newResponseServer(t *testing.T, responses map[string]string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/health" {
+			_, _ = w.Write([]byte(`{"ok":true}`))
+			return
+		}
+		body, ok := responses[r.URL.Path]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"code":"CHANNEL_NOT_FOUND","message":"unexpected path"}`))
+			return
+		}
+		_, _ = w.Write([]byte(body))
+	}))
+}
+
+func TestAgentReadTreatsExplicitZeroLastAsPresent(t *testing.T) {
+	for _, args := range [][]string{
+		{"agent", "read", "--thread", "7", "--after-seq", "1", "--last", "0"},
+		{"agent", "read", "--thread", "7", "--after-seq", "0", "--last", "0"},
+	} {
+		t.Run(strings.Join(args[2:], " "), func(t *testing.T) {
+			var requests []recordedCLIRequest
+			var mu sync.Mutex
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				recordCLIRequest(&requests, &mu, r)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"ok":true}`))
+			}))
+			defer server.Close()
+			useTestDaemon(t, server)
+
+			code, output := captureStderr(t, func() int {
+				return run(args)
+			})
+			if code != 1 {
+				t.Fatalf("exit = %d, want 1", code)
+			}
+			message := assertCLIErrorEnvelope(t, output, "BAD_ARGS")
+			if !strings.Contains(strings.ToLower(message), "mutually exclusive") {
+				t.Fatalf("message = %q, want mutually exclusive", message)
+			}
+			if recorded := snapshotCLIRequests(&requests, &mu); len(recorded) != 0 {
+				t.Fatalf("requests = %d, want none", len(recorded))
+			}
+		})
+	}
+}
+
+func TestAgentReadAllowsExplicitZeroLastWithoutCursor(t *testing.T) {
+	var requests []recordedCLIRequest
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		recordCLIRequest(&requests, &mu, r)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/health":
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		case "/v1/threads/7/messages":
+			_, _ = w.Write([]byte(`[]`))
+		case "/v1/threads/7/reactions":
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	useTestDaemon(t, server)
+
+	code, stdout, stderr := captureOutput(t, func() int {
+		return run([]string{"agent", "read", "--thread", "7", "--last", "0", "--json"})
+	})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0: %s", code, stderr)
+	}
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want empty", stdout)
+	}
+}
+
+func TestAwaitDaemonPortReportsChildExitAndTimeout(t *testing.T) {
+	t.Run("child exit", func(t *testing.T) {
+		exited := make(chan error, 1)
+		exited <- errors.New("exit status 2")
+		home := t.TempDir()
+		code, output := captureStderr(t, func() int {
+			_, err := awaitDaemonPort(home, 20, time.Millisecond, exited)
+			if err == nil {
+				t.Fatal("expected readiness error")
+			}
+			return fail("DAEMON_ERROR", err.Error())
+		})
+		if code != 2 {
+			t.Fatalf("exit = %d, want 2", code)
+		}
+		message := assertCLIErrorEnvelope(t, output, "DAEMON_ERROR")
+		if !strings.Contains(message, "exit status 2") {
+			t.Fatalf("message = %q, want the child failure reason", message)
+		}
+	})
+
+	t.Run("readiness timeout", func(t *testing.T) {
+		home := t.TempDir()
+		code, output := captureStderr(t, func() int {
+			_, err := awaitDaemonPort(home, 3, time.Millisecond, make(chan error))
+			if err == nil {
+				t.Fatal("expected readiness timeout")
+			}
+			return fail("DAEMON_ERROR", err.Error())
+		})
+		if code != 2 {
+			t.Fatalf("exit = %d, want 2", code)
+		}
+		message := assertCLIErrorEnvelope(t, output, "DAEMON_ERROR")
+		if !strings.Contains(message, "ready") {
+			t.Fatalf("message = %q, want readiness wording", message)
+		}
+	})
+
+	t.Run("invalid runtime file", func(t *testing.T) {
+		home := t.TempDir()
+		if err := os.WriteFile(filepath.Join(home, "daemon.json"), []byte(`{"port":0}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := awaitDaemonPort(home, 3, time.Millisecond, make(chan error))
+		if err == nil {
+			t.Fatal("expected error for a runtime file without a usable port")
+		}
+	})
+
+	t.Run("ready port", func(t *testing.T) {
+		home := t.TempDir()
+		if err := os.WriteFile(filepath.Join(home, "daemon.json"), []byte(`{"port":1234}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		port, err := awaitDaemonPort(home, 3, time.Millisecond, make(chan error))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if port != 1234 {
+			t.Fatalf("port = %d, want 1234", port)
+		}
+	})
 }

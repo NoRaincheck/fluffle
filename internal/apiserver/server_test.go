@@ -492,7 +492,6 @@ func TestBatchEventsRejectEmptyAndUnknownEvents(t *testing.T) {
 		{name: "missing events", body: `{"import":true}`},
 		{name: "null events", body: `{"events":null,"import":true}`},
 		{name: "empty events", body: `{"events":[],"import":true}`},
-		{name: "empty type", body: `{"events":[{"name":"alice","role":"user","content":"missing type"}],"import":true}`},
 		{name: "unknown type", body: `{"events":[{"type":"thread","name":"alice","role":"user","content":"unknown"}],"import":true}`},
 		{name: "bad imported author", body: `{"events":[{"type":"message","name":"alice","author_type":"system","role":"user","content":"bad"}],"import":true}`},
 		{name: "bad timestamp", body: `{"events":[{"type":"message","name":"alice","author_type":"human","role":"user","content":"bad","timestamp":"not-a-timestamp"}],"import":true}`},
@@ -720,6 +719,164 @@ func TestLegacyReactionValidationAndConflictRemainClientErrors(t *testing.T) {
 	}
 	conflict := serveRequest(t, h, http.MethodPost, path, `{"emoji":"+1","name":"alice"}`)
 	assertErrorEnvelope(t, conflict, http.StatusConflict, "BAD_JSONL")
+}
+
+func TestChannelAndThreadCreationStoreFailuresAreDaemonErrors(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	channelID, err := s.CreateChannel("test", "/repo", "", "", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewHandler(s)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name string
+		path string
+		body string
+	}{
+		{name: "channel create", path: "/v1/channels", body: `{"Name":"new","RepoAbsPath":"/repo"}`},
+		{name: "thread create", path: fmt.Sprintf("/v1/channels/%d/threads", channelID), body: `{"title":"new thread"}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rec := serveRequest(t, h, http.MethodPost, test.path, test.body)
+			assertErrorEnvelope(t, rec, http.StatusInternalServerError, "DAEMON_ERROR")
+		})
+	}
+}
+
+func TestChannelAndThreadCreationValidationAndConflictsStayClientErrors(t *testing.T) {
+	_, h, _ := newTestHandlerWithThread(t)
+
+	blankChannel := serveRequest(t, h, http.MethodPost, "/v1/channels", `{"Name":"  ","RepoAbsPath":"/repo"}`)
+	assertErrorEnvelope(t, blankChannel, http.StatusBadRequest, "BAD_JSONL")
+	existingChannel := serveRequest(t, h, http.MethodPost, "/v1/channels", `{"Name":"test","RepoAbsPath":"/repo"}`)
+	assertErrorEnvelope(t, existingChannel, http.StatusConflict, "CHANNEL_EXISTS")
+
+	blankThread := serveRequest(t, h, http.MethodPost, "/v1/channels/1/threads", `{"title":"  "}`)
+	assertErrorEnvelope(t, blankThread, http.StatusBadRequest, "BAD_JSONL")
+	missingChannel := serveRequest(t, h, http.MethodPost, "/v1/channels/9999/threads", `{"title":"orphan thread"}`)
+	assertErrorEnvelope(t, missingChannel, http.StatusNotFound, "CHANNEL_NOT_FOUND")
+}
+
+func TestMessagePostRejectsParentFromAnotherThreadAsClientError(t *testing.T) {
+	s, h, threadID := newTestHandlerWithThread(t)
+	otherThreadID := newTestThread(t, s, "other")
+	otherSeq, err := s.AppendMessage(otherThreadID, "alice", "human", "user", "elsewhere")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherID, err := s.MessageIDBySeq(otherThreadID, otherSeq)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := serveRequest(t, h, http.MethodPost, fmt.Sprintf("/v1/threads/%d/messages", threadID), fmt.Sprintf(`{"name":"alice","role":"user","content":"reply","parent_id":%d}`, otherID))
+	assertErrorEnvelope(t, rec, http.StatusBadRequest, "BAD_JSONL")
+	messages, err := s.ListMessages(threadID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 0 {
+		t.Fatalf("cross-thread parent created messages: %+v", messages)
+	}
+}
+
+func TestBatchEventsUseJSONLCodecNormalization(t *testing.T) {
+	s, h, threadID := newTestHandlerWithThread(t)
+
+	body := `{"events":[{"role":"user","author":"legacy-agent","content":"no type, legacy author"},{"type":"message","name":"reviewer","role":"assistant","content":"typed"}]}`
+	rec := serveRequest(t, h, http.MethodPost, fmt.Sprintf("/v1/threads/%d/events", threadID), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body %s", rec.Code, rec.Body.String())
+	}
+	messages, err := s.ListMessages(threadID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("messages = %+v", messages)
+	}
+	if messages[0].Name != "legacy-agent" || messages[0].AuthorType != "human" {
+		t.Fatalf("normalized legacy line = %+v", messages[0])
+	}
+	if messages[1].Name != "reviewer" || messages[1].AuthorType != "human" {
+		t.Fatalf("normalized typed line = %+v", messages[1])
+	}
+}
+
+func TestBatchEventsRejectLinesTheCodecRejects(t *testing.T) {
+	s, h, threadID := newTestHandlerWithThread(t)
+	for _, test := range []struct {
+		name string
+		body string
+	}{
+		{name: "unknown type", body: `{"events":[{"type":"thread","name":"alice","role":"user","content":"unknown"}]}`},
+		{name: "message without content", body: `{"events":[{"name":"alice","role":"user"}]}`},
+		{name: "message without role", body: `{"events":[{"name":"alice","content":"no role"}]}`},
+		{name: "message without name", body: `{"events":[{"role":"user","content":"no name"}]}`},
+		{name: "reaction without emoji", body: `{"events":[{"type":"reaction","message_seq":1,"name":"bob"}]}`},
+		{name: "reaction without target", body: `{"events":[{"type":"reaction","name":"bob","emoji":"+1"}]}`},
+		{name: "null event", body: `{"events":[null]}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rec := serveRequest(t, h, http.MethodPost, fmt.Sprintf("/v1/threads/%d/events", threadID), test.body)
+			assertErrorEnvelope(t, rec, http.StatusBadRequest, "BAD_JSONL")
+		})
+	}
+	messages, err := s.ListMessages(threadID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 0 {
+		t.Fatalf("rejected batches created messages: %+v", messages)
+	}
+}
+
+func TestShutdownRejectsAgentRequests(t *testing.T) {
+	_, h, _ := newTestHandlerWithThread(t)
+	var shutdownCalls int
+	SetShutdown(func() { shutdownCalls++ })
+	t.Cleanup(func() { SetShutdown(nil) })
+
+	req := httptest.NewRequest(http.MethodPost, "/api/shutdown", nil)
+	req.Header.Set("X-Fluffle-Agent", "reviewer")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	assertErrorEnvelope(t, rec, http.StatusForbidden, "AGENT_FORBIDDEN")
+	if shutdownCalls != 0 {
+		t.Fatal("agent request triggered shutdown")
+	}
+
+	humanRec := serveRequest(t, h, http.MethodPost, "/api/shutdown", "")
+	if humanRec.Code != http.StatusOK {
+		t.Fatalf("human status = %d body %s", humanRec.Code, humanRec.Body.String())
+	}
+}
+
+func TestLegacyReactionRejectsMissingMessageTarget(t *testing.T) {
+	s, h, threadID := newTestHandlerWithThread(t)
+	if _, err := s.AppendMessage(threadID, "alice", "human", "user", "target"); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/v1/messages/9999/reactions"} {
+		t.Run(path, func(t *testing.T) {
+			rec := serveRequest(t, h, http.MethodPost, path, `{"emoji":"+1","name":"bob"}`)
+			assertErrorEnvelope(t, rec, http.StatusNotFound, "MESSAGE_NOT_FOUND")
+		})
+	}
+	reactions, err := s.ListReactions(threadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reactions) != 0 {
+		t.Fatalf("missing target created reactions: %+v", reactions)
+	}
 }
 
 func newTestHandlerWithThread(t *testing.T) (*store.Store, http.Handler, int64) {

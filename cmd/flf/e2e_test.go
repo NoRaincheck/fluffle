@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -1240,13 +1241,34 @@ func TestE2E_AgentPortableLoop(t *testing.T) {
 		t.Fatalf("reaction output = %q", reactionOut)
 	}
 
+	assertCursor := func(events []portableLine, label string, wantMessageSeqs []int64, wantReactionTargets []int64) {
+		t.Helper()
+		var messageSeqs, reactionTargets []int64
+		for _, event := range events {
+			switch event.Type {
+			case "message":
+				messageSeqs = append(messageSeqs, event.Seq)
+			case "reaction":
+				reactionTargets = append(reactionTargets, event.MessageSeq)
+			default:
+				t.Fatalf("%s unexpected event type %q", label, event.Type)
+			}
+		}
+		if fmt.Sprint(messageSeqs) != fmt.Sprint(wantMessageSeqs) {
+			t.Fatalf("%s message sequences = %v, want %v", label, messageSeqs, wantMessageSeqs)
+		}
+		if fmt.Sprint(reactionTargets) != fmt.Sprint(wantReactionTargets) {
+			t.Fatalf("%s reaction targets = %v, want the full thread snapshot %v", label, reactionTargets, wantReactionTargets)
+		}
+	}
+
 	events = readEvents(runOK("", "agent", "read", "--thread", threadID, "--after-seq", strconv.FormatInt(rootSeq, 10), "--json"))
-	if len(events) != 1 || events[0].Type != "message" || events[0].Seq != reply.Seq || events[0].ParentSeq != rootSeq {
-		t.Fatalf("cursor events = %+v", events)
+	assertCursor(events, "cursor", []int64{reply.Seq}, []int64{rootSeq})
+	if events[0].ParentSeq != rootSeq {
+		t.Fatalf("cursor message parent = %+v, want %d", events[0], rootSeq)
 	}
-	if events = readEvents(runOK("", "agent", "read", "--thread", threadID, "--after-seq", strconv.FormatInt(reply.Seq, 10), "--json")); len(events) != 0 {
-		t.Fatalf("empty cursor events = %+v", events)
-	}
+	events = readEvents(runOK("", "agent", "read", "--thread", threadID, "--after-seq", strconv.FormatInt(reply.Seq, 10), "--json"))
+	assertCursor(events, "exhausted cursor", nil, []int64{rootSeq})
 
 	events = readEvents(runOK("", "agent", "read", "--thread", threadID, "--json"))
 	assertStream(events, "source")
@@ -1362,11 +1384,15 @@ func TestE2E_AgentPortableLoop(t *testing.T) {
 		t.Fatalf("agent append: exit=%d stdout=%q stderr=%q", appendResult.exitCode, appendResult.stdout, appendResult.stderr)
 	}
 	appended := readEvents(runOK("", "agent", "read", "--thread", threadID, "--after-seq", strconv.FormatInt(reply.Seq, 10), "--json"))
-	if len(appended) != 2 || appended[0].Type != "message" || appended[0].Seq != reply.Seq+1 || appended[0].ParentSeq != reply.Seq || appended[0].AuthorType != "agent" || appended[0].Content != "portable appended" {
-		t.Fatalf("appended message = %+v", appended)
+	assertCursor(appended, "appended", []int64{reply.Seq + 1}, []int64{rootSeq, reply.Seq + 1})
+	if appended[0].ParentSeq != reply.Seq || appended[0].AuthorType != "agent" || appended[0].Content != "portable appended" {
+		t.Fatalf("appended message = %+v", appended[0])
 	}
-	if appended[1].Type != "reaction" || appended[1].MessageSeq != appended[0].Seq || appended[1].AuthorType != "agent" || appended[1].Emoji != "👀" {
-		t.Fatalf("appended reaction = %+v", appended)
+	if appended[1].MessageSeq != rootSeq || appended[1].Emoji != "+1" {
+		t.Fatalf("earlier reaction = %+v", appended[1])
+	}
+	if appended[2].MessageSeq != appended[0].Seq || appended[2].AuthorType != "agent" || appended[2].Emoji != "👀" {
+		t.Fatalf("appended reaction = %+v", appended[2])
 	}
 
 	failure := runCLIResult(t, env, bin, "", "message", "send", "--thread", threadID, "--reply-to-seq", "0", "--text", "-", "--agent-id", "portable-agent")
@@ -1427,6 +1453,88 @@ func TestE2E_AgentAppendAtomicFailure(t *testing.T) {
 	empty = runCLIResult(t, env, bin, "", "agent", "read", "--thread", threadID, "--json")
 	if empty.exitCode != 0 || empty.stderr != "" || empty.stdout != "" {
 		t.Fatalf("post-parse-failure read: exit=%d stdout=%q stderr=%q", empty.exitCode, empty.stdout, empty.stderr)
+	}
+
+	stop()
+}
+
+func TestE2E_ReactionAfterCursorSurvivesOnOlderMessage(t *testing.T) {
+	tmpDir := t.TempDir()
+	home := filepath.Join(tmpDir, "fluffle")
+	bin := buildTestBinary(t, tmpDir)
+	repoDir := t.TempDir()
+	gitInit(t, repoDir)
+	env := []string{"FLUFFLE_HOME=" + home}
+	stop := startAgentDaemon(t, bin, home)
+
+	runOK := func(args ...string) string {
+		t.Helper()
+		result := runCLIResult(t, env, bin, "", args...)
+		if result.exitCode != 0 {
+			t.Fatalf("flf %v: exit=%d stdout=%q stderr=%q", args, result.exitCode, result.stdout, result.stderr)
+		}
+		if result.stderr != "" {
+			t.Fatalf("flf %v wrote stderr: %q", args, result.stderr)
+		}
+		return result.stdout
+	}
+
+	channelOut := runOK("channel", "create", "--name", "cursor-reactions", "--repo", repoDir, "--json")
+	var channel struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(channelOut), &channel); err != nil || channel.ID == 0 {
+		t.Fatalf("channel JSON: %v\n%s", err, channelOut)
+	}
+	threadOut := runOK("thread", "new", "--channel", "cursor-reactions", "--repo", repoDir, "--title", "late reactions", "--json")
+	var thread struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(threadOut), &thread); err != nil || thread.ID == 0 {
+		t.Fatalf("thread JSON: %v\n%s", err, threadOut)
+	}
+	threadID := strconv.FormatInt(thread.ID, 10)
+	for i := 0; i < 3; i++ {
+		runOK("message", "send", "--thread", threadID, "--text", "seed "+strconv.Itoa(i+1), "--as", "seed", "--json")
+	}
+	cursor := "3"
+
+	readCursor := func() (messages, reactions []map[string]any) {
+		t.Helper()
+		raw := runOK("agent", "read", "--thread", threadID, "--after-seq", cursor, "--json")
+		for _, line := range strings.Split(strings.TrimSpace(raw), "\n") {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			var event map[string]any
+			if err := json.Unmarshal([]byte(line), &event); err != nil {
+				t.Fatalf("invalid JSONL: %v\n%s", err, raw)
+			}
+			if event["type"] == "reaction" {
+				reactions = append(reactions, event)
+			} else {
+				messages = append(messages, event)
+			}
+		}
+		return messages, reactions
+	}
+
+	messages, reactions := readCursor()
+	if len(messages) != 0 || len(reactions) != 0 {
+		t.Fatalf("initial cursor read = %d messages %d reactions, want none", len(messages), len(reactions))
+	}
+
+	runOK("react", "add", "--thread", threadID, "--message-seq", "1", "--emoji", "👀", "--agent-id", "late-agent", "--as", "late-agent")
+
+	messages, reactions = readCursor()
+	if len(messages) != 0 {
+		t.Fatalf("cursor read returned older messages: %+v", messages)
+	}
+	if len(reactions) != 1 {
+		t.Fatalf("cursor read reactions = %+v, want the late reaction on sequence 1", reactions)
+	}
+	if reactions[0]["message_seq"] != float64(1) || reactions[0]["emoji"] != "👀" || reactions[0]["name"] != "late-agent" || reactions[0]["author_type"] != "agent" {
+		t.Fatalf("late reaction = %+v", reactions[0])
 	}
 
 	stop()

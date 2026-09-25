@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -688,6 +689,181 @@ func TestAppendBatchRejectsUnsortedMessageSourceSequences(t *testing.T) {
 	}
 	if len(messages) != 0 {
 		t.Fatalf("unsorted batch left messages: %+v", messages)
+	}
+}
+
+func TestAddReactionRejectsMissingMessageTarget(t *testing.T) {
+	s, _, threadID := newStoreWithThread(t, ":memory:")
+	defer s.Close()
+	if _, err := s.AppendMessage(threadID, "alice", "human", "user", "target"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.AddReaction(9999, "+1", "bob", "human"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing target error = %v, want ErrNotFound", err)
+	}
+	if err := s.AddReaction(0, "+1", "bob", "human"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("zero target error = %v, want ErrNotFound", err)
+	}
+	reactions, err := s.ListReactions(threadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reactions) != 0 {
+		t.Fatalf("missing target created reactions: %+v", reactions)
+	}
+}
+
+func TestValidationFailuresAreTypedClientErrors(t *testing.T) {
+	s, _, threadID := newStoreWithThread(t, ":memory:")
+	defer s.Close()
+
+	tests := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "blank channel name", run: func() error {
+			_, err := s.CreateChannel("  ", "/r", "", "", "", false)
+			return err
+		}},
+		{name: "channel without repo", run: func() error {
+			_, err := s.CreateChannel("no-repo", "", "", "", "", false)
+			return err
+		}},
+		{name: "orphaned channel with repo", run: func() error {
+			_, err := s.CreateChannel("orphan", "/r", "", "", "", true)
+			return err
+		}},
+		{name: "blank thread title", run: func() error {
+			_, err := s.CreateThread(1, " ")
+			return err
+		}},
+		{name: "blank message", run: func() error {
+			_, err := s.AppendMessage(threadID, "alice", "human", "user", " ")
+			return err
+		}},
+		{name: "bad author type", run: func() error {
+			_, err := s.AppendMessage(threadID, "alice", "system", "user", "hi")
+			return err
+		}},
+		{name: "bad role", run: func() error {
+			_, err := s.AppendMessage(threadID, "alice", "human", "wizard", "hi")
+			return err
+		}},
+		{name: "bad timestamp", run: func() error {
+			_, err := s.AppendMessageAt(threadID, "alice", "human", "user", "hi", "not-a-timestamp")
+			return err
+		}},
+		{name: "negative parent sequence", run: func() error {
+			_, _, err := s.AppendMessageByParentSeq(threadID, -1, "alice", "human", "user", "hi", "")
+			return err
+		}},
+		{name: "blank reaction", run: func() error {
+			return s.AddReaction(1, " ", "bob", "human")
+		}},
+		{name: "unknown event type", run: func() error {
+			_, err := s.AppendBatch(threadID, []AppendEvent{{Type: "thread", Name: "alice", AuthorType: "human", Role: "user", Content: "hi"}})
+			return err
+		}},
+		{name: "negative source sequence", run: func() error {
+			_, err := s.AppendBatch(threadID, []AppendEvent{{Type: "message", SourceSeq: -1, Name: "alice", AuthorType: "human", Role: "user", Content: "hi"}})
+			return err
+		}},
+		{name: "duplicate source sequence", run: func() error {
+			_, err := s.AppendBatch(threadID, []AppendEvent{
+				{Type: "message", SourceSeq: 5, Name: "alice", AuthorType: "human", Role: "user", Content: "one"},
+				{Type: "message", SourceSeq: 5, Name: "alice", AuthorType: "human", Role: "user", Content: "two"},
+			})
+			return err
+		}},
+		{name: "unsorted source sequence", run: func() error {
+			_, err := s.AppendBatch(threadID, []AppendEvent{
+				{Type: "message", SourceSeq: 20, Name: "alice", AuthorType: "human", Role: "user", Content: "two"},
+				{Type: "message", SourceSeq: 10, Name: "alice", AuthorType: "human", Role: "user", Content: "one"},
+			})
+			return err
+		}},
+		{name: "reaction without message sequence", run: func() error {
+			_, err := s.AppendBatch(threadID, []AppendEvent{{Type: "reaction", Name: "bob", AuthorType: "human", Emoji: "+1"}})
+			return err
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.run()
+			if !errors.Is(err, ErrInvalid) {
+				t.Fatalf("error = %v, want ErrInvalid", err)
+			}
+		})
+	}
+}
+
+func TestParentOutsideThreadIsTypedClientError(t *testing.T) {
+	s, channelID, threadID := newStoreWithThread(t, ":memory:")
+	defer s.Close()
+	otherThreadID, err := s.CreateThread(channelID, "other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherSeq, err := s.AppendMessage(otherThreadID, "alice", "human", "user", "elsewhere")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherID, err := s.MessageIDBySeq(otherThreadID, otherSeq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AppendMessageWithParent(threadID, "alice", "human", "user", "hi", otherID); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("cross-thread parent error = %v, want ErrInvalid", err)
+	}
+}
+
+func TestFileStoreMigrationRebuildsLegacySchemaWithoutParentColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy.SetMaxOpenConns(1)
+	for _, statement := range []string{
+		`CREATE TABLE channels(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, repo_abs_path TEXT, repo_remote TEXT, repo_head_sha TEXT, repo_head_branch TEXT, is_orphaned INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), archived_at TEXT)`,
+		`CREATE TABLE threads(id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id INTEGER NOT NULL, title TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), archived_at TEXT)`,
+		`CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id INTEGER NOT NULL, seq INTEGER NOT NULL, name TEXT NOT NULL, author_type TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')))`,
+	} {
+		if _, err := legacy.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	channels, err := s.ListChannels("", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(channels) != 0 {
+		t.Fatalf("legacy rows survived rebuild: %+v", channels)
+	}
+	channelID, err := s.CreateChannel("c", "/r", "", "", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	threadID, err := s.CreateThread(channelID, "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seq, err := s.AppendMessage(threadID, "alice", "human", "user", "rebuilt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seq != 1 {
+		t.Fatalf("rebuilt store assigned seq %d, want 1", seq)
 	}
 }
 
