@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -171,6 +172,94 @@ func runCLI(t *testing.T, env []string, bin string, args ...string) string {
 		t.Logf("flf %v: %s", args, string(out))
 	}
 	return strings.TrimSpace(string(out))
+}
+
+type cliResult struct {
+	stdout   string
+	stderr   string
+	exitCode int
+}
+
+func runCLIResult(t *testing.T, env []string, bin, input string, args ...string) cliResult {
+	t.Helper()
+	cmd := exec.Command(bin, args...)
+	cmd.Env = append(os.Environ(), env...)
+	cmd.Stdin = strings.NewReader(input)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	exitCode := 0
+	if err := cmd.Run(); err != nil {
+		exitErr, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("flf %v: %v", args, err)
+		}
+		exitCode = exitErr.ExitCode()
+	}
+	return cliResult{
+		stdout:   strings.TrimSpace(stdout.String()),
+		stderr:   strings.TrimSpace(stderr.String()),
+		exitCode: exitCode,
+	}
+}
+
+func assertE2ECLIErrorResult(t *testing.T, result cliResult, wantCode string) {
+	t.Helper()
+	if result.exitCode != 1 {
+		t.Fatalf("exit = %d, want 1; stdout=%q stderr=%q", result.exitCode, result.stdout, result.stderr)
+	}
+	if result.stdout != "" {
+		t.Fatalf("stdout = %q, want empty", result.stdout)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal([]byte(result.stderr), &fields); err != nil {
+		t.Fatalf("invalid error envelope: %v\n%s", err, result.stderr)
+	}
+	if len(fields) != 2 || fields["code"] != wantCode {
+		t.Fatalf("error envelope = %#v, want code %q", fields, wantCode)
+	}
+	if message, ok := fields["message"].(string); !ok || message == "" {
+		t.Fatalf("error message = %#v", fields["message"])
+	}
+}
+
+func startAgentDaemon(t *testing.T, bin, home string) func() {
+	t.Helper()
+	env := []string{"FLUFFLE_HOME=" + home}
+	result := runCLIResult(t, env, bin, "", "daemon", "start", "--background")
+	if result.exitCode != 0 {
+		t.Fatalf("daemon start failed: exit=%d stdout=%q stderr=%q", result.exitCode, result.stdout, result.stderr)
+	}
+	stopped := false
+	stop := func() {
+		if stopped {
+			return
+		}
+		stopped = true
+		stopResult := runCLIResult(t, env, bin, "", "daemon", "stop")
+		if stopResult.exitCode != 0 {
+			if _, err := os.Stat(filepath.Join(home, "daemon.json")); os.IsNotExist(err) {
+				return
+			}
+			t.Logf("daemon stop cleanup: exit=%d stdout=%q stderr=%q", stopResult.exitCode, stopResult.stdout, stopResult.stderr)
+			return
+		}
+		if !waitFor(t, 5*time.Second, func() bool {
+			_, err := os.Stat(filepath.Join(home, "daemon.json"))
+			return os.IsNotExist(err)
+		}) {
+			t.Logf("daemon runtime file remained after cleanup")
+		}
+	}
+	t.Cleanup(stop)
+	var last cliResult
+	if !waitFor(t, 10*time.Second, func() bool {
+		last = runCLIResult(t, env, bin, "", "daemon", "status")
+		return last.exitCode == 0 && strings.Contains(last.stdout, "daemon up")
+	}) {
+		t.Fatalf("daemon did not become ready: exit=%d stdout=%q stderr=%q", last.exitCode, last.stdout, last.stderr)
+	}
+	return stop
 }
 
 // readDaemonJSON reads and parses daemon.json.
@@ -491,7 +580,7 @@ func TestE2E_AgentRead(t *testing.T) {
 	out = runCLI(t, env, bin, "agent", "read", "--thread", strconv.FormatInt(th.ID, 10), "--json")
 	type Message struct {
 		Seq     int64  `json:"seq"`
-		Author  string `json:"author"`
+		Name    string `json:"name"`
 		Content string `json:"content"`
 	}
 	var msgs []Message
@@ -1012,4 +1101,441 @@ func TestE2E_ThreadReply(t *testing.T) {
 	}
 
 	_, _ = http.Post("http://127.0.0.1:"+strconv.Itoa(port)+"/api/shutdown", "application/json", nil)
+}
+
+func TestE2E_AgentPortableLoop(t *testing.T) {
+	tmpDir := t.TempDir()
+	home := filepath.Join(tmpDir, "fluffle")
+	bin := buildTestBinary(t, tmpDir)
+	repoDir := t.TempDir()
+	gitInit(t, repoDir)
+	env := []string{"FLUFFLE_HOME=" + home}
+	stop := startAgentDaemon(t, bin, home)
+
+	runOK := func(input string, args ...string) string {
+		t.Helper()
+		result := runCLIResult(t, env, bin, input, args...)
+		if result.exitCode != 0 {
+			t.Fatalf("flf %v: exit=%d stdout=%q stderr=%q", args, result.exitCode, result.stdout, result.stderr)
+		}
+		if result.stderr != "" {
+			t.Fatalf("flf %v wrote stderr: %q", args, result.stderr)
+		}
+		return result.stdout
+	}
+
+	out := runOK("", "channel", "create", "--name", "portable", "--repo", repoDir, "--json")
+	var channel struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(out), &channel); err != nil {
+		t.Fatalf("channel JSON: %v\n%s", err, out)
+	}
+	if channel.ID == 0 {
+		t.Fatalf("channel = %s", out)
+	}
+
+	out = runOK("", "thread", "new", "--channel", "portable", "--repo", repoDir, "--title", "portable loop", "--json")
+	var thread struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(out), &thread); err != nil {
+		t.Fatalf("thread JSON: %v\n%s", err, out)
+	}
+	if thread.ID == 0 {
+		t.Fatalf("thread = %s", out)
+	}
+	threadID := strconv.FormatInt(thread.ID, 10)
+
+	runOK("", "message", "send", "--thread", threadID, "--text", "portable seed", "--as", "seed", "--json")
+	runOK("", "message", "send", "--thread", threadID, "--text", "portable seed 2", "--as", "seed-2", "--json")
+	runOK("", "message", "send", "--thread", threadID, "--text", "portable root", "--as", "alice", "--created-at", "2026-09-25T10:00:00Z", "--json")
+
+	type portableLine struct {
+		Type       string `json:"type"`
+		Seq        int64  `json:"seq"`
+		ParentSeq  int64  `json:"parent_seq"`
+		MessageSeq int64  `json:"message_seq"`
+		Role       string `json:"role"`
+		Name       string `json:"name"`
+		AuthorType string `json:"author_type"`
+		Content    string `json:"content"`
+		Emoji      string `json:"emoji"`
+		Timestamp  string `json:"timestamp"`
+	}
+	readEvents := func(raw string) []portableLine {
+		t.Helper()
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			return nil
+		}
+		var events []portableLine
+		for _, line := range strings.Split(raw, "\n") {
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(line), &fields); err != nil {
+				t.Fatalf("invalid JSONL: %v\n%s", err, raw)
+			}
+			for _, key := range []string{"id", "ID", "thread_id", "ThreadID", "message_id", "MessageID", "parent_id", "ParentID"} {
+				if _, ok := fields[key]; ok {
+					t.Fatalf("portable line contains internal field %q: %s", key, line)
+				}
+			}
+			var event portableLine
+			if err := json.Unmarshal([]byte(line), &event); err != nil {
+				t.Fatalf("invalid JSONL: %v\n%s", err, raw)
+			}
+			events = append(events, event)
+		}
+		return events
+	}
+	assertStream := func(events []portableLine, label string) {
+		t.Helper()
+		if len(events) != 5 {
+			t.Fatalf("%s events = %d, want 5: %+v", label, len(events), events)
+		}
+		for i, event := range events {
+			if event.Timestamp == "" {
+				t.Fatalf("%s event %d has no timestamp: %+v", label, i, event)
+			}
+			if _, err := time.Parse(time.RFC3339, event.Timestamp); err != nil {
+				t.Fatalf("%s event %d timestamp = %q: %v", label, i, event.Timestamp, err)
+			}
+		}
+		if events[0].Type != "message" || events[0].Seq <= 0 || events[0].Name != "seed" || events[0].Role != "user" || events[0].AuthorType != "human" || events[0].Content != "portable seed" || events[0].ParentSeq != 0 {
+			t.Fatalf("%s first seed = %+v", label, events[0])
+		}
+		if events[1].Type != "message" || events[1].Seq != events[0].Seq+1 || events[1].ParentSeq != 0 || events[1].Name != "seed-2" || events[1].Role != "user" || events[1].AuthorType != "human" || events[1].Content != "portable seed 2" {
+			t.Fatalf("%s second seed = %+v", label, events[1])
+		}
+		if events[2].Type != "message" || events[2].Seq != events[1].Seq+1 || events[2].ParentSeq != 0 || events[2].Name != "alice" || events[2].Role != "user" || events[2].AuthorType != "human" || events[2].Content != "portable root" || events[2].Timestamp != "2026-09-25T10:00:00Z" {
+			t.Fatalf("%s root = %+v", label, events[2])
+		}
+		if events[3].Type != "message" || events[3].Seq != events[2].Seq+1 || events[3].ParentSeq != events[2].Seq || events[3].Name != "portable-agent" || events[3].Role != "user" || events[3].AuthorType != "agent" || events[3].Content != "portable reply" {
+			t.Fatalf("%s reply = %+v, root seq %d", label, events[3], events[2].Seq)
+		}
+		if events[4].Type != "reaction" || events[4].MessageSeq != events[2].Seq || events[4].Name != "portable-agent" || events[4].AuthorType != "agent" || events[4].Emoji != "+1" || events[4].Role != "" {
+			t.Fatalf("%s reaction = %+v, root seq %d", label, events[4], events[2].Seq)
+		}
+	}
+
+	events := readEvents(runOK("", "agent", "read", "--thread", threadID, "--json"))
+	if len(events) != 3 || events[0].Type != "message" || events[0].Seq != 1 || events[0].Content != "portable seed" || events[0].Role != "user" || events[0].Timestamp == "" || events[1].Type != "message" || events[1].Seq != 2 || events[1].Content != "portable seed 2" || events[1].Role != "user" || events[1].Timestamp == "" || events[2].Type != "message" || events[2].Seq != 3 || events[2].Name != "alice" || events[2].Role != "user" || events[2].Content != "portable root" || events[2].Timestamp != "2026-09-25T10:00:00Z" {
+		t.Fatalf("initial events = %+v", events)
+	}
+	rootSeq := events[2].Seq
+
+	out = runOK("portable reply", "message", "send", "--thread", threadID, "--reply-to-seq", strconv.FormatInt(rootSeq, 10), "--text", "-", "--agent-id", "portable-agent", "--as", "portable-agent", "--json")
+	var reply struct {
+		Seq       int64 `json:"seq"`
+		ParentSeq int64 `json:"parent_seq"`
+	}
+	if err := json.Unmarshal([]byte(out), &reply); err != nil {
+		t.Fatalf("reply JSON: %v\n%s", err, out)
+	}
+	if reply.ParentSeq != rootSeq || reply.Seq <= rootSeq {
+		t.Fatalf("reply = %+v, root seq %d", reply, rootSeq)
+	}
+
+	reactionOut := runOK("", "react", "add", "--thread", threadID, "--message-seq", strconv.FormatInt(rootSeq, 10), "--emoji", "+1", "--agent-id", "portable-agent", "--as", "portable-agent")
+	if reactionOut != "ok" {
+		t.Fatalf("reaction output = %q", reactionOut)
+	}
+
+	assertCursor := func(events []portableLine, label string, wantMessageSeqs []int64, wantReactionTargets []int64) {
+		t.Helper()
+		var messageSeqs, reactionTargets []int64
+		for _, event := range events {
+			switch event.Type {
+			case "message":
+				messageSeqs = append(messageSeqs, event.Seq)
+			case "reaction":
+				reactionTargets = append(reactionTargets, event.MessageSeq)
+			default:
+				t.Fatalf("%s unexpected event type %q", label, event.Type)
+			}
+		}
+		if fmt.Sprint(messageSeqs) != fmt.Sprint(wantMessageSeqs) {
+			t.Fatalf("%s message sequences = %v, want %v", label, messageSeqs, wantMessageSeqs)
+		}
+		if fmt.Sprint(reactionTargets) != fmt.Sprint(wantReactionTargets) {
+			t.Fatalf("%s reaction targets = %v, want the full thread snapshot %v", label, reactionTargets, wantReactionTargets)
+		}
+	}
+
+	events = readEvents(runOK("", "agent", "read", "--thread", threadID, "--after-seq", strconv.FormatInt(rootSeq, 10), "--json"))
+	assertCursor(events, "cursor", []int64{reply.Seq}, []int64{rootSeq})
+	if events[0].ParentSeq != rootSeq {
+		t.Fatalf("cursor message parent = %+v, want %d", events[0], rootSeq)
+	}
+	events = readEvents(runOK("", "agent", "read", "--thread", threadID, "--after-seq", strconv.FormatInt(reply.Seq, 10), "--json"))
+	assertCursor(events, "exhausted cursor", nil, []int64{rootSeq})
+
+	events = readEvents(runOK("", "agent", "read", "--thread", threadID, "--json"))
+	assertStream(events, "source")
+
+	var inbox []struct {
+		ThreadID    int64  `json:"ThreadID"`
+		ChannelID   int64  `json:"channel_id"`
+		ChannelName string `json:"channel_name"`
+		Content     string `json:"Content"`
+	}
+	if err := json.Unmarshal([]byte(runOK("", "inbox", "--json")), &inbox); err != nil {
+		t.Fatalf("inbox JSON: %v", err)
+	}
+	var foundRoot, foundReply bool
+	for _, message := range inbox {
+		if message.ThreadID == thread.ID && message.ChannelID == channel.ID && message.ChannelName == "portable" && message.Content == "portable root" {
+			foundRoot = true
+		}
+		if message.ThreadID == thread.ID && message.ChannelID == channel.ID && message.ChannelName == "portable" && message.Content == "portable reply" {
+			foundReply = true
+		}
+	}
+	if !foundRoot || !foundReply {
+		t.Fatalf("inbox = %+v", inbox)
+	}
+
+	exportRaw := runOK("", "thread", "export", "--thread", threadID, "--format", "jsonl")
+	exported := readEvents(exportRaw)
+	assertStream(exported, "export")
+	exportPath := filepath.Join(tmpDir, "portable.jsonl")
+	if err := os.WriteFile(exportPath, []byte(exportRaw), 0o644); err != nil {
+		t.Fatalf("write export: %v", err)
+	}
+
+	destinationChannelOut := runOK("", "channel", "create", "--name", "portable-import", "--repo", repoDir, "--json")
+	var destinationChannel struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(destinationChannelOut), &destinationChannel); err != nil || destinationChannel.ID == 0 || destinationChannel.ID == channel.ID {
+		t.Fatalf("destination channel JSON: %v\n%s", err, destinationChannelOut)
+	}
+	destinationThreadOut := runOK("", "thread", "new", "--channel", "portable-import", "--repo", repoDir, "--title", "import destination", "--json")
+	var destinationThread struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(destinationThreadOut), &destinationThread); err != nil || destinationThread.ID == 0 || destinationThread.ID == thread.ID {
+		t.Fatalf("destination thread JSON: %v\n%s", err, destinationThreadOut)
+	}
+	destinationThreadID := strconv.FormatInt(destinationThread.ID, 10)
+	runOK("", "message", "send", "--thread", destinationThreadID, "--text", "destination seed", "--as", "destination", "--json")
+
+	importOut := runOK("", "thread", "import", "--file", exportPath, "--thread", destinationThreadID)
+	parts := strings.Fields(importOut)
+	if len(parts) != 2 || parts[0] != "thread" {
+		t.Fatalf("import output = %q", importOut)
+	}
+	importedID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil || importedID != destinationThread.ID {
+		t.Fatalf("imported thread ID = %q, want %d: %v", importOut, destinationThread.ID, err)
+	}
+
+	var channels []struct {
+		ID   int64  `json:"ID"`
+		Name string `json:"Name"`
+	}
+	if err := json.Unmarshal([]byte(runOK("", "channel", "list", "--repo", repoDir, "--json")), &channels); err != nil {
+		t.Fatalf("channel list JSON: %v", err)
+	}
+	var destinationChannelListed bool
+	for _, item := range channels {
+		if item.Name == "portable-import" && item.ID == destinationChannel.ID {
+			destinationChannelListed = true
+		}
+	}
+	if !destinationChannelListed {
+		t.Fatalf("destination channel identity missing: %+v", channels)
+	}
+
+	var importedThreads []struct {
+		ID        int64  `json:"ID"`
+		ChannelID int64  `json:"ChannelID"`
+		Title     string `json:"Title"`
+	}
+	if err := json.Unmarshal([]byte(runOK("", "thread", "list", "--channel", "portable-import", "--repo", repoDir, "--json")), &importedThreads); err != nil {
+		t.Fatalf("imported thread list JSON: %v", err)
+	}
+	var importedThreadFound bool
+	for _, item := range importedThreads {
+		if item.ID == importedID {
+			importedThreadFound = true
+			if item.ChannelID != destinationChannel.ID || item.Title != "import destination" {
+				t.Fatalf("imported thread identity = %+v, destination channel %d", item, destinationChannel.ID)
+			}
+		}
+	}
+	if !importedThreadFound {
+		t.Fatalf("imported thread %d missing from %+v", importedID, importedThreads)
+	}
+
+	imported := readEvents(runOK("", "agent", "read", "--thread", destinationThreadID, "--json"))
+	if len(imported) != 6 || imported[0].Type != "message" || imported[0].Seq != 1 || imported[0].Content != "destination seed" || imported[0].Role != "user" || imported[0].AuthorType != "human" {
+		t.Fatalf("destination seed = %+v", imported)
+	}
+	assertStream(imported[1:], "imported")
+	if imported[3].Seq == rootSeq || imported[4].Seq == reply.Seq || imported[4].ParentSeq == rootSeq || imported[5].MessageSeq == rootSeq {
+		t.Fatalf("imported references retained source identity: source root=%d reply=%d imported=%+v", rootSeq, reply.Seq, imported)
+	}
+
+	appendInput := "{\"type\":\"message\",\"parent_seq\":" + strconv.FormatInt(reply.Seq, 10) + ",\"name\":\"portable-agent\",\"author_type\":\"agent\",\"role\":\"assistant\",\"content\":\"portable appended\"}\n" +
+		"{\"type\":\"reaction\",\"message_seq\":" + strconv.FormatInt(reply.Seq+1, 10) + ",\"name\":\"portable-agent\",\"author_type\":\"agent\",\"emoji\":\"👀\"}\n"
+	appendResult := runCLIResult(t, env, bin, appendInput, "agent", "append", "--thread", threadID, "--file", "-", "--agent-id", "portable-agent")
+	if appendResult.exitCode != 0 || appendResult.stdout != "" || appendResult.stderr != "" {
+		t.Fatalf("agent append: exit=%d stdout=%q stderr=%q", appendResult.exitCode, appendResult.stdout, appendResult.stderr)
+	}
+	appended := readEvents(runOK("", "agent", "read", "--thread", threadID, "--after-seq", strconv.FormatInt(reply.Seq, 10), "--json"))
+	assertCursor(appended, "appended", []int64{reply.Seq + 1}, []int64{rootSeq, reply.Seq + 1})
+	if appended[0].ParentSeq != reply.Seq || appended[0].AuthorType != "agent" || appended[0].Content != "portable appended" {
+		t.Fatalf("appended message = %+v", appended[0])
+	}
+	if appended[1].MessageSeq != rootSeq || appended[1].Emoji != "+1" {
+		t.Fatalf("earlier reaction = %+v", appended[1])
+	}
+	if appended[2].MessageSeq != appended[0].Seq || appended[2].AuthorType != "agent" || appended[2].Emoji != "👀" {
+		t.Fatalf("appended reaction = %+v", appended[2])
+	}
+
+	failure := runCLIResult(t, env, bin, "", "message", "send", "--thread", threadID, "--reply-to-seq", "0", "--text", "-", "--agent-id", "portable-agent")
+	assertE2ECLIErrorResult(t, failure, "BAD_ARGS")
+
+	stop()
+}
+
+func TestE2E_AgentAppendAtomicFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	home := filepath.Join(tmpDir, "fluffle")
+	bin := buildTestBinary(t, tmpDir)
+	repoDir := t.TempDir()
+	gitInit(t, repoDir)
+	env := []string{"FLUFFLE_HOME=" + home}
+	stop := startAgentDaemon(t, bin, home)
+
+	runOK := func(args ...string) string {
+		t.Helper()
+		result := runCLIResult(t, env, bin, "", args...)
+		if result.exitCode != 0 {
+			t.Fatalf("flf %v: exit=%d stdout=%q stderr=%q", args, result.exitCode, result.stdout, result.stderr)
+		}
+		if result.stderr != "" {
+			t.Fatalf("flf %v wrote stderr: %q", args, result.stderr)
+		}
+		return result.stdout
+	}
+
+	channelOut := runOK("channel", "create", "--name", "atomic", "--repo", repoDir, "--json")
+	var channel struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(channelOut), &channel); err != nil || channel.ID == 0 {
+		t.Fatalf("channel JSON: %v\n%s", err, channelOut)
+	}
+	threadOut := runOK("thread", "new", "--channel", "atomic", "--repo", repoDir, "--title", "atomic batch", "--json")
+	var thread struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(threadOut), &thread); err != nil || thread.ID == 0 {
+		t.Fatalf("thread JSON: %v\n%s", err, threadOut)
+	}
+	threadID := strconv.FormatInt(thread.ID, 10)
+
+	validAndInvalid := "{\"type\":\"message\",\"name\":\"alice\",\"role\":\"user\",\"content\":\"must roll back\"}\n" +
+		"{\"type\":\"reaction\",\"message_seq\":999,\"name\":\"alice\",\"emoji\":\"+1\"}\n"
+	lateFailure := runCLIResult(t, env, bin, validAndInvalid, "agent", "append", "--thread", threadID, "--file", "-", "--agent-id", "atomic-agent")
+	assertE2ECLIErrorResult(t, lateFailure, "THREAD_NOT_FOUND")
+	empty := runCLIResult(t, env, bin, "", "agent", "read", "--thread", threadID, "--json")
+	if empty.exitCode != 0 || empty.stderr != "" || empty.stdout != "" {
+		t.Fatalf("post-rollback read: exit=%d stdout=%q stderr=%q", empty.exitCode, empty.stdout, empty.stderr)
+	}
+
+	malformed := "{\"type\":\"message\",\"name\":\"alice\",\"role\":\"user\",\"content\":\"must not parse\"}\nnot-json\n"
+	parseFailure := runCLIResult(t, env, bin, malformed, "agent", "append", "--thread", threadID, "--file", "-", "--agent-id", "atomic-agent")
+	assertE2ECLIErrorResult(t, parseFailure, "BAD_JSONL")
+	empty = runCLIResult(t, env, bin, "", "agent", "read", "--thread", threadID, "--json")
+	if empty.exitCode != 0 || empty.stderr != "" || empty.stdout != "" {
+		t.Fatalf("post-parse-failure read: exit=%d stdout=%q stderr=%q", empty.exitCode, empty.stdout, empty.stderr)
+	}
+
+	stop()
+}
+
+func TestE2E_ReactionAfterCursorSurvivesOnOlderMessage(t *testing.T) {
+	tmpDir := t.TempDir()
+	home := filepath.Join(tmpDir, "fluffle")
+	bin := buildTestBinary(t, tmpDir)
+	repoDir := t.TempDir()
+	gitInit(t, repoDir)
+	env := []string{"FLUFFLE_HOME=" + home}
+	stop := startAgentDaemon(t, bin, home)
+
+	runOK := func(args ...string) string {
+		t.Helper()
+		result := runCLIResult(t, env, bin, "", args...)
+		if result.exitCode != 0 {
+			t.Fatalf("flf %v: exit=%d stdout=%q stderr=%q", args, result.exitCode, result.stdout, result.stderr)
+		}
+		if result.stderr != "" {
+			t.Fatalf("flf %v wrote stderr: %q", args, result.stderr)
+		}
+		return result.stdout
+	}
+
+	channelOut := runOK("channel", "create", "--name", "cursor-reactions", "--repo", repoDir, "--json")
+	var channel struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(channelOut), &channel); err != nil || channel.ID == 0 {
+		t.Fatalf("channel JSON: %v\n%s", err, channelOut)
+	}
+	threadOut := runOK("thread", "new", "--channel", "cursor-reactions", "--repo", repoDir, "--title", "late reactions", "--json")
+	var thread struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(threadOut), &thread); err != nil || thread.ID == 0 {
+		t.Fatalf("thread JSON: %v\n%s", err, threadOut)
+	}
+	threadID := strconv.FormatInt(thread.ID, 10)
+	for i := 0; i < 3; i++ {
+		runOK("message", "send", "--thread", threadID, "--text", "seed "+strconv.Itoa(i+1), "--as", "seed", "--json")
+	}
+	cursor := "3"
+
+	readCursor := func() (messages, reactions []map[string]any) {
+		t.Helper()
+		raw := runOK("agent", "read", "--thread", threadID, "--after-seq", cursor, "--json")
+		for _, line := range strings.Split(strings.TrimSpace(raw), "\n") {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			var event map[string]any
+			if err := json.Unmarshal([]byte(line), &event); err != nil {
+				t.Fatalf("invalid JSONL: %v\n%s", err, raw)
+			}
+			if event["type"] == "reaction" {
+				reactions = append(reactions, event)
+			} else {
+				messages = append(messages, event)
+			}
+		}
+		return messages, reactions
+	}
+
+	messages, reactions := readCursor()
+	if len(messages) != 0 || len(reactions) != 0 {
+		t.Fatalf("initial cursor read = %d messages %d reactions, want none", len(messages), len(reactions))
+	}
+
+	runOK("react", "add", "--thread", threadID, "--message-seq", "1", "--emoji", "👀", "--agent-id", "late-agent", "--as", "late-agent")
+
+	messages, reactions = readCursor()
+	if len(messages) != 0 {
+		t.Fatalf("cursor read returned older messages: %+v", messages)
+	}
+	if len(reactions) != 1 {
+		t.Fatalf("cursor read reactions = %+v, want the late reaction on sequence 1", reactions)
+	}
+	if reactions[0]["message_seq"] != float64(1) || reactions[0]["emoji"] != "👀" || reactions[0]["name"] != "late-agent" || reactions[0]["author_type"] != "agent" {
+		t.Fatalf("late reaction = %+v", reactions[0])
+	}
+
+	stop()
 }

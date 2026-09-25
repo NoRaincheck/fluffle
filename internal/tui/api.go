@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 
@@ -18,7 +20,7 @@ type apiClient struct {
 }
 
 func NewAPIClient(base string) *apiClient {
-	return &apiClient{base: base, http: &http.Client{}}
+	return &apiClient{base: base, http: client.NewHTTPClient()}
 }
 
 func (c *apiClient) EnsureDaemon() error {
@@ -35,7 +37,7 @@ func (c *apiClient) ListChannels(ctx context.Context, repo, filter string) ([]st
 	if repo != "" {
 		url += "&repo=" + repo
 	}
-	resp, err := c.http.Get(url)
+	resp, err := c.do(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("DAEMON_DOWN: %w", err)
 	}
@@ -44,8 +46,8 @@ func (c *apiClient) ListChannels(ctx context.Context, repo, filter string) ([]st
 		return nil, readAPIError(resp)
 	}
 	var channels []store.Channel
-	if err := json.NewDecoder(resp.Body).Decode(&channels); err != nil {
-		return nil, fmt.Errorf("DAEMON_DOWN: %w", err)
+	if err := decodeStrictJSON(resp.Body, &channels); err != nil {
+		return nil, fmt.Errorf("DAEMON_ERROR: %w", err)
 	}
 	if channels == nil {
 		channels = []store.Channel{}
@@ -62,12 +64,12 @@ func (c *apiClient) CreateChannel(ctx context.Context, name, repo, branch string
 		body["RepoAbsPath"] = repo
 		body["RepoHeadBranch"] = branch
 	}
-	return c.doJSON(c.base+"/v1/channels", "POST", body)
+	return c.doJSON(ctx, c.base+"/v1/channels", http.MethodPost, body)
 }
 
 func (c *apiClient) ListThreads(ctx context.Context, channelID int64) ([]store.Thread, error) {
 	url := c.base + "/v1/channels/" + fmt.Sprintf("%d", channelID) + "/threads"
-	resp, err := c.http.Get(url)
+	resp, err := c.do(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("DAEMON_DOWN: %w", err)
 	}
@@ -76,8 +78,8 @@ func (c *apiClient) ListThreads(ctx context.Context, channelID int64) ([]store.T
 		return nil, readAPIError(resp)
 	}
 	var threads []store.Thread
-	if err := json.NewDecoder(resp.Body).Decode(&threads); err != nil {
-		return nil, fmt.Errorf("DAEMON_DOWN: %w", err)
+	if err := decodeStrictJSON(resp.Body, &threads); err != nil {
+		return nil, fmt.Errorf("DAEMON_ERROR: %w", err)
 	}
 	if threads == nil {
 		threads = []store.Thread{}
@@ -86,12 +88,12 @@ func (c *apiClient) ListThreads(ctx context.Context, channelID int64) ([]store.T
 }
 
 func (c *apiClient) CreateThread(ctx context.Context, channelID int64, title string) (int64, error) {
-	return c.doJSON(c.base+"/v1/channels/"+fmt.Sprintf("%d", channelID)+"/threads", "POST", map[string]any{"Title": title})
+	return c.doJSON(ctx, c.base+"/v1/channels/"+fmt.Sprintf("%d", channelID)+"/threads", http.MethodPost, map[string]any{"Title": title})
 }
 
 func (c *apiClient) ListMessages(ctx context.Context, threadID int64) ([]store.Message, error) {
 	url := c.base + "/v1/threads/" + fmt.Sprintf("%d", threadID) + "/messages"
-	resp, err := c.http.Get(url)
+	resp, err := c.do(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("DAEMON_DOWN: %w", err)
 	}
@@ -100,8 +102,8 @@ func (c *apiClient) ListMessages(ctx context.Context, threadID int64) ([]store.M
 		return nil, readAPIError(resp)
 	}
 	var msgs []store.Message
-	if err := json.NewDecoder(resp.Body).Decode(&msgs); err != nil {
-		return nil, fmt.Errorf("DAEMON_DOWN: %w", err)
+	if err := decodeStrictJSON(resp.Body, &msgs); err != nil {
+		return nil, fmt.Errorf("DAEMON_ERROR: %w", err)
 	}
 	if msgs == nil {
 		msgs = []store.Message{}
@@ -114,7 +116,7 @@ func (c *apiClient) ListInbox(ctx context.Context, limit int) ([]store.InboxMess
 		limit = 100
 	}
 	url := fmt.Sprintf("%s/v1/inbox?limit=%d", c.base, limit)
-	resp, err := c.http.Get(url)
+	resp, err := c.do(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("DAEMON_DOWN: %w", err)
 	}
@@ -123,8 +125,8 @@ func (c *apiClient) ListInbox(ctx context.Context, limit int) ([]store.InboxMess
 		return nil, readAPIError(resp)
 	}
 	var msgs []store.InboxMessage
-	if err := json.NewDecoder(resp.Body).Decode(&msgs); err != nil {
-		return nil, fmt.Errorf("DAEMON_DOWN: %w", err)
+	if err := decodeStrictJSON(resp.Body, &msgs); err != nil {
+		return nil, fmt.Errorf("DAEMON_ERROR: %w", err)
 	}
 	if msgs == nil {
 		msgs = []store.InboxMessage{}
@@ -134,34 +136,77 @@ func (c *apiClient) ListInbox(ctx context.Context, limit int) ([]store.InboxMess
 
 func (c *apiClient) SendMessage(ctx context.Context, threadID, parentID int64, text string) error {
 	body := map[string]any{"Name": "you", "Role": "user", "Content": text, "ParentID": parentID}
-	resp, err := c.http.Post(c.base+"/v1/threads/"+fmt.Sprintf("%d", threadID)+"/messages", "application/json", jsonBody(body))
+	resp, err := c.do(ctx, http.MethodPost, c.base+"/v1/threads/"+fmt.Sprintf("%d", threadID)+"/messages", jsonBody(body))
 	if err != nil {
-		return fmt.Errorf("DAEMON_DOWN: %w", err)
+		return mutationTransportError(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		return readAPIError(resp)
+	}
+	var ack struct {
+		Seq int64 `json:"seq"`
+	}
+	if err := decodeStrictJSON(resp.Body, &ack); err != nil {
+		return mutationTransportError(err)
+	}
+	if ack.Seq <= 0 {
+		return fmt.Errorf("DELIVERY_UNKNOWN: message acknowledgement without an assigned sequence")
 	}
 	return nil
 }
 
 func (c *apiClient) AddReaction(ctx context.Context, messageID int64, emoji string) error {
 	body := map[string]any{"Emoji": emoji, "Name": "you"}
-	resp, err := c.http.Post(c.base+"/v1/messages/"+fmt.Sprintf("%d", messageID)+"/reactions", "application/json", jsonBody(body))
+	resp, err := c.do(ctx, http.MethodPost, c.base+"/v1/messages/"+fmt.Sprintf("%d", messageID)+"/reactions", jsonBody(body))
 	if err != nil {
-		return fmt.Errorf("DAEMON_DOWN: %w", err)
+		return mutationTransportError(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		return readAPIError(resp)
 	}
+	var ack struct {
+		OK *bool `json:"ok"`
+	}
+	if err := decodeStrictJSON(resp.Body, &ack); err != nil {
+		return mutationTransportError(err)
+	}
+	if ack.OK == nil || !*ack.OK {
+		return fmt.Errorf("DELIVERY_UNKNOWN: reaction response did not acknowledge the write")
+	}
 	return nil
 }
 
-func (c *apiClient) doJSON(url, method string, body any) (int64, error) {
-	resp, err := c.http.Post(url, "application/json", jsonBody(body))
+func (c *apiClient) do(ctx context.Context, method, url string, body io.Reader) (*http.Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
-		return 0, fmt.Errorf("DAEMON_DOWN: %w", err)
+		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+func mutationTransportError(err error) error {
+	if client.IsPreDispatchError(err) {
+		return fmt.Errorf("DAEMON_DOWN: %w", err)
+	}
+	return fmt.Errorf("DELIVERY_UNKNOWN: %w", err)
+}
+
+func (c *apiClient) doJSON(ctx context.Context, url, method string, body any) (int64, error) {
+	resp, err := c.do(ctx, method, url, jsonBody(body))
+	if err != nil {
+		return 0, mutationTransportError(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
@@ -170,8 +215,11 @@ func (c *apiClient) doJSON(url, method string, body any) (int64, error) {
 	var out struct {
 		ID int64 `json:"id"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return 0, fmt.Errorf("DAEMON_DOWN: %w", err)
+	if err := decodeStrictJSON(resp.Body, &out); err != nil {
+		return 0, fmt.Errorf("DELIVERY_UNKNOWN: %w", err)
+	}
+	if out.ID <= 0 {
+		return 0, fmt.Errorf("DELIVERY_UNKNOWN: creation acknowledged without an id")
 	}
 	return out.ID, nil
 }
@@ -186,10 +234,29 @@ func readAPIError(resp *http.Response) error {
 		Code    string `json:"code"`
 		Message string `json:"message"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&eb); err != nil {
-		return fmt.Errorf("DAEMON_DOWN: status %d", resp.StatusCode)
+	if err := json.NewDecoder(resp.Body).Decode(&eb); err != nil || eb.Code == "" {
+		return fmt.Errorf("DAEMON_ERROR: status %d without a readable error envelope", resp.StatusCode)
 	}
 	return fmt.Errorf("%s: %s", eb.Code, eb.Message)
+}
+
+func decodeStrictJSON(r io.Reader, out any) error {
+	decoder := json.NewDecoder(r)
+	var raw json.RawMessage
+	if err := decoder.Decode(&raw); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return errors.New("multiple JSON values")
+		}
+		return err
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return errors.New("null JSON response")
+	}
+	return json.Unmarshal(raw, out)
 }
 
 func filterChannels(channels []store.Channel, filter string) []store.Channel {

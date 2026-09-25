@@ -9,13 +9,17 @@ import (
 )
 
 type Line struct {
-	Seq        int64          `json:"seq"`
-	Role       string         `json:"role"`
+	Type       string         `json:"type,omitempty"`
+	Seq        int64          `json:"seq,omitempty"`
+	ParentSeq  int64          `json:"parent_seq,omitempty"`
+	MessageSeq int64          `json:"message_seq,omitempty"`
+	Role       string         `json:"role,omitempty"`
 	Name       string         `json:"name"`
-	AuthorType string         `json:"author_type"`
-	Content    string         `json:"content"`
+	AuthorType string         `json:"author_type,omitempty"`
+	Content    string         `json:"content,omitempty"`
+	Emoji      string         `json:"emoji,omitempty"`
 	Timestamp  string         `json:"timestamp"`
-	Metadata   map[string]any `json:"metadata"`
+	Metadata   map[string]any `json:"metadata,omitempty"`
 }
 
 func MarshalLine(l Line) (string, error) {
@@ -30,15 +34,41 @@ func MarshalLine(l Line) (string, error) {
 }
 
 func ParseLine(s string) (Line, error) {
-	var l Line
-	if err := json.Unmarshal([]byte(s), &l); err != nil {
+	var input struct {
+		Line
+		Author string `json:"author"`
+	}
+	if err := json.Unmarshal([]byte(s), &input); err != nil {
 		return Line{}, err
 	}
-	if l.Role == "" || l.Content == "" {
-		return Line{}, fmt.Errorf("role and content required")
+	l := input.Line
+	if l.Name == "" {
+		l.Name = input.Author
+	}
+	if err := l.normalize(); err != nil {
+		return Line{}, err
+	}
+	return l, nil
+}
+
+func (l *Line) normalize() error {
+	if l.Type == "" {
+		l.Type = "message"
+	}
+	switch l.Type {
+	case "message":
+		if l.Role == "" || l.Content == "" {
+			return fmt.Errorf("role and content required")
+		}
+	case "reaction":
+		if l.MessageSeq <= 0 || strings.TrimSpace(l.Emoji) == "" {
+			return fmt.Errorf("message_seq and emoji required")
+		}
+	default:
+		return fmt.Errorf("unknown type %q", l.Type)
 	}
 	if strings.TrimSpace(l.Name) == "" {
-		return Line{}, fmt.Errorf("name required")
+		return fmt.Errorf("name required")
 	}
 	if l.Metadata == nil {
 		l.Metadata = map[string]any{}
@@ -46,7 +76,7 @@ func ParseLine(s string) (Line, error) {
 	if l.AuthorType == "" {
 		l.AuthorType = "human"
 	}
-	return l, nil
+	return nil
 }
 
 func ParseLines(data []byte) ([]Line, error) {

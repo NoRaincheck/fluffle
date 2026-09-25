@@ -99,7 +99,7 @@ flf_json_q message send --thread "$TID_WELCOME" --text "Hey everyone!" --as bob 
 flf_json_q message send --thread "$TID_WELCOME" --text "Nice to be here" --as carol --created-at "$(next_ts)"
 
 # --- general: announcements (day 1) ---
-flf_json_q message send --thread "$TID_ANNOUNCE" --text "Fluffle v0.1 is out!" --as alice --created-at "$(next_ts)"
+flf_json_q message send --thread "$TID_ANNOUNCE" --text "We are absolutely thrilled to announce that Fluffle v0.1 is officially out! After months of dedicated development, late-night coding sessions, and rigorous testing, our team is finally ready to share this first public milestone with the community. Fluffle was built from the ground up to be a lightning-fast, lightweight data aggregation framework that doesn't get in your way. In this initial release, we've focused on core stability, intuitive API design, and blazing performance. You can now easily bundle, process, and route your data streams with minimal boilerplate. We've also included comprehensive documentation, a brand-new CLI tool, and a suite of examples to help you get started in minutes. This is just the beginning of our journey. We have big plans for v0.2, including plugin support and advanced routing features. We want to hear your feedback, so please check out the GitHub repository, open an issue, or submit a pull request. We appreciate your feedback and wish you a very happy coding day!!!" --as alice --created-at "$(next_ts)"
 
 # --- agent: announcements (day 7.5) ---
 flf_json_q message send --thread "$TID_ANNOUNCE" --text "Announcement rotation check: 1 active announcement. No expirations scheduled." --as "$AGENT_REPLACER" --agent-id "$AGENT_REPLACER" --created-at "$(next_ts)"

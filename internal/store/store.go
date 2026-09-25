@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -11,6 +12,11 @@ import (
 
 var ErrConflict = errors.New("conflict")
 var ErrNotFound = errors.New("not found")
+var ErrInvalid = errors.New("invalid")
+
+func invalid(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", ErrInvalid, fmt.Sprintf(format, args...))
+}
 
 const schema = `
 CREATE TABLE IF NOT EXISTS channels(
@@ -120,19 +126,19 @@ func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) CreateChannel(name, repoAbsPath, repoRemote, repoHeadSHA, repoHeadBranch string, orphaned bool) (int64, error) {
 	if strings.TrimSpace(name) == "" {
-		return 0, errors.New("channel name required")
+		return 0, invalid("channel name required")
 	}
 	var abs any
 	var isOrphan int
 	if orphaned {
 		if repoAbsPath != "" {
-			return 0, errors.New("orphaned channel must not have repo path")
+			return 0, invalid("orphaned channel must not have repo path")
 		}
 		abs = nil
 		isOrphan = 1
 	} else {
 		if strings.TrimSpace(repoAbsPath) == "" {
-			return 0, errors.New("repo path required")
+			return 0, invalid("repo path required")
 		}
 		abs = repoAbsPath
 	}
@@ -191,7 +197,38 @@ type Thread struct {
 type Message struct {
 	ID, ThreadID, Seq                          int64
 	ParentID                                   sql.NullInt64
+	ParentSeq                                  sql.NullInt64 `json:"-"`
 	Name, AuthorType, Role, Content, CreatedAt string
+}
+
+type Reaction struct {
+	ID         int64
+	MessageID  int64
+	MessageSeq int64
+	Emoji      string
+	Name       string
+	AuthorType string
+	CreatedAt  string
+}
+
+type AppendEvent struct {
+	Type       string
+	SourceSeq  int64
+	ParentSeq  int64
+	MessageSeq int64
+	Name       string
+	AuthorType string
+	Role       string
+	Content    string
+	Emoji      string
+	CreatedAt  string
+}
+
+type AppendResult struct {
+	SourceSeq  int64
+	Seq        int64
+	MessageID  int64
+	ReactionID int64
 }
 
 type InboxMessage struct {
@@ -203,7 +240,7 @@ type InboxMessage struct {
 
 func (s *Store) CreateThread(channelID int64, title string) (int64, error) {
 	if strings.TrimSpace(title) == "" {
-		return 0, errors.New("title required")
+		return 0, invalid("title required")
 	}
 	var n int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM channels WHERE id = ? AND archived_at IS NULL`, channelID).Scan(&n); err != nil {
@@ -249,30 +286,66 @@ func (s *Store) AppendMessageAt(threadID int64, name, authorType, role, content,
 }
 
 func (s *Store) AppendMessageAtWithParent(threadID int64, name, authorType, role, content, createdAt string, parentID int64) (int64, error) {
-	if strings.TrimSpace(name) == "" || strings.TrimSpace(content) == "" {
-		return 0, errors.New("name and content required")
-	}
-	if authorType != "human" && authorType != "agent" {
-		return 0, errors.New("bad author_type")
-	}
-	if role != "user" && role != "assistant" && role != "system" {
-		return 0, errors.New("bad role")
-	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()
-	var n int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM threads WHERE id = ? AND archived_at IS NULL`, threadID).Scan(&n); err != nil {
+	seq, _, err := appendMessageTx(tx, threadID, name, authorType, role, content, createdAt, parentID)
+	if err != nil {
 		return 0, err
 	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return seq, nil
+}
+
+func (s *Store) AppendMessageByParentSeq(threadID, parentSeq int64, name, authorType, role, content, createdAt string) (int64, int64, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, 0, err
+	}
+	defer tx.Rollback()
+	seq, id, err := appendMessageByParentSeqTx(tx, threadID, parentSeq, name, authorType, role, content, createdAt)
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, 0, err
+	}
+	return seq, id, nil
+}
+
+func appendMessageByParentSeqTx(tx *sql.Tx, threadID, parentSeq int64, name, authorType, role, content, createdAt string) (int64, int64, error) {
+	if parentSeq < 0 {
+		return 0, 0, invalid("parent_seq must be non-negative")
+	}
+	var parentID int64
+	if parentSeq > 0 {
+		var err error
+		parentID, err = messageIDBySeqTx(tx, threadID, parentSeq)
+		if err != nil {
+			return 0, 0, err
+		}
+	}
+	return appendMessageTx(tx, threadID, name, authorType, role, content, createdAt, parentID)
+}
+
+func appendMessageTx(tx *sql.Tx, threadID int64, name, authorType, role, content, createdAt string, parentID int64) (int64, int64, error) {
+	if err := validateMessage(name, authorType, role, content); err != nil {
+		return 0, 0, err
+	}
+	var n int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM threads WHERE id = ? AND archived_at IS NULL`, threadID).Scan(&n); err != nil {
+		return 0, 0, err
+	}
 	if n == 0 {
-		return 0, ErrNotFound
+		return 0, 0, ErrNotFound
 	}
 	var maxSeq sql.NullInt64
 	if err := tx.QueryRow(`SELECT MAX(seq) FROM messages WHERE thread_id = ?`, threadID).Scan(&maxSeq); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	seq := int64(1)
 	if maxSeq.Valid {
@@ -281,26 +354,46 @@ func (s *Store) AppendMessageAtWithParent(threadID int64, name, authorType, role
 	if parentID > 0 {
 		var parentThreadID int64
 		if err := tx.QueryRow(`SELECT thread_id FROM messages WHERE id = ?`, parentID).Scan(&parentThreadID); err != nil {
-			return 0, ErrNotFound
+			return 0, 0, ErrNotFound
 		}
 		if parentThreadID != threadID {
-			return 0, errors.New("parent message not in this thread")
+			return 0, 0, invalid("parent message not in this thread")
 		}
 	}
+	var res sql.Result
+	var err error
 	if createdAt != "" {
 		if _, err := time.Parse(time.RFC3339, createdAt); err != nil {
-			return 0, err
+			return 0, 0, invalid("created_at %q is not RFC3339: %v", createdAt, err)
 		}
-		if _, err := tx.Exec(`INSERT INTO messages(thread_id, seq, parent_id, name, author_type, role, content, created_at) VALUES(?,?,?,?,?,?,?,?)`, threadID, seq, nullIfInt64(parentID), name, authorType, role, content, createdAt); err != nil {
-			return 0, err
+		res, err = tx.Exec(`INSERT INTO messages(thread_id, seq, parent_id, name, author_type, role, content, created_at) VALUES(?,?,?,?,?,?,?,?)`, threadID, seq, nullIfInt64(parentID), name, authorType, role, content, createdAt)
+		if err != nil {
+			return 0, 0, err
 		}
-	} else if _, err := tx.Exec(`INSERT INTO messages(thread_id, seq, parent_id, name, author_type, role, content) VALUES(?,?,?,?,?,?,?)`, threadID, seq, nullIfInt64(parentID), name, authorType, role, content); err != nil {
-		return 0, err
+	} else {
+		res, err = tx.Exec(`INSERT INTO messages(thread_id, seq, parent_id, name, author_type, role, content) VALUES(?,?,?,?,?,?,?)`, threadID, seq, nullIfInt64(parentID), name, authorType, role, content)
+		if err != nil {
+			return 0, 0, err
+		}
 	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, 0, err
 	}
-	return seq, nil
+	return seq, id, nil
+}
+
+func validateMessage(name, authorType, role, content string) error {
+	if strings.TrimSpace(name) == "" || strings.TrimSpace(content) == "" {
+		return invalid("name and content required")
+	}
+	if authorType != "human" && authorType != "agent" {
+		return invalid("bad author_type %q", authorType)
+	}
+	if role != "user" && role != "assistant" && role != "system" {
+		return invalid("bad role %q", role)
+	}
+	return nil
 }
 
 func nullIfInt64(v int64) any {
@@ -310,8 +403,32 @@ func nullIfInt64(v int64) any {
 	return v
 }
 
+func (s *Store) MessageIDBySeq(threadID, seq int64) (int64, error) {
+	var id int64
+	err := s.db.QueryRow(`SELECT id FROM messages WHERE thread_id = ? AND seq = ?`, threadID, seq).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+func messageIDBySeqTx(tx *sql.Tx, threadID, seq int64) (int64, error) {
+	var id int64
+	err := tx.QueryRow(`SELECT id FROM messages WHERE thread_id = ? AND seq = ?`, threadID, seq).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
 func (s *Store) ListMessages(threadID int64, lastN int) ([]Message, error) {
-	q := `SELECT id, thread_id, seq, parent_id, name, author_type, role, content, COALESCE(created_at,'') FROM messages WHERE thread_id = ? ORDER BY seq ASC`
+	q := `SELECT m.id, m.thread_id, m.seq, m.parent_id, p.seq, m.name, m.author_type, m.role, m.content, COALESCE(m.created_at,'') FROM messages m LEFT JOIN messages p ON p.id = m.parent_id WHERE m.thread_id = ? ORDER BY m.seq ASC`
 	if lastN > 0 {
 		q = `SELECT * FROM (` + q + `) ORDER BY seq DESC LIMIT ?`
 		q = `SELECT * FROM (` + q + `) ORDER BY seq ASC`
@@ -330,11 +447,20 @@ func (s *Store) ListMessages(threadID int64, lastN int) ([]Message, error) {
 	return scanMessages(rows)
 }
 
+func (s *Store) ListMessagesAfter(threadID, afterSeq int64) ([]Message, error) {
+	rows, err := s.db.Query(`SELECT m.id, m.thread_id, m.seq, m.parent_id, p.seq, m.name, m.author_type, m.role, m.content, COALESCE(m.created_at,'') FROM messages m LEFT JOIN messages p ON p.id = m.parent_id WHERE m.thread_id = ? AND m.seq > ? ORDER BY m.seq ASC`, threadID, afterSeq)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanMessages(rows)
+}
+
 func scanMessages(rows *sql.Rows) ([]Message, error) {
 	var out []Message
 	for rows.Next() {
 		var m Message
-		if err := rows.Scan(&m.ID, &m.ThreadID, &m.Seq, &m.ParentID, &m.Name, &m.AuthorType, &m.Role, &m.Content, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.ThreadID, &m.Seq, &m.ParentID, &m.ParentSeq, &m.Name, &m.AuthorType, &m.Role, &m.Content, &m.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -350,7 +476,7 @@ func (m Message) ParentIDValue() int64 {
 }
 
 func (s *Store) ListMessagesByParent(threadID int64, parentID int64) ([]Message, error) {
-	q := `SELECT id, thread_id, seq, parent_id, name, author_type, role, content, COALESCE(created_at,'') FROM messages WHERE thread_id = ? AND parent_id = ? ORDER BY seq ASC`
+	q := `SELECT m.id, m.thread_id, m.seq, m.parent_id, p.seq, m.name, m.author_type, m.role, m.content, COALESCE(m.created_at,'') FROM messages m LEFT JOIN messages p ON p.id = m.parent_id WHERE m.thread_id = ? AND m.parent_id = ? ORDER BY m.seq ASC`
 	rows, err := s.db.Query(q, threadID, parentID)
 	if err != nil {
 		return nil, err
@@ -407,17 +533,235 @@ func (s *Store) CountReplies(threadID int64, parentID int64) (int, error) {
 }
 
 func (s *Store) AddReaction(messageID int64, emoji, name, authorType string) error {
-	if strings.TrimSpace(emoji) == "" || strings.TrimSpace(name) == "" {
-		return errors.New("emoji and name required")
-	}
-	if authorType != "human" && authorType != "agent" {
-		return errors.New("bad author_type")
-	}
-	if _, err := s.db.Exec(`INSERT INTO reactions(message_id, emoji, name, author_type) VALUES(?,?,?,?)`, messageID, emoji, name, authorType); err != nil {
-		if strings.Contains(err.Error(), "UNIQUE") {
-			return ErrConflict
-		}
+	if err := validateReaction(emoji, name, authorType); err != nil {
 		return err
 	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := messageThreadIDTx(tx, messageID); err != nil {
+		return err
+	}
+	if _, _, err := addReactionTx(tx, messageID, emoji, name, authorType, ""); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func messageThreadIDTx(tx *sql.Tx, messageID int64) (int64, error) {
+	if messageID <= 0 {
+		return 0, ErrNotFound
+	}
+	var threadID int64
+	err := tx.QueryRow(`SELECT thread_id FROM messages WHERE id = ?`, messageID).Scan(&threadID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	if err != nil {
+		return 0, err
+	}
+	return threadID, nil
+}
+
+func validateReaction(emoji, name, authorType string) error {
+	if strings.TrimSpace(emoji) == "" || strings.TrimSpace(name) == "" {
+		return invalid("emoji and name required")
+	}
+	if authorType != "human" && authorType != "agent" {
+		return invalid("bad author_type %q", authorType)
+	}
 	return nil
+}
+
+func (s *Store) ListReactions(threadID int64) ([]Reaction, error) {
+	rows, err := s.db.Query(`SELECT r.id, r.message_id, m.seq, r.emoji, r.name, r.author_type, COALESCE(r.created_at,'') FROM reactions r JOIN messages m ON m.id = r.message_id WHERE m.thread_id = ? ORDER BY m.seq ASC, r.created_at ASC, r.id ASC`, threadID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Reaction
+	for rows.Next() {
+		var reaction Reaction
+		if err := rows.Scan(&reaction.ID, &reaction.MessageID, &reaction.MessageSeq, &reaction.Emoji, &reaction.Name, &reaction.AuthorType, &reaction.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, reaction)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) AddReactionBySeq(threadID, messageSeq int64, emoji, name, authorType string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, _, err := addReactionBySeqTx(tx, threadID, messageSeq, emoji, name, authorType, ""); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func addReactionBySeqTx(tx *sql.Tx, threadID, messageSeq int64, emoji, name, authorType, createdAt string) (int64, int64, error) {
+	if err := validateReaction(emoji, name, authorType); err != nil {
+		return 0, 0, err
+	}
+	messageID, err := messageIDBySeqTx(tx, threadID, messageSeq)
+	if err != nil {
+		return 0, 0, err
+	}
+	return addReactionTx(tx, messageID, emoji, name, authorType, createdAt)
+}
+
+func addReactionTx(tx *sql.Tx, messageID int64, emoji, name, authorType, createdAt string) (int64, int64, error) {
+	if err := validateReaction(emoji, name, authorType); err != nil {
+		return 0, 0, err
+	}
+	var (
+		res sql.Result
+		err error
+	)
+	if createdAt != "" {
+		if _, err := time.Parse(time.RFC3339, createdAt); err != nil {
+			return 0, 0, invalid("created_at %q is not RFC3339: %v", createdAt, err)
+		}
+		res, err = tx.Exec(`INSERT INTO reactions(message_id, emoji, name, author_type, created_at) VALUES(?,?,?,?,?)`, messageID, emoji, name, authorType, createdAt)
+	} else {
+		res, err = tx.Exec(`INSERT INTO reactions(message_id, emoji, name, author_type) VALUES(?,?,?,?)`, messageID, emoji, name, authorType)
+	}
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE") {
+			return 0, 0, ErrConflict
+		}
+		return 0, 0, err
+	}
+	reactionID, err := res.LastInsertId()
+	if err != nil {
+		return 0, 0, err
+	}
+	return messageID, reactionID, nil
+}
+
+func (s *Store) AppendBatch(threadID int64, events []AppendEvent) ([]AppendResult, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	for _, event := range events {
+		if err := validateAppendEvent(event); err != nil {
+			return nil, err
+		}
+	}
+	nextSeq, err := nextThreadSeqTx(tx, threadID)
+	if err != nil {
+		return nil, err
+	}
+	sourceSeqs, err := buildSourceSequenceMap(events, nextSeq)
+	if err != nil {
+		return nil, err
+	}
+	results := make([]AppendResult, 0, len(events))
+	for _, event := range events {
+		switch event.Type {
+		case "message":
+			parentSeq := event.ParentSeq
+			if mapped, ok := sourceSeqs[parentSeq]; ok {
+				parentSeq = mapped
+			}
+			seq, messageID, err := appendMessageByParentSeqTx(tx, threadID, parentSeq, event.Name, event.AuthorType, event.Role, event.Content, event.CreatedAt)
+			if err != nil {
+				return nil, err
+			}
+			results = append(results, AppendResult{SourceSeq: event.SourceSeq, Seq: seq, MessageID: messageID})
+		case "reaction":
+			messageSeq := event.MessageSeq
+			if mapped, ok := sourceSeqs[messageSeq]; ok {
+				messageSeq = mapped
+			}
+			messageID, reactionID, err := addReactionBySeqTx(tx, threadID, messageSeq, event.Emoji, event.Name, event.AuthorType, event.CreatedAt)
+			if err != nil {
+				return nil, err
+			}
+			results = append(results, AppendResult{SourceSeq: event.SourceSeq, MessageID: messageID, ReactionID: reactionID})
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+func validateAppendEvent(event AppendEvent) error {
+	if event.SourceSeq < 0 {
+		return invalid("source_seq must be non-negative")
+	}
+	switch event.Type {
+	case "message":
+		if event.ParentSeq < 0 {
+			return invalid("parent_seq must be non-negative")
+		}
+		if err := validateMessage(event.Name, event.AuthorType, event.Role, event.Content); err != nil {
+			return err
+		}
+	case "reaction":
+		if event.MessageSeq <= 0 {
+			return invalid("message_seq must be positive")
+		}
+		if err := validateReaction(event.Emoji, event.Name, event.AuthorType); err != nil {
+			return err
+		}
+	default:
+		return invalid("unknown event type %q", event.Type)
+	}
+	if event.CreatedAt != "" {
+		if _, err := time.Parse(time.RFC3339, event.CreatedAt); err != nil {
+			return invalid("created_at %q is not RFC3339: %v", event.CreatedAt, err)
+		}
+	}
+	return nil
+}
+
+func nextThreadSeqTx(tx *sql.Tx, threadID int64) (int64, error) {
+	var n int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM threads WHERE id = ? AND archived_at IS NULL`, threadID).Scan(&n); err != nil {
+		return 0, err
+	}
+	if n == 0 {
+		return 0, ErrNotFound
+	}
+	var maxSeq sql.NullInt64
+	if err := tx.QueryRow(`SELECT MAX(seq) FROM messages WHERE thread_id = ?`, threadID).Scan(&maxSeq); err != nil {
+		return 0, err
+	}
+	if maxSeq.Valid {
+		return maxSeq.Int64 + 1, nil
+	}
+	return 1, nil
+}
+
+func buildSourceSequenceMap(events []AppendEvent, nextSeq int64) (map[int64]int64, error) {
+	mapped := make(map[int64]int64)
+	var lastSourceSeq int64
+	for _, event := range events {
+		if event.Type != "message" {
+			continue
+		}
+		destinationSeq := nextSeq
+		nextSeq++
+		if event.SourceSeq == 0 {
+			continue
+		}
+		if _, exists := mapped[event.SourceSeq]; exists {
+			return nil, invalid("duplicate source_seq %d", event.SourceSeq)
+		}
+		if event.SourceSeq < lastSourceSeq {
+			return nil, invalid("unsorted source_seq %d", event.SourceSeq)
+		}
+		mapped[event.SourceSeq] = destinationSeq
+		lastSourceSeq = event.SourceSeq
+	}
+	return mapped, nil
 }

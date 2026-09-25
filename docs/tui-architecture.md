@@ -35,9 +35,9 @@ internal/tui/
 
 | File | Responsibility |
 |------|----------------|
-| `tui.go` | `Run()` entry point, daemon ensure, `tea.Model` initialization, exit codes (0=success, 1=error, 2=daemon down) |
+| `tui.go` | `Run()` entry point, daemon ensure, `tea.Model` initialization, exit codes (0=success, 1=client/local error, 2=daemon or transport error) |
 | `model.go` | Full `model` struct, state transitions via `Update()`, rendering via `View()`, key handling, data fetching, time formatting, preview logic |
-| `api.go` | HTTP calls to daemon endpoints, error parsing (`readAPIError`), channel filtering, `jsonBody` helper |
+| `api.go` | HTTP calls to daemon endpoints, strict response decoding, error classification (`readAPIError`), channel filtering, `jsonBody` helper |
 | `compose.go` | Compose modal state machine, text input handling, send/cancel, error display, context header rendering |
 | `styles.go` | All lipgloss style definitions: tree panel, chat panel, modal, status bar, hints, colors |
 
@@ -159,13 +159,15 @@ Centers a multi-line string horizontally within `width` columns. Used for compos
 
 | Error | TUI Behavior |
 |-------|-------------|
-| Daemon down | `tui.Run()` returns exit code 2, prints to stderr |
-| HTTP fetch error | Status bar shows "error: ..."; retains prior inbox |
-| Compose send error | Compose modal header shows error; modal stays open |
+| Daemon down (startup or read transport) | `tui.Run()` returns exit code 2 for startup; a read failure shows `error: DAEMON_DOWN: ...` |
+| Read response cannot be decoded | Status bar or compose modal shows `error: DAEMON_ERROR: ...`; prior data is retained |
+| Mutation connection failure before dispatch | `error: DAEMON_DOWN: ...`; no acknowledgement is possible |
+| Dispatched mutation timeout, response loss, or acknowledgement failure | `error: DELIVERY_UNKNOWN: ...`; the modal stays open and the user re-reads the thread before retrying |
+| Daemon error response | Rendered as `error: <CODE>: <message>` from the daemon error envelope |
 | Empty compose | Compose modal shows "cannot be empty" in red |
 | Empty inbox | Status bar shows "no messages — press n for new thread" |
 
-All errors go through the status bar or compose modal — never panic.
+Error strings are prefixed with a contract code: `DAEMON_DOWN` when the daemon cannot be reached or a connection cannot be established, `DAEMON_ERROR` when a response cannot be decoded or the daemon reports a server-side failure, and `DELIVERY_UNKNOWN` when a dispatched write may have committed without a verifiable acknowledgement. All errors go through the status bar or compose modal — never panic.
 
 ## Styling System
 
