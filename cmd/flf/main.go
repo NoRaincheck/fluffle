@@ -48,7 +48,11 @@ func run(args []string) int {
 	case "agent":
 		return agentCmd(args[1:])
 	case "tui":
-		return tui.Run()
+		result := tui.Run()
+		if !result.OK {
+			return fail(result.Code, result.Message)
+		}
+		return 0
 	default:
 		return fail("BAD_ARGS", rootUsage)
 	}
@@ -118,7 +122,7 @@ func apiPost(u, agentID string, payload any, out any) int {
 	}
 	if out != nil {
 		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-			return fail("DAEMON_ERROR", err.Error())
+			return fail("DELIVERY_UNKNOWN", fmt.Sprintf("read the thread before retrying: %v", err))
 		}
 	}
 	return 0
@@ -268,14 +272,15 @@ func channelCreateCmd(args []string) int {
 	if *jsonOut {
 		var list []store.Channel
 		u := base + "/v1/channels?include-orphaned=1"
-		if code := apiGet(u, "", &list); code == 0 {
-			for _, c := range list {
-				if c.ID == out.ID {
-					enc := json.NewEncoder(os.Stdout)
-					enc.SetIndent("", "  ")
-					enc.Encode(c)
-					return 0
-				}
+		if code := apiGet(u, "", &list); code != 0 {
+			return code
+		}
+		for _, c := range list {
+			if c.ID == out.ID {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				enc.Encode(c)
+				return 0
 			}
 		}
 		enc := json.NewEncoder(os.Stdout)
