@@ -566,6 +566,162 @@ func TestThreadRoutesReportStoreFailuresAsDaemonErrors(t *testing.T) {
 	}
 }
 
+func TestListMessagesRejectsMalformedQueryEncoding(t *testing.T) {
+	_, h, threadID := newTestHandlerWithThread(t)
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/v1/threads/%d/messages", threadID), nil)
+	req.URL.RawQuery = "after_seq=%ZZ"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	assertErrorEnvelope(t, rec, http.StatusBadRequest, "BAD_JSONL")
+}
+
+func TestThreadRoutesRejectMalformedThreadIDs(t *testing.T) {
+	_, h, _ := newTestHandlerWithThread(t)
+	for _, test := range []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "message read", method: http.MethodGet, path: "/v1/threads/not-a-number/messages"},
+		{name: "message write", method: http.MethodPost, path: "/v1/threads/not-a-number/messages", body: `{"name":"alice","role":"user","content":"hello"}`},
+		{name: "reaction read", method: http.MethodGet, path: "/v1/threads/not-a-number/reactions"},
+		{name: "event write", method: http.MethodPost, path: "/v1/threads/not-a-number/events", body: `{"events":[{"type":"message","name":"alice","author_type":"human","role":"user","content":"hello"}]}`},
+		{name: "sequence reaction", method: http.MethodPost, path: "/v1/threads/not-a-number/messages/1/reactions", body: `{"emoji":"+1","name":"alice"}`},
+		{name: "zero thread", method: http.MethodPost, path: "/v1/threads/0/events", body: `{"events":[{"type":"message","name":"alice","author_type":"human","role":"user","content":"hello"}]}`},
+		{name: "legacy reaction", method: http.MethodPost, path: "/v1/messages/not-a-number/reactions", body: `{"emoji":"+1","name":"alice"}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rec := serveRequest(t, h, test.method, test.path, test.body)
+			assertErrorEnvelope(t, rec, http.StatusBadRequest, "BAD_JSONL")
+		})
+	}
+}
+
+func TestLiveBatchIgnoresSerializedSequencesAndUsesDestinationReferences(t *testing.T) {
+	s, h, threadID := newTestHandlerWithThread(t)
+	existingSeq, err := s.AppendMessage(threadID, "alice", "human", "user", "existing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	existingID, err := s.MessageIDBySeq(threadID, existingSeq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := `{"events":[{"type":"message","seq":1,"name":"reviewer","author_type":"human","role":"assistant","content":"new live message"},{"type":"message","seq":2,"parent_seq":1,"name":"reviewer","author_type":"human","role":"assistant","content":"live reply"},{"type":"reaction","seq":30,"message_seq":1,"name":"alice","author_type":"human","emoji":"👍"}],"import":false}`
+	rec := serveRequest(t, h, http.MethodPost, fmt.Sprintf("/v1/threads/%d/events", threadID), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body %s", rec.Code, rec.Body.String())
+	}
+	var results []store.AppendResult
+	decodeResponse(t, rec, &results)
+	if len(results) != 3 {
+		t.Fatalf("results = %+v", results)
+	}
+	for i, result := range results {
+		if result.SourceSeq != 0 {
+			t.Fatalf("result %d source sequence = %d, want 0", i, result.SourceSeq)
+		}
+	}
+	if results[0].Seq != 2 || results[1].Seq != 3 || results[2].MessageID != existingID {
+		t.Fatalf("results = %+v, want destination sequences 2 and 3 and existing message id %d", results, existingID)
+	}
+
+	messages, err := s.ListMessages(threadID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 3 || messages[1].ParentID.Valid || messages[2].ParentIDValue() != existingID || !messages[2].ParentSeq.Valid || messages[2].ParentSeq.Int64 != existingSeq {
+		t.Fatalf("messages = %+v, want only the reply to reference existing sequence %d", messages, existingSeq)
+	}
+	reactions, err := s.ListReactions(threadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reactions) != 1 || reactions[0].MessageID != existingID || reactions[0].MessageSeq != existingSeq {
+		t.Fatalf("reactions = %+v, want existing sequence %d", reactions, existingSeq)
+	}
+}
+
+func TestBatchEventsRejectBodyLargerThanOneMebibyte(t *testing.T) {
+	s, h, threadID := newTestHandlerWithThread(t)
+	body := `{"events":[{"type":"message","name":"alice","author_type":"human","role":"user","content":"` + strings.Repeat("x", (1<<20)+1) + `"}]}`
+	rec := serveRequest(t, h, http.MethodPost, fmt.Sprintf("/v1/threads/%d/events", threadID), body)
+	assertErrorEnvelope(t, rec, http.StatusBadRequest, "BAD_JSONL")
+	messages, err := s.ListMessages(threadID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 0 {
+		t.Fatalf("oversized body created %d messages", len(messages))
+	}
+}
+
+func TestBatchEventsRejectTrailingJSON(t *testing.T) {
+	s, h, threadID := newTestHandlerWithThread(t)
+	body := `{"events":[{"type":"message","name":"alice","author_type":"human","role":"user","content":"hello"}]} {"extra":true}`
+	rec := serveRequest(t, h, http.MethodPost, fmt.Sprintf("/v1/threads/%d/events", threadID), body)
+	assertErrorEnvelope(t, rec, http.StatusBadRequest, "BAD_JSONL")
+	messages, err := s.ListMessages(threadID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 0 {
+		t.Fatalf("trailing JSON created %d messages", len(messages))
+	}
+}
+
+func TestLegacyReactionStoreFailureUsesDaemonError(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	channelID, err := s.CreateChannel("test", "/repo", "", "", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	threadID, err := s.CreateThread(channelID, "thread")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AppendMessage(threadID, "alice", "human", "user", "target"); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := s.ListMessages(threadID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewHandler(s)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := serveRequest(t, h, http.MethodPost, fmt.Sprintf("/v1/messages/%d/reactions", messages[0].ID), `{"emoji":"+1","name":"alice"}`)
+	assertErrorEnvelope(t, rec, http.StatusInternalServerError, "DAEMON_ERROR")
+}
+
+func TestLegacyReactionValidationAndConflictRemainClientErrors(t *testing.T) {
+	s, h, threadID := newTestHandlerWithThread(t)
+	seq, err := s.AppendMessage(threadID, "alice", "human", "user", "target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageID, err := s.MessageIDBySeq(threadID, seq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := fmt.Sprintf("/v1/messages/%d/reactions", messageID)
+
+	invalid := serveRequest(t, h, http.MethodPost, path, `{"emoji":" ","name":"alice"}`)
+	assertErrorEnvelope(t, invalid, http.StatusBadRequest, "BAD_JSONL")
+	first := serveRequest(t, h, http.MethodPost, path, `{"emoji":"+1","name":"alice"}`)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first status = %d body %s", first.Code, first.Body.String())
+	}
+	conflict := serveRequest(t, h, http.MethodPost, path, `{"emoji":"+1","name":"alice"}`)
+	assertErrorEnvelope(t, conflict, http.StatusConflict, "BAD_JSONL")
+}
+
 func newTestHandlerWithThread(t *testing.T) (*store.Store, http.Handler, int64) {
 	t.Helper()
 	s, err := store.Open(":memory:")

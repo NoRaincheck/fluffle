@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -110,12 +111,21 @@ func liveAuthorType(r *http.Request) string {
 	return "human"
 }
 
+func parsePositiveRouteID(value string) (int64, bool) {
+	id, err := strconv.ParseInt(value, 10, 64)
+	return id, err == nil && id > 0
+}
+
 func listThreadMessages(s *store.Store, threadID int64, w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeErr(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
 		return
 	}
-	query := r.URL.Query()
+	query, parseErr := url.ParseQuery(r.URL.RawQuery)
+	if parseErr != nil {
+		writeErr(w, http.StatusBadRequest, "BAD_JSONL", parseErr.Error())
+		return
+	}
 	afterValues, hasAfter := query["after_seq"]
 	_, hasLast := query["last"]
 	if hasAfter && hasLast {
@@ -305,9 +315,13 @@ func appendThreadEvents(s *store.Store, threadID int64, w http.ResponseWriter, r
 				authorType = "human"
 			}
 		}
+		sourceSeq := int64(0)
+		if body.Import {
+			sourceSeq = line.Seq
+		}
 		events[i] = store.AppendEvent{
 			Type:       line.Type,
-			SourceSeq:  line.Seq,
+			SourceSeq:  sourceSeq,
 			ParentSeq:  line.ParentSeq,
 			MessageSeq: line.MessageSeq,
 			Name:       line.Name,
@@ -477,7 +491,17 @@ func NewHandler(s *store.Store) http.Handler {
 			writeErr(w, http.StatusNotFound, "THREAD_NOT_FOUND", "unknown route")
 			return
 		}
-		threadID, _ := strconv.ParseInt(parts[0], 10, 64)
+		knownRoute := len(parts) == 2 && (parts[1] == "messages" || parts[1] == "reactions" || parts[1] == "events")
+		knownRoute = knownRoute || (len(parts) == 4 && parts[1] == "messages" && parts[3] == "reactions")
+		if !knownRoute {
+			writeErr(w, http.StatusNotFound, "THREAD_NOT_FOUND", "unknown route")
+			return
+		}
+		threadID, valid := parsePositiveRouteID(parts[0])
+		if !valid {
+			writeErr(w, http.StatusBadRequest, "BAD_JSONL", "thread id must be a positive integer")
+			return
+		}
 		switch {
 		case len(parts) == 2 && parts[1] == "messages":
 			switch r.Method {
@@ -510,7 +534,11 @@ func NewHandler(s *store.Store) http.Handler {
 			writeErr(w, 404, "THREAD_NOT_FOUND", "unknown route")
 			return
 		}
-		id, _ := strconv.ParseInt(parts[0], 10, 64)
+		id, valid := parsePositiveRouteID(parts[0])
+		if !valid {
+			writeErr(w, http.StatusBadRequest, "BAD_JSONL", "message id must be a positive integer")
+			return
+		}
 		var body struct {
 			Emoji, Name, AgentID string
 			AgentIDSnake         string `json:"agent_id"`
@@ -530,11 +558,16 @@ func NewHandler(s *store.Store) http.Handler {
 		if name == "" {
 			name = "unknown"
 		}
-		if err := s.AddReaction(id, body.Emoji, name, authorType); err == store.ErrConflict {
-			writeErr(w, 409, "BAD_JSONL", "duplicate reaction")
+		if strings.TrimSpace(body.Emoji) == "" || strings.TrimSpace(name) == "" {
+			writeErr(w, http.StatusBadRequest, "BAD_JSONL", "emoji and name required")
 			return
-		} else if err != nil {
-			writeErr(w, 400, "BAD_JSONL", err.Error())
+		}
+		if err := s.AddReaction(id, body.Emoji, name, authorType); err != nil {
+			if errors.Is(err, store.ErrConflict) {
+				writeErr(w, http.StatusConflict, "BAD_JSONL", "duplicate reaction")
+			} else {
+				writeErr(w, http.StatusInternalServerError, "DAEMON_ERROR", err.Error())
+			}
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
