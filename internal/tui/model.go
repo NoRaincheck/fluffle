@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -280,9 +281,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.compose.width = max(30, msg.Width-4)
+		m.compose.width = max(30, msg.Width*80/100)
 		m.compose.height = 4
-		m.filter.width = max(30, msg.Width-4)
+		m.filter.width = max(30, msg.Width*80/100)
 		m.filter.height = 4
 		if msg.Width >= 100 && !m.preview {
 			m.preview = true
@@ -822,42 +823,19 @@ func (m model) View() string {
 		return ""
 	}
 	if m.filter.IsActive() {
-		contentW := m.width - 2
-		if contentW < 20 {
-			contentW = 20
-		}
-		contentH := m.height - 6
-		if contentH < 5 {
-			contentH = 5
-		}
-		inner := m.renderListWithWidth(contentW, contentH)
-		bg := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(treeBorder).Render(inner)
+		base := m.baseView()
 		filterView := m.filter.View()
-		content := lipgloss.JoinVertical(lipgloss.Left, bg, "", center(filterView, m.width))
-		return content
+		return placeOverlay(base, filterView, m.width, m.height)
 	}
 	if m.compose.IsActive() {
-		contentW := m.width - 2
-		if contentW < 20 {
-			contentW = 20
-		}
-		contentH := m.height - 6
-		if contentH < 5 {
-			contentH = 5
-		}
-		var inner string
-		if m.view == viewInboxDetail {
-			inner = m.renderInboxDetail(contentW, contentH)
-		} else if m.compose.state.mode == composeModeReply && m.compose.state.threadID != 0 {
-			inner = m.renderReplyBackground(contentW, contentH)
-		} else {
-			inner = m.renderListWithWidth(contentW, contentH)
-		}
-		bg := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(treeBorder).Render(inner)
+		base := m.baseView()
 		composeView := m.compose.View()
-		content := lipgloss.JoinVertical(lipgloss.Left, bg, "", center(composeView, m.width))
-		return content
+		return placeOverlay(base, composeView, m.width, m.height)
 	}
+	return m.baseView()
+}
+
+func (m model) baseView() string {
 	if m.view == viewInboxDetail {
 		contentW := m.width - 2
 		if contentW < 20 {
@@ -921,6 +899,91 @@ func (m model) View() string {
 	footer := lipgloss.JoinVertical(lipgloss.Left, helpStyle, status)
 	full := lipgloss.JoinVertical(lipgloss.Left, header, content, footer)
 	return full
+}
+
+var ansiRegexp = regexp.MustCompile("\x1b\\[[0-9;]*m")
+
+func stripAnsi(s string) string {
+	return ansiRegexp.ReplaceAllString(s, "")
+}
+
+func placeOverlay(base, overlay string, width, height int) string {
+	if width <= 0 {
+		width = lipgloss.Width(base)
+	}
+	if height <= 0 {
+		height = lipgloss.Height(base)
+	}
+	overlayW := lipgloss.Width(overlay)
+	overlayH := lipgloss.Height(overlay)
+	if overlayW >= width {
+		overlayW = width - 2
+	}
+	if overlayH >= height {
+		overlayH = height - 2
+	}
+	x0 := (width - overlayW) / 2
+	if x0 < 0 {
+		x0 = 0
+	}
+	baseLines := strings.Split(base, "\n")
+	y0 := (len(baseLines) - overlayH) / 2
+	if y0 < 0 {
+		y0 = 0
+	}
+	if height > len(baseLines) {
+		alt := (height - overlayH) / 2
+		if alt < y0 {
+			y0 = alt
+		}
+		if y0 < 0 {
+			y0 = 0
+		}
+	}
+	overlayLines := strings.Split(overlay, "\n")
+	innerWidth := width - 2
+	innerX0 := (innerWidth - overlayW) / 2
+	if innerX0 < 0 {
+		innerX0 = 0
+	}
+	for i, ol := range overlayLines {
+		y := y0 + i
+		if y < 0 || y >= len(baseLines) {
+			continue
+		}
+		stripped := stripAnsi(baseLines[y])
+		isBoxLine := false
+		var leftChar, rightChar string
+		if len(stripped) > 0 {
+			trimmed := strings.TrimSpace(stripped)
+			if strings.HasPrefix(trimmed, "╭") || strings.HasPrefix(trimmed, "│") || strings.HasPrefix(trimmed, "╰") {
+				if lipgloss.Width(baseLines[y]) == width {
+					isBoxLine = true
+					runes := []rune(trimmed)
+					if len(runes) > 0 {
+						leftChar = string(runes[0])
+						rightChar = string(runes[len(runes)-1])
+					}
+				}
+			}
+		}
+		if isBoxLine && y > 0 && y < len(baseLines)-3 {
+			if leftChar == "" {
+				leftChar = "│"
+			}
+			if rightChar == "" {
+				rightChar = "│"
+			}
+			leftBorder := lipgloss.NewStyle().Foreground(treeBorder).Render(leftChar)
+			rightBorder := lipgloss.NewStyle().Foreground(treeBorder).Render(rightChar)
+			line := leftBorder + strings.Repeat(" ", innerX0) + ol + strings.Repeat(" ", innerWidth-innerX0-overlayW) + rightBorder
+			baseLines[y] = line
+		} else {
+			line := strings.Repeat(" ", x0) + ol
+			baseLines[y] = line
+		}
+	}
+	return strings.Join(baseLines, "\n")
 }
 
 func (m model) renderReplyBackground(w, h int) string {
