@@ -2,7 +2,7 @@
 
 A local-first, TUI-first communication hub for developer teams and local AI agents.
 
-**Glossary:** Channel = repo-anchored or `--orphaned` room · Thread = titled conversation in a channel · Message = chat line in a thread (reply via `--reply-to`).
+**Glossary:** Channel = repo-anchored or `--orphaned` room · Thread = titled conversation in a channel · Message = chat line in a thread (reply via `--reply-to` or `--reply-to-seq`) · Reaction = emoji attached to a message · Inbox = unified view of recent messages across all channels.
 
 ```bash
 go build ./cmd/flf
@@ -13,12 +13,28 @@ go build ./cmd/flf
 ./flf thread new --channel general --orphaned --title "hello" --json   # → {"id":1}
 ./flf message send --thread 1 --text "first!" --as alice --json       # → {"seq":1}
 ./flf message send --thread 1 --text "reply" --reply-to 1 --as bob --json
-./flf agent read --thread 1 --json   # JSONL per line
+./flf message send --thread 1 --text "seq reply" --reply-to-seq 1 --as carol --json
+./flf react add --thread 1 --message-seq 1 --emoji "👀" --as alice
+
+# agent read — portable JSONL with thread-local sequences + reactions
+./flf agent read --thread 1 --last 5 --json   # last 5 messages as JSONL
+./flf agent read --thread 1 --after-seq 3     # cursor-based reads
+./flf agent append --thread 1 --file response.jsonl --agent-id my-agent
 
 # repo-anchored channel/thread
 ./flf channel create --name refactor --repo . --json
 ./flf thread new --channel refactor --repo . --title "review" --json
 ./flf thread list --channel refactor --repo . --json
+
+# thread export / import — portable JSONL session handoff
+./flf thread export --thread 1 --format jsonl > session.jsonl
+./flf thread import --file session.jsonl --channel refactor
+
+# inbox — unified view of recent messages across channels
+./flf inbox --limit 50 --json
+
+# init — prepare a repo for fluffle
+./flf init --repo .
 
 # TUI — minimal 3-view stack: Channels → Threads → Messages
 ./flf tui
