@@ -802,14 +802,21 @@ func ensureImportChannel(base, name, repoPath string, orphaned bool) (int64, int
 func threadImportCmd(args []string) int {
 	fs := newFlagSet("thread import")
 	file := fs.String("file", "", "JSONL file to import")
+	threadID := fs.Int64("thread", 0, "existing destination thread id")
 	channel := fs.String("channel", "", "channel name")
 	repoPath := fs.String("repo", "", "repo path")
 	orphaned := fs.Bool("orphaned", false, "import into an orphaned channel")
 	if err := fs.Parse(args); err != nil {
 		return fail("BAD_ARGS", err.Error())
 	}
-	if *file == "" || *channel == "" || (*repoPath == "" && !*orphaned) {
-		return fail("BAD_ARGS", "usage: flf thread import --file F --channel NAME (--repo PATH | --orphaned)")
+	if flagWasSet(fs, "thread") && *threadID <= 0 {
+		return fail("BAD_ARGS", "thread must be a positive integer")
+	}
+	if *file == "" || (*threadID == 0 && (*channel == "" || (*repoPath == "" && !*orphaned))) {
+		return fail("BAD_ARGS", "usage: flf thread import --file F (--thread ID | --channel NAME (--repo PATH | --orphaned))")
+	}
+	if *threadID > 0 && (*channel != "" || *repoPath != "" || *orphaned) {
+		return fail("BAD_ARGS", "thread cannot be combined with channel import options")
 	}
 	lines, code := parseJSONLFile(*file)
 	if code != 0 {
@@ -818,6 +825,13 @@ func threadImportCmd(args []string) int {
 	base, err := client.EnsureDaemon()
 	if err != nil {
 		return fail("DAEMON_DOWN", err.Error())
+	}
+	if *threadID > 0 {
+		if code := postJSONLBatch(base, *threadID, lines, "", true); code != 0 {
+			return code
+		}
+		fmt.Printf("thread %d\n", *threadID)
+		return 0
 	}
 	chID, code := ensureImportChannel(base, *channel, *repoPath, *orphaned)
 	if code != 0 {
@@ -840,7 +854,7 @@ func threadImportCmd(args []string) int {
 
 func messageCmd(args []string) int {
 	if len(args) == 0 || args[0] != "send" {
-		return fail("BAD_ARGS", "usage: flf message send --thread ID (--text T | --text -) [--reply-to ID | --reply-to-seq N] [--as NAME] [--agent-id ID]")
+		return fail("BAD_ARGS", "usage: flf message send --thread ID (--text T | --text -) [--reply-to ID | --reply-to-seq N] [--as NAME] [--agent-id ID] [--created-at TS] [--json]")
 	}
 	return messageSendCmd(args[1:])
 }

@@ -155,9 +155,9 @@ flf channel create --name N (--repo PATH | --orphaned)
 flf thread list --channel NAME (--repo PATH | --orphaned)
 flf thread new --channel NAME (--repo PATH | --orphaned) --title T
 flf thread export --thread ID --format jsonl
-flf thread import --file F --channel NAME (--repo PATH | --orphaned)
+flf thread import --file F (--thread ID | --channel NAME (--repo PATH | --orphaned))
 
-flf message send --thread ID (--text T | --text -) [--reply-to ID | --reply-to-seq N] [--as NAME] [--agent-id ID]
+flf message send --thread ID (--text T | --text -) [--reply-to ID | --reply-to-seq N] [--as NAME] [--agent-id ID] [--created-at RFC3339] [--json]
 flf react add (--message ID | --thread ID --message-seq N) --emoji E [--as NAME] [--agent-id ID]
 
 flf agent read --thread ID [--last N | --after-seq N] [--json] [--agent-id ID]
@@ -190,11 +190,11 @@ Fetches the thread's messages and reactions through the daemon, projects them to
 
 ### `thread import`
 
-Reads and parses the complete JSONL file before starting daemon work. Resolves or creates the requested repo-scoped channel, creates a new thread titled `import <basename>`, and sends one `import=true` event batch. Source message sequences are remapped to the destination thread; `parent_seq` and `message_seq` are resolved through that map. The event batch is atomic.
+Reads and parses the complete JSONL file before starting daemon work. With `--channel` (and `--repo` or `--orphaned`), it resolves or creates that channel and creates a new thread titled `import <basename>`. With `--thread ID`, it appends the batch to that explicit existing thread without creating a channel or thread. In both modes it sends one `import=true` event batch. Source message sequences are remapped to the destination thread; `parent_seq` and `message_seq` are resolved through that map. The event batch is atomic.
 
 ### `agent read`
 
-Fetches messages using the selected `last` or exclusive `after_seq` cursor and emits portable JSONL. Message lines include `seq` and `parent_seq`; reaction lines include `message_seq`. A cursor response contains only messages newer than the cursor and reactions targeting those messages. An empty result is valid.
+Fetches messages using the selected `last` or exclusive `after_seq` cursor. With `--json`, it emits portable JSONL: message lines include `type`, `seq`, `parent_seq`, `role`, `name`, `author_type`, `content`, and `timestamp`, while reaction lines include `type`, `message_seq`, `name`, `author_type`, `emoji`, and `timestamp`. Without `--json`, it retains the existing indented JSON array of raw message records. A cursor response contains only messages newer than the cursor and, in portable mode, reactions targeting those messages. An empty result is valid.
 
 ### `agent append`
 
@@ -202,7 +202,7 @@ Reads the complete file or stdin before daemon startup, parses every JSONL line,
 
 ### `message send`
 
-With `--text -`, reads the complete stdin value before contacting the daemon. `--reply-to-seq N` targets the parent by thread-local sequence; it is mutually exclusive with legacy `--reply-to ID`. Prints `seq <n>` or the requested JSON result.
+With `--text -`, reads the complete stdin value before contacting the daemon. `--reply-to-seq N` targets the parent by thread-local sequence; it is mutually exclusive with legacy `--reply-to ID`. `--created-at RFC3339` preserves an explicitly supplied message timestamp. `--json` returns the sequence and target metadata as JSON; without it, the command prints `seq <n>`.
 
 ### `react add`
 
