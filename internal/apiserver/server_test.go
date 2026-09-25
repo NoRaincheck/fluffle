@@ -79,6 +79,7 @@ func TestListThreadsEmptyReturnsArray(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("want 200 got %d", rec.Code)
 	}
+	assertJSONContentType(t, rec)
 	body := strings.TrimSpace(rec.Body.String())
 	if body != "[]" {
 		t.Fatalf("want [] got %q", body)
@@ -97,6 +98,7 @@ func TestListMessagesEmptyReturnsArray(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("want 200 got %d", rec.Code)
 	}
+	assertJSONContentType(t, rec)
 	body := strings.TrimSpace(rec.Body.String())
 	if body != "[]" {
 		t.Fatalf("want [] got %q", body)

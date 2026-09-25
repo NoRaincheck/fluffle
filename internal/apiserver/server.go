@@ -15,10 +15,14 @@ type errBody struct {
 	Message string `json:"message"`
 }
 
-func writeErr(w http.ResponseWriter, status int, code, msg string) {
+func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(errBody{Code: code, Message: msg})
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+func writeErr(w http.ResponseWriter, status int, code, msg string) {
+	writeJSON(w, status, errBody{Code: code, Message: msg})
 }
 
 func isAgent(r *http.Request) bool { return r.Header.Get("X-Fluffle-Agent") != "" }
@@ -40,9 +44,7 @@ func shutdownHandler(s *store.Store) http.HandlerFunc {
 			writeErr(w, 405, "METHOD_NOT_ALLOWED", "method not allowed")
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]string{"status": "shutting_down"})
+		writeJSON(w, http.StatusOK, map[string]string{"status": "shutting_down"})
 		shutdownMu.Lock()
 		fn := shutdownFn
 		shutdownMu.Unlock()
@@ -55,8 +57,7 @@ func shutdownHandler(s *store.Store) http.HandlerFunc {
 func NewHandler(s *store.Store) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"ok":true}`))
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	})
 	mux.HandleFunc("/v1/inbox", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -74,8 +75,7 @@ func NewHandler(s *store.Store) http.Handler {
 			writeErr(w, 500, "DAEMON_ERROR", err.Error())
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(msgs)
+		writeJSON(w, http.StatusOK, msgs)
 	})
 	mux.HandleFunc("/v1/channels", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -84,14 +84,13 @@ func NewHandler(s *store.Store) http.Handler {
 			inc := r.URL.Query().Get("include-orphaned") == "1"
 			list, err := s.ListChannels(repo, inc)
 			if err != nil {
-				writeErr(w, 500, "DAEMON_DOWN", err.Error())
+				writeErr(w, 500, "DAEMON_ERROR", err.Error())
 				return
 			}
 			if list == nil {
 				list = []store.Channel{}
 			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(list)
+			writeJSON(w, http.StatusOK, list)
 		case "POST":
 			if isAgent(r) {
 				writeErr(w, 403, "AGENT_FORBIDDEN", "agents cannot create channels")
@@ -114,9 +113,9 @@ func NewHandler(s *store.Store) http.Handler {
 				writeErr(w, 400, "NOT_A_GIT_REPO", err.Error())
 				return
 			}
-			json.NewEncoder(w).Encode(map[string]any{"id": id})
+			writeJSON(w, http.StatusOK, map[string]any{"id": id})
 		default:
-			writeErr(w, 405, "DAEMON_DOWN", "method not allowed")
+			writeErr(w, 405, "METHOD_NOT_ALLOWED", "method not allowed")
 		}
 	})
 	mux.HandleFunc("/v1/channels/", func(w http.ResponseWriter, r *http.Request) {
@@ -131,14 +130,13 @@ func NewHandler(s *store.Store) http.Handler {
 		case "GET":
 			list, err := s.ListThreads(id)
 			if err != nil {
-				writeErr(w, 500, "DAEMON_DOWN", err.Error())
+				writeErr(w, 500, "DAEMON_ERROR", err.Error())
 				return
 			}
 			if list == nil {
 				list = []store.Thread{}
 			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(list)
+			writeJSON(w, http.StatusOK, list)
 		case "POST":
 			if isAgent(r) {
 				writeErr(w, 403, "AGENT_FORBIDDEN", "agents cannot create threads")
@@ -160,9 +158,9 @@ func NewHandler(s *store.Store) http.Handler {
 				writeErr(w, 400, "BAD_JSONL", err.Error())
 				return
 			}
-			json.NewEncoder(w).Encode(map[string]any{"id": tid})
+			writeJSON(w, http.StatusOK, map[string]any{"id": tid})
 		default:
-			writeErr(w, 405, "DAEMON_DOWN", "method not allowed")
+			writeErr(w, 405, "METHOD_NOT_ALLOWED", "method not allowed")
 		}
 	})
 	mux.HandleFunc("/v1/threads/", func(w http.ResponseWriter, r *http.Request) {
@@ -178,14 +176,13 @@ func NewHandler(s *store.Store) http.Handler {
 			last, _ := strconv.Atoi(r.URL.Query().Get("last"))
 			msgs, err := s.ListMessages(id, last)
 			if err != nil {
-				writeErr(w, 500, "DAEMON_DOWN", err.Error())
+				writeErr(w, 500, "DAEMON_ERROR", err.Error())
 				return
 			}
 			if msgs == nil {
 				msgs = []store.Message{}
 			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(msgs)
+			writeJSON(w, http.StatusOK, msgs)
 		case "POST":
 			var raw map[string]json.RawMessage
 			if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
@@ -240,9 +237,9 @@ func NewHandler(s *store.Store) http.Handler {
 				writeErr(w, 400, "BAD_JSONL", err.Error())
 				return
 			}
-			json.NewEncoder(w).Encode(map[string]any{"seq": seq})
+			writeJSON(w, http.StatusOK, map[string]any{"seq": seq})
 		default:
-			writeErr(w, 405, "DAEMON_DOWN", "method not allowed")
+			writeErr(w, 405, "METHOD_NOT_ALLOWED", "method not allowed")
 		}
 	})
 	mux.HandleFunc("/v1/messages/", func(w http.ResponseWriter, r *http.Request) {
@@ -278,7 +275,7 @@ func NewHandler(s *store.Store) http.Handler {
 			writeErr(w, 400, "BAD_JSONL", err.Error())
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
 	mux.HandleFunc("/api/shutdown", shutdownHandler(s))
 	return mux
