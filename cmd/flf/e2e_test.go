@@ -491,7 +491,7 @@ func TestE2E_AgentRead(t *testing.T) {
 	out = runCLI(t, env, bin, "agent", "read", "--thread", strconv.FormatInt(th.ID, 10), "--json")
 	type Message struct {
 		Seq     int64  `json:"seq"`
-		Author  string `json:"author"`
+		Name    string `json:"name"`
 		Content string `json:"content"`
 	}
 	var msgs []Message
