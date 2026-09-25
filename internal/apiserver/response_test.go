@@ -123,6 +123,41 @@ func TestStoreFailuresUseDaemonErrorEnvelope(t *testing.T) {
 	}
 }
 
+func TestUnknownRouteUsesJSONErrorEnvelope(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	h := NewHandler(s)
+	rec := serveRequest(t, h, http.MethodGet, "/v1/unknown", "")
+	assertErrorEnvelope(t, rec, http.StatusNotFound, "CHANNEL_NOT_FOUND")
+}
+
+func TestMuxRedirectsUseJSONErrorEnvelope(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	h := NewHandler(s)
+	for _, test := range []struct {
+		path     string
+		location string
+	}{
+		{path: "/v1/threads", location: "/v1/threads/"},
+		{path: "/v1/messages", location: "/v1/messages/"},
+	} {
+		t.Run(test.path, func(t *testing.T) {
+			rec := serveRequest(t, h, http.MethodGet, test.path, "")
+			if got := rec.Header().Get("Location"); got != test.location {
+				t.Fatalf("location = %q want %q", got, test.location)
+			}
+			assertErrorEnvelope(t, rec, http.StatusTemporaryRedirect, "CHANNEL_NOT_FOUND")
+		})
+	}
+}
+
 func serveRequest(t *testing.T, h http.Handler, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, path, strings.NewReader(body))

@@ -54,6 +54,42 @@ func shutdownHandler(s *store.Store) http.HandlerFunc {
 	}
 }
 
+type jsonResponseWriter struct {
+	http.ResponseWriter
+	converted   bool
+	wroteHeader bool
+}
+
+func (w *jsonResponseWriter) WriteHeader(status int) {
+	if w.wroteHeader {
+		return
+	}
+	w.wroteHeader = true
+	if w.Header().Get("Content-Type") == "application/json" {
+		w.ResponseWriter.WriteHeader(status)
+		return
+	}
+	w.Header().Del("Content-Length")
+	writeErr(w.ResponseWriter, status, "CHANNEL_NOT_FOUND", "unknown route")
+	w.converted = true
+}
+
+func (w *jsonResponseWriter) Write(data []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	if w.converted {
+		return len(data), nil
+	}
+	return w.ResponseWriter.Write(data)
+}
+
+func jsonMuxHandler(mux *http.ServeMux) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mux.ServeHTTP(&jsonResponseWriter{ResponseWriter: w}, r)
+	})
+}
+
 func NewHandler(s *store.Store) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/health", func(w http.ResponseWriter, r *http.Request) {
@@ -278,5 +314,5 @@ func NewHandler(s *store.Store) http.Handler {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
 	mux.HandleFunc("/api/shutdown", shutdownHandler(s))
-	return mux
+	return jsonMuxHandler(mux)
 }
