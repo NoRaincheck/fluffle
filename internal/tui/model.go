@@ -1193,7 +1193,7 @@ func buildThreadOPlines(w int, op *store.Message) []string {
 		return []string{"  (loading…)"}
 	}
 	headerPlain := fmt.Sprintf("Original Post #%d · %s · %s", op.Seq, formatTime(op.CreatedAt), op.Name)
-	headerLine := threadOpHeaderStyle.Render(" " + truncate(headerPlain, max(0, w-2)) + " ")
+	headerLine := threadOpHeaderStyle.Render("  " + truncate(headerPlain, max(0, w-3)) + " ")
 	contentWidth := max(minContentWidth, w-4)
 	wrapped := wrapText(strings.ReplaceAll(op.Content, "\n", " "), contentWidth)
 	var lines []string
@@ -1205,6 +1205,7 @@ func buildThreadOPlines(w int, op *store.Message) []string {
 			lines = append(lines, chatMsgStyle.Render("  "+wl))
 		}
 	}
+	lines = append(lines, "")
 	return lines
 }
 
