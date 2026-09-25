@@ -650,11 +650,21 @@ func TestSequenceMessageSendPreservesDatabaseIDTarget(t *testing.T) {
 	defer server.Close()
 	useTestDaemon(t, server)
 
-	code, _, stderr := captureOutput(t, func() int {
-		return run([]string{"message", "send", "--thread", "7", "--reply-to", "9", "--text", "legacy"})
+	code, stdout, stderr := captureOutput(t, func() int {
+		return run([]string{"message", "send", "--thread", "7", "--reply-to", "9", "--text", "legacy", "--json"})
 	})
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0: %s", code, stderr)
+	}
+	var output map[string]any
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatal(err)
+	}
+	if output["parent_id"] != float64(9) {
+		t.Fatalf("output = %#v", output)
+	}
+	if _, exists := output["parent_seq"]; exists {
+		t.Fatalf("database ID output contains unknown parent sequence: %#v", output)
 	}
 	recorded := snapshotCLIRequests(&requests, &mu)
 	if len(recorded) != 2 {
@@ -957,5 +967,174 @@ func TestSequenceReactionPreservesDatabaseIDRoute(t *testing.T) {
 	recorded := snapshotCLIRequests(&requests, &mu)
 	if len(recorded) != 2 || recorded[1].Path != "/v1/messages/9/reactions" {
 		t.Fatalf("requests = %+v", recorded)
+	}
+}
+
+func TestAgentReadRejectsExplicitNegativeAfterSeq(t *testing.T) {
+	var requests []recordedCLIRequest
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		recordCLIRequest(&requests, &mu, r)
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/health" {
+			_, _ = w.Write([]byte(`{"ok":true}`))
+			return
+		}
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer server.Close()
+	useTestDaemon(t, server)
+
+	code, output := captureStderr(t, func() int {
+		return run([]string{"agent", "read", "--thread", "7", "--after-seq", "-1"})
+	})
+	if code != 1 {
+		t.Errorf("exit = %d, want 1", code)
+	}
+	if code == 1 {
+		message := assertCLIErrorEnvelope(t, output, "BAD_ARGS")
+		if !strings.Contains(message, "after-seq") {
+			t.Errorf("message = %q, want after-seq validation", message)
+		}
+	}
+	if recorded := snapshotCLIRequests(&requests, &mu); len(recorded) != 0 {
+		t.Fatalf("requests = %d, want none", len(recorded))
+	}
+}
+
+func TestSequenceMessageSendRejectsExplicitNegativeReplySeq(t *testing.T) {
+	var requests []recordedCLIRequest
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		recordCLIRequest(&requests, &mu, r)
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/health" {
+			_, _ = w.Write([]byte(`{"ok":true}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"seq":1}`))
+	}))
+	defer server.Close()
+	useTestDaemon(t, server)
+
+	code, output := captureStderr(t, func() int {
+		return run([]string{"message", "send", "--thread", "7", "--reply-to-seq", "-1", "--text", "legacy"})
+	})
+	if code != 1 {
+		t.Errorf("exit = %d, want 1", code)
+	}
+	if code == 1 {
+		message := assertCLIErrorEnvelope(t, output, "BAD_ARGS")
+		if !strings.Contains(message, "positive integer") {
+			t.Errorf("message = %q, want positive integer validation", message)
+		}
+	}
+	if recorded := snapshotCLIRequests(&requests, &mu); len(recorded) != 0 {
+		t.Fatalf("requests = %d, want none", len(recorded))
+	}
+}
+
+func TestSequenceReactionRejectsExplicitNegativeMessageSeq(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{
+			name: "sequence only",
+			args: []string{"react", "add", "--thread", "7", "--message-seq", "-1", "--emoji", "+1"},
+		},
+		{
+			name: "mixed with database ID",
+			args: []string{"react", "add", "--thread", "7", "--message", "9", "--message-seq", "-1", "--emoji", "+1"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var requests []recordedCLIRequest
+			var mu sync.Mutex
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				recordCLIRequest(&requests, &mu, r)
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Path == "/v1/health" {
+					_, _ = w.Write([]byte(`{"ok":true}`))
+					return
+				}
+				_, _ = w.Write([]byte(`{"ok":true}`))
+			}))
+			defer server.Close()
+			useTestDaemon(t, server)
+
+			code, output := captureStderr(t, func() int {
+				return run(tt.args)
+			})
+			if code != 1 {
+				t.Errorf("exit = %d, want 1", code)
+			}
+			if code == 1 {
+				message := assertCLIErrorEnvelope(t, output, "BAD_ARGS")
+				if !strings.Contains(message, "positive integer") {
+					t.Errorf("message = %q, want positive integer validation", message)
+				}
+			}
+			if recorded := snapshotCLIRequests(&requests, &mu); len(recorded) != 0 {
+				t.Fatalf("requests = %d, want none", len(recorded))
+			}
+		})
+	}
+}
+
+func TestAgentAppendRejectsInvalidBatchSuccessResponses(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "null", body: `null`},
+		{name: "object", body: `{}`},
+		{name: "null element", body: `[null]`},
+		{name: "empty object element", body: `[{}]`},
+		{name: "scalar element", body: `[1]`},
+		{name: "missing result field", body: `[{"SourceSeq":0,"Seq":1,"MessageID":9}]`},
+		{name: "wrong result field type", body: `[{"SourceSeq":"zero","Seq":1,"MessageID":9,"ReactionID":0}]`},
+		{name: "trailing object", body: `[] {}`},
+		{name: "trailing null", body: `[] null`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/v1/threads/7/events" {
+					t.Errorf("request = %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer server.Close()
+
+			code, output := captureStderr(t, func() int {
+				return postJSONLLines(server.URL, 7, []jsonl.Line{{Type: "message", Name: "alice", Role: "user", Content: "hello"}}, "")
+			})
+			if code != 2 {
+				t.Errorf("exit = %d, want 2", code)
+			}
+			if code == 2 {
+				assertCLIErrorEnvelope(t, output, "DELIVERY_UNKNOWN")
+			}
+		})
+	}
+}
+
+func TestAgentAppendAcceptsCompleteBatchResults(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"SourceSeq":0,"Seq":1,"MessageID":9,"ReactionID":0}]`))
+	}))
+	defer server.Close()
+
+	code, output := captureStderr(t, func() int {
+		return postJSONLLines(server.URL, 7, []jsonl.Line{{Type: "message", Name: "alice", Role: "user", Content: "hello"}}, "")
+	})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0: %s", code, output)
 	}
 }

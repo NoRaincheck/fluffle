@@ -101,6 +101,25 @@ func apiGet(u, agentID string, out any) int {
 	return 0
 }
 
+func decodeStrictJSON(r io.Reader, out any) error {
+	decoder := json.NewDecoder(r)
+	var raw json.RawMessage
+	if err := decoder.Decode(&raw); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("multiple JSON values")
+		}
+		return err
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return fmt.Errorf("null JSON response")
+	}
+	return json.Unmarshal(raw, out)
+}
+
 func apiPost(u, agentID string, payload any, out any) int {
 	raw, err := json.Marshal(payload)
 	if err != nil {
@@ -123,7 +142,7 @@ func apiPost(u, agentID string, payload any, out any) int {
 		return printAPIError(resp)
 	}
 	if out != nil {
-		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		if err := decodeStrictJSON(resp.Body, out); err != nil {
 			return fail("DELIVERY_UNKNOWN", fmt.Sprintf("read the thread before retrying: %v", err))
 		}
 	}
@@ -134,6 +153,16 @@ func newFlagSet(name string) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	return fs
+}
+
+func flagWasSet(fs *flag.FlagSet, name string) bool {
+	set := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			set = true
+		}
+	})
+	return set
 }
 
 func initCmd(args []string) int {
@@ -579,13 +608,48 @@ func postJSONLLines(base string, threadID int64, lines []jsonl.Line, agentID str
 	return postJSONLBatch(base, threadID, lines, agentID, false)
 }
 
+type batchResults []store.AppendResult
+
+func (results *batchResults) UnmarshalJSON(data []byte) error {
+	var rawResults []json.RawMessage
+	if err := json.Unmarshal(data, &rawResults); err != nil {
+		return err
+	}
+	if rawResults == nil {
+		return fmt.Errorf("batch results must be an array")
+	}
+	parsed := make([]store.AppendResult, 0, len(rawResults))
+	for i, raw := range rawResults {
+		var wire struct {
+			SourceSeq  *int64 `json:"SourceSeq"`
+			Seq        *int64 `json:"Seq"`
+			MessageID  *int64 `json:"MessageID"`
+			ReactionID *int64 `json:"ReactionID"`
+		}
+		if err := json.Unmarshal(raw, &wire); err != nil {
+			return fmt.Errorf("batch result %d: %w", i, err)
+		}
+		if wire.SourceSeq == nil || wire.Seq == nil || wire.MessageID == nil || wire.ReactionID == nil {
+			return fmt.Errorf("batch result %d missing required field", i)
+		}
+		parsed = append(parsed, store.AppendResult{
+			SourceSeq:  *wire.SourceSeq,
+			Seq:        *wire.Seq,
+			MessageID:  *wire.MessageID,
+			ReactionID: *wire.ReactionID,
+		})
+	}
+	*results = parsed
+	return nil
+}
+
 func postJSONLBatch(base string, threadID int64, lines []jsonl.Line, agentID string, importEvents bool) int {
 	u := base + "/v1/threads/" + strconv.FormatInt(threadID, 10) + "/events"
 	body := struct {
 		Events []jsonl.Line `json:"events"`
 		Import bool         `json:"import"`
 	}{Events: lines, Import: importEvents}
-	var out []store.AppendResult
+	var out batchResults
 	return apiPost(u, agentID, body, &out)
 }
 
@@ -616,7 +680,7 @@ func agentReadCmd(args []string) int {
 	if *threadID == 0 {
 		return fail("BAD_ARGS", "usage: flf agent read --thread ID [--last N | --after-seq N] [--agent-id ID] [--json]")
 	}
-	if *afterSeq < -1 {
+	if flagWasSet(fs, "after-seq") && *afterSeq < 0 {
 		return fail("BAD_ARGS", "after-seq must be a non-negative integer")
 	}
 	if *afterSeq >= 0 && *last > 0 {
@@ -800,7 +864,7 @@ func messageSendCmd(args []string) int {
 	if *threadID == 0 {
 		return fail("BAD_ARGS", "usage: flf message send --thread ID (--text T | --text -) [--reply-to ID | --reply-to-seq N] [--as NAME] [--agent-id ID] [--created-at TS] [--json]")
 	}
-	if *replyToSeq < -1 || *replyToSeq == 0 {
+	if flagWasSet(fs, "reply-to-seq") && *replyToSeq <= 0 {
 		return fail("BAD_ARGS", "reply-to-seq must be a positive integer")
 	}
 	if *replyTo != 0 && *replyToSeq > 0 {
@@ -839,13 +903,13 @@ func messageSendCmd(args []string) int {
 		return code
 	}
 	if *jsonOut {
-		parentSeq := *replyToSeq
-		if parentSeq < 0 {
-			parentSeq = 0
+		output := map[string]any{"seq": out.Seq, "thread_id": *threadID, "name": name, "content": textValue, "parent_id": *replyTo}
+		if *replyToSeq > 0 {
+			output["parent_seq"] = *replyToSeq
 		}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		enc.Encode(map[string]any{"seq": out.Seq, "thread_id": *threadID, "name": name, "content": textValue, "parent_id": *replyTo, "parent_seq": parentSeq})
+		enc.Encode(output)
 		return 0
 	}
 	fmt.Printf("seq %d\n", out.Seq)
@@ -870,7 +934,7 @@ func reactAddCmd(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return fail("BAD_ARGS", err.Error())
 	}
-	if *messageSeq < -1 || *messageSeq == 0 {
+	if flagWasSet(fs, "message-seq") && *messageSeq <= 0 {
 		return fail("BAD_ARGS", "message-seq must be a positive integer")
 	}
 	if *messageSeq > 0 && *threadID == 0 {

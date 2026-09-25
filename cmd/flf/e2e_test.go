@@ -1061,6 +1061,7 @@ func TestE2E_AgentPortableLoop(t *testing.T) {
 		ParentSeq  int64  `json:"parent_seq"`
 		MessageSeq int64  `json:"message_seq"`
 		Name       string `json:"name"`
+		AuthorType string `json:"author_type"`
 		Content    string `json:"content"`
 		Emoji      string `json:"emoji"`
 	}
@@ -1140,6 +1141,17 @@ func TestE2E_AgentPortableLoop(t *testing.T) {
 	}
 	if !foundRoot || !foundReply {
 		t.Fatalf("inbox = %+v", inbox)
+	}
+
+	appendInput := "{\"type\":\"message\",\"name\":\"portable-agent\",\"author_type\":\"agent\",\"role\":\"assistant\",\"content\":\"portable appended\"}\n"
+	stdout, stderr := runCLIStdin(t, env, bin, appendInput, "agent", "append", "--thread", threadID, "--file", "-", "--agent-id", "portable-agent")
+	if stdout != "" || stderr != "" {
+		t.Fatalf("agent append output = %q, stderr = %q", stdout, stderr)
+	}
+	out, _ = runCLIStdin(t, env, bin, "", "agent", "read", "--thread", threadID, "--after-seq", strconv.FormatInt(reply.Seq, 10), "--json")
+	events = readEvents(out)
+	if len(events) != 1 || events[0].Type != "message" || events[0].Seq <= reply.Seq || events[0].Name != "portable-agent" || events[0].AuthorType != "agent" || events[0].Content != "portable appended" {
+		t.Fatalf("appended events = %+v", events)
 	}
 
 	runCLIStdin(t, env, bin, "", "daemon", "stop")
