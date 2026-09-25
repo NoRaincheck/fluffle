@@ -173,6 +173,20 @@ func runCLI(t *testing.T, env []string, bin string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
+func runCLIStdin(t *testing.T, env []string, bin, input string, args ...string) (string, string) {
+	t.Helper()
+	cmd := exec.Command(bin, args...)
+	cmd.Env = append(os.Environ(), env...)
+	cmd.Stdin = strings.NewReader(input)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("flf %v: %v\n%s", args, err, stderr.String())
+	}
+	return strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String())
+}
+
 // readDaemonJSON reads and parses daemon.json.
 func readDaemonJSON(t *testing.T, home string) (port int, pid int) {
 	t.Helper()
@@ -1012,4 +1026,121 @@ func TestE2E_ThreadReply(t *testing.T) {
 	}
 
 	_, _ = http.Post("http://127.0.0.1:"+strconv.Itoa(port)+"/api/shutdown", "application/json", nil)
+}
+
+func TestE2E_AgentPortableLoop(t *testing.T) {
+	tmpDir := t.TempDir()
+	home := filepath.Join(tmpDir, "fluffle")
+	bin := buildTestBinary(t, tmpDir)
+	repoDir := t.TempDir()
+	gitInit(t, repoDir)
+	env := []string{"FLUFFLE_HOME=" + home}
+	startDaemon(t, bin, home)
+	waitForDaemonReady(t, home, 10*time.Second)
+
+	out, _ := runCLIStdin(t, env, bin, "", "channel", "create", "--name", "portable", "--repo", repoDir, "--json")
+	var channel struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(out), &channel); err != nil {
+		t.Fatal(err)
+	}
+	out, _ = runCLIStdin(t, env, bin, "", "thread", "new", "--channel", "portable", "--repo", repoDir, "--title", "portable loop", "--json")
+	var thread struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(out), &thread); err != nil {
+		t.Fatal(err)
+	}
+	threadID := strconv.FormatInt(thread.ID, 10)
+
+	runCLIStdin(t, env, bin, "", "message", "send", "--thread", threadID, "--text", "portable root", "--as", "alice", "--json")
+	type portableLine struct {
+		Type       string `json:"type"`
+		Seq        int64  `json:"seq"`
+		ParentSeq  int64  `json:"parent_seq"`
+		MessageSeq int64  `json:"message_seq"`
+		Name       string `json:"name"`
+		Content    string `json:"content"`
+		Emoji      string `json:"emoji"`
+	}
+	readEvents := func(raw string) []portableLine {
+		t.Helper()
+		var events []portableLine
+		for _, line := range strings.Split(strings.TrimSpace(raw), "\n") {
+			var event portableLine
+			if err := json.Unmarshal([]byte(line), &event); err != nil {
+				t.Fatalf("invalid JSONL: %v\n%s", err, raw)
+			}
+			events = append(events, event)
+		}
+		return events
+	}
+
+	out, _ = runCLIStdin(t, env, bin, "", "agent", "read", "--thread", threadID, "--json")
+	events := readEvents(out)
+	if len(events) != 1 || events[0].Type != "message" || events[0].Name != "alice" || events[0].Content != "portable root" {
+		t.Fatalf("initial events = %+v", events)
+	}
+	rootSeq := events[0].Seq
+
+	out, _ = runCLIStdin(t, env, bin, "portable reply", "message", "send", "--thread", threadID, "--reply-to-seq", strconv.FormatInt(rootSeq, 10), "--text", "-", "--agent-id", "portable-agent", "--as", "portable-agent", "--json")
+	var reply struct {
+		Seq       int64 `json:"seq"`
+		ParentSeq int64 `json:"parent_seq"`
+	}
+	if err := json.Unmarshal([]byte(out), &reply); err != nil {
+		t.Fatal(err)
+	}
+	if reply.ParentSeq != rootSeq || reply.Seq <= rootSeq {
+		t.Fatalf("reply = %+v, root seq %d", reply, rootSeq)
+	}
+
+	out, _ = runCLIStdin(t, env, bin, "", "react", "add", "--thread", threadID, "--message-seq", strconv.FormatInt(rootSeq, 10), "--emoji", "+1", "--agent-id", "portable-agent", "--as", "portable-agent")
+	if out != "ok" {
+		t.Fatalf("reaction output = %q", out)
+	}
+
+	out, _ = runCLIStdin(t, env, bin, "", "agent", "read", "--thread", threadID, "--after-seq", strconv.FormatInt(rootSeq, 10), "--json")
+	events = readEvents(out)
+	if len(events) != 1 || events[0].Type != "message" || events[0].Seq != reply.Seq || events[0].ParentSeq != rootSeq {
+		t.Fatalf("cursor events = %+v", events)
+	}
+
+	out, _ = runCLIStdin(t, env, bin, "", "agent", "read", "--thread", threadID, "--json")
+	events = readEvents(out)
+	var foundReaction bool
+	for _, event := range events {
+		if event.Type == "reaction" && event.MessageSeq == rootSeq && event.Name == "portable-agent" && event.Emoji == "+1" {
+			foundReaction = true
+		}
+	}
+	if !foundReaction {
+		t.Fatalf("reaction event missing: %+v", events)
+	}
+
+	out, _ = runCLIStdin(t, env, bin, "", "inbox", "--json")
+	var inbox []struct {
+		ThreadID    int64  `json:"ThreadID"`
+		ChannelID   int64  `json:"channel_id"`
+		ChannelName string `json:"channel_name"`
+		Content     string `json:"Content"`
+	}
+	if err := json.Unmarshal([]byte(out), &inbox); err != nil {
+		t.Fatal(err)
+	}
+	var foundRoot, foundReply bool
+	for _, message := range inbox {
+		if message.ThreadID == thread.ID && message.ChannelID == channel.ID && message.ChannelName == "portable" && message.Content == "portable root" {
+			foundRoot = true
+		}
+		if message.ThreadID == thread.ID && message.ChannelID == channel.ID && message.ChannelName == "portable" && message.Content == "portable reply" {
+			foundReply = true
+		}
+	}
+	if !foundRoot || !foundReply {
+		t.Fatalf("inbox = %+v", inbox)
+	}
+
+	runCLIStdin(t, env, bin, "", "daemon", "stop")
 }

@@ -26,7 +26,7 @@ import (
 
 func main() { os.Exit(run(os.Args[1:])) }
 
-const rootUsage = "usage: flf <daemon|init|channel|thread|message|react|agent|tui>\n  Channel: repo-anchored or --orphaned room (e.g. general)\n  Thread: titled conversation inside a channel\n  Message: chat line inside a thread (use --thread ID)"
+const rootUsage = "usage: flf <daemon|init|inbox|channel|thread|message|react|agent|tui>\n  Channel: repo-anchored or --orphaned room (e.g. general)\n  Thread: titled conversation inside a channel\n  Message: chat line inside a thread (use --thread ID)"
 
 func run(args []string) int {
 	if len(args) == 0 {
@@ -37,6 +37,8 @@ func run(args []string) int {
 		return daemonCmd(args[1:])
 	case "init":
 		return initCmd(args[1:])
+	case "inbox":
+		return inboxCmd(args[1:])
 	case "channel":
 		return channelCmd(args[1:])
 	case "thread":
@@ -158,6 +160,37 @@ func initCmd(args []string) int {
 		return fail("NOT_A_GIT_REPO", fmt.Sprintf("%s is not a git repo (suggest --orphaned)", abs))
 	}
 	fmt.Printf("initialized %s\n", abs)
+	return 0
+}
+
+func inboxCmd(args []string) int {
+	fs := newFlagSet("inbox")
+	limit := fs.Int("limit", 100, "maximum messages")
+	jsonOut := fs.Bool("json", false, "JSON output")
+	if err := fs.Parse(args); err != nil {
+		return fail("BAD_ARGS", err.Error())
+	}
+	base, err := client.EnsureDaemon()
+	if err != nil {
+		return fail("DAEMON_DOWN", err.Error())
+	}
+	var messages []store.InboxMessage
+	u := base + "/v1/inbox?limit=" + strconv.Itoa(*limit)
+	if code := apiGet(u, "", &messages); code != 0 {
+		return code
+	}
+	if messages == nil {
+		messages = []store.InboxMessage{}
+	}
+	if *jsonOut {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		enc.Encode(messages)
+		return 0
+	}
+	for _, message := range messages {
+		fmt.Printf("%s/%d %s/%d seq %d %s: %s\n", message.ChannelName, message.ChannelID, message.ThreadTitle, message.ThreadID, message.Seq, message.Name, message.Content)
+	}
 	return 0
 }
 
@@ -448,29 +481,73 @@ func threadNewCmd(args []string) int {
 	return 0
 }
 
-func dumpThreadMessages(base string, threadID int64, last int, agentID string) int {
+func threadMessagesURL(base string, threadID int64, last int, afterSeq int64) string {
 	u := base + "/v1/threads/" + strconv.FormatInt(threadID, 10) + "/messages"
-	if last > 0 {
-		u += "?last=" + strconv.Itoa(last)
+	query := url.Values{}
+	if afterSeq >= 0 {
+		query.Set("after_seq", strconv.FormatInt(afterSeq, 10))
+	} else if last > 0 {
+		query.Set("last", strconv.Itoa(last))
 	}
+	if len(query) > 0 {
+		u += "?" + query.Encode()
+	}
+	return u
+}
+
+func dumpThreadMessages(base string, threadID int64, last int, afterSeq int64, agentID string) int {
 	var msgs []store.Message
-	if code := apiGet(u, agentID, &msgs); code != 0 {
+	if code := apiGet(threadMessagesURL(base, threadID, last, afterSeq), agentID, &msgs); code != 0 {
 		return code
 	}
 	seqByID := make(map[int64]int64, len(msgs))
-	for _, m := range msgs {
-		seqByID[m.ID] = m.Seq
+	selectedIDs := make(map[int64]struct{}, len(msgs))
+	for _, message := range msgs {
+		seqByID[message.ID] = message.Seq
+		selectedIDs[message.ID] = struct{}{}
+	}
+	if afterSeq > 0 || last > 0 {
+		var allMessages []store.Message
+		if code := apiGet(threadMessagesURL(base, threadID, 0, -1), agentID, &allMessages); code != 0 {
+			return code
+		}
+		for _, message := range allMessages {
+			seqByID[message.ID] = message.Seq
+		}
 	}
 	lines := make([]jsonl.Line, 0, len(msgs))
-	for _, m := range msgs {
+	for _, message := range msgs {
 		lines = append(lines, jsonl.Line{
-			Seq:        m.Seq,
-			ParentSeq:  seqByID[m.ParentIDValue()],
-			Role:       m.Role,
-			Name:       m.Name,
-			AuthorType: m.AuthorType,
-			Content:    m.Content,
-			Timestamp:  m.CreatedAt,
+			Type:       "message",
+			Seq:        message.Seq,
+			ParentSeq:  seqByID[message.ParentIDValue()],
+			Role:       message.Role,
+			Name:       message.Name,
+			AuthorType: message.AuthorType,
+			Content:    message.Content,
+			Timestamp:  message.CreatedAt,
+			Metadata:   map[string]any{},
+		})
+	}
+	var reactions []store.Reaction
+	if code := apiGet(base+"/v1/threads/"+strconv.FormatInt(threadID, 10)+"/reactions", agentID, &reactions); code != 0 {
+		return code
+	}
+	for _, reaction := range reactions {
+		if _, selected := selectedIDs[reaction.MessageID]; !selected {
+			continue
+		}
+		messageSeq := reaction.MessageSeq
+		if messageSeq == 0 {
+			messageSeq = seqByID[reaction.MessageID]
+		}
+		lines = append(lines, jsonl.Line{
+			Type:       "reaction",
+			MessageSeq: messageSeq,
+			Name:       reaction.Name,
+			AuthorType: reaction.AuthorType,
+			Emoji:      reaction.Emoji,
+			Timestamp:  reaction.CreatedAt,
 			Metadata:   map[string]any{},
 		})
 	}
@@ -479,7 +556,15 @@ func dumpThreadMessages(base string, threadID int64, last int, agentID string) i
 }
 
 func parseJSONLFile(path string) ([]jsonl.Line, int) {
-	raw, err := os.ReadFile(path)
+	var (
+		raw []byte
+		err error
+	)
+	if path == "-" {
+		raw, err = io.ReadAll(os.Stdin)
+	} else {
+		raw, err = os.ReadFile(path)
+	}
 	if err != nil {
 		return nil, fail("FILE_READ", err.Error())
 	}
@@ -491,21 +576,17 @@ func parseJSONLFile(path string) ([]jsonl.Line, int) {
 }
 
 func postJSONLLines(base string, threadID int64, lines []jsonl.Line, agentID string) int {
-	u := base + "/v1/threads/" + strconv.FormatInt(threadID, 10) + "/messages"
-	for _, l := range lines {
-		role := l.Role
-		if role == "" {
-			role = "user"
-		}
-		body := map[string]any{"Name": l.Name, "Role": role, "Content": l.Content, "AgentID": agentID, "CreatedAt": l.Timestamp}
-		var out struct {
-			Seq int64 `json:"seq"`
-		}
-		if code := apiPost(u, agentID, body, &out); code != 0 {
-			return code
-		}
-	}
-	return 0
+	return postJSONLBatch(base, threadID, lines, agentID, false)
+}
+
+func postJSONLBatch(base string, threadID int64, lines []jsonl.Line, agentID string, importEvents bool) int {
+	u := base + "/v1/threads/" + strconv.FormatInt(threadID, 10) + "/events"
+	body := struct {
+		Events []jsonl.Line `json:"events"`
+		Import bool         `json:"import"`
+	}{Events: lines, Import: importEvents}
+	var out []store.AppendResult
+	return apiPost(u, agentID, body, &out)
 }
 
 func agentCmd(args []string) int {
@@ -526,27 +607,30 @@ func agentReadCmd(args []string) int {
 	fs := newFlagSet("agent read")
 	threadID := fs.Int64("thread", 0, "thread id")
 	last := fs.Int("last", 0, "last N messages (0 = all)")
+	afterSeq := fs.Int64("after-seq", -1, "return messages after this sequence")
 	agentID := fs.String("agent-id", "", "agent id")
 	jsonOut := fs.Bool("json", false, "JSON output")
 	if err := fs.Parse(args); err != nil {
 		return fail("BAD_ARGS", err.Error())
 	}
 	if *threadID == 0 {
-		return fail("BAD_ARGS", "usage: flf agent read --thread ID [--last N] [--agent-id ID]")
+		return fail("BAD_ARGS", "usage: flf agent read --thread ID [--last N | --after-seq N] [--agent-id ID] [--json]")
+	}
+	if *afterSeq < -1 {
+		return fail("BAD_ARGS", "after-seq must be a non-negative integer")
+	}
+	if *afterSeq >= 0 && *last > 0 {
+		return fail("BAD_ARGS", "after-seq and last are mutually exclusive")
 	}
 	base, err := client.EnsureDaemon()
 	if err != nil {
 		return fail("DAEMON_DOWN", err.Error())
 	}
 	if *jsonOut {
-		return dumpThreadMessages(base, *threadID, *last, *agentID)
+		return dumpThreadMessages(base, *threadID, *last, *afterSeq, *agentID)
 	}
 	var msgs []store.Message
-	u := base + "/v1/threads/" + strconv.FormatInt(*threadID, 10) + "/messages"
-	if *last > 0 {
-		u += "?last=" + strconv.Itoa(*last)
-	}
-	if code := apiGet(u, *agentID, &msgs); code != 0 {
+	if code := apiGet(threadMessagesURL(base, *threadID, *last, *afterSeq), *agentID, &msgs); code != 0 {
 		return code
 	}
 	enc := json.NewEncoder(os.Stdout)
@@ -594,7 +678,7 @@ func threadExportCmd(args []string) int {
 	if err != nil {
 		return fail("DAEMON_DOWN", err.Error())
 	}
-	return dumpThreadMessages(base, *threadID, 0, "")
+	return dumpThreadMessages(base, *threadID, 0, -1, "")
 }
 
 func ensureImportChannel(base, name, repoPath string, orphaned bool) (int64, int) {
@@ -676,7 +760,7 @@ func threadImportCmd(args []string) int {
 	if code := apiPost(base+"/v1/channels/"+strconv.FormatInt(chID, 10)+"/threads", "", body, &out); code != 0 {
 		return code
 	}
-	if code := postJSONLLines(base, out.ID, lines, ""); code != 0 {
+	if code := postJSONLBatch(base, out.ID, lines, "", true); code != 0 {
 		return code
 	}
 	fmt.Printf("thread %d\n", out.ID)
@@ -685,7 +769,7 @@ func threadImportCmd(args []string) int {
 
 func messageCmd(args []string) int {
 	if len(args) == 0 || args[0] != "send" {
-		return fail("BAD_ARGS", "usage: flf message send --thread ID --text T [--as NAME] [--agent-id ID]")
+		return fail("BAD_ARGS", "usage: flf message send --thread ID (--text T | --text -) [--reply-to ID | --reply-to-seq N] [--as NAME] [--agent-id ID]")
 	}
 	return messageSendCmd(args[1:])
 }
@@ -703,26 +787,46 @@ func defaultName(as string) string {
 func messageSendCmd(args []string) int {
 	fs := newFlagSet("message send")
 	threadID := fs.Int64("thread", 0, "thread id")
-	text := fs.String("text", "", "message text")
+	text := fs.String("text", "", "message text or - for stdin")
 	as := fs.String("as", "", "name (default $USER)")
 	agentID := fs.String("agent-id", "", "agent id")
 	replyTo := fs.Int64("reply-to", 0, "parent message id for threaded reply")
+	replyToSeq := fs.Int64("reply-to-seq", -1, "parent message sequence for threaded reply")
 	createdAt := fs.String("created-at", "", "message timestamp (RFC3339, e.g. 2025-01-15T10:30:00Z)")
 	jsonOut := fs.Bool("json", false, "JSON output")
 	if err := fs.Parse(args); err != nil {
 		return fail("BAD_ARGS", err.Error())
 	}
-	if *threadID == 0 || *text == "" {
-		return fail("BAD_ARGS", "usage: flf message send --thread ID --text T [--as NAME] [--agent-id ID] [--reply-to ID] [--created-at TS] [--json]")
+	if *threadID == 0 {
+		return fail("BAD_ARGS", "usage: flf message send --thread ID (--text T | --text -) [--reply-to ID | --reply-to-seq N] [--as NAME] [--agent-id ID] [--created-at TS] [--json]")
+	}
+	if *replyToSeq < -1 || *replyToSeq == 0 {
+		return fail("BAD_ARGS", "reply-to-seq must be a positive integer")
+	}
+	if *replyTo != 0 && *replyToSeq > 0 {
+		return fail("BAD_ARGS", "reply-to and reply-to-seq are mutually exclusive")
+	}
+	textValue := *text
+	if textValue == "-" {
+		raw, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return fail("FILE_READ", err.Error())
+		}
+		textValue = string(raw)
+	}
+	if textValue == "" {
+		return fail("BAD_ARGS", "usage: flf message send --thread ID (--text T | --text -) [--reply-to ID | --reply-to-seq N] [--as NAME] [--agent-id ID] [--created-at TS] [--json]")
 	}
 	base, err := client.EnsureDaemon()
 	if err != nil {
 		return fail("DAEMON_DOWN", err.Error())
 	}
 	name := defaultName(*as)
-	body := map[string]any{"Name": name, "Role": "user", "Content": *text, "AgentID": *agentID}
+	body := map[string]any{"Name": name, "Role": "user", "Content": textValue, "AgentID": *agentID}
 	if *replyTo != 0 {
 		body["ParentID"] = *replyTo
+	} else if *replyToSeq > 0 {
+		body["parent_seq"] = *replyToSeq
 	}
 	if *createdAt != "" {
 		body["CreatedAt"] = *createdAt
@@ -735,9 +839,13 @@ func messageSendCmd(args []string) int {
 		return code
 	}
 	if *jsonOut {
+		parentSeq := *replyToSeq
+		if parentSeq < 0 {
+			parentSeq = 0
+		}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		enc.Encode(map[string]any{"seq": out.Seq, "thread_id": *threadID, "name": name, "content": *text, "parent_id": *replyTo})
+		enc.Encode(map[string]any{"seq": out.Seq, "thread_id": *threadID, "name": name, "content": textValue, "parent_id": *replyTo, "parent_seq": parentSeq})
 		return 0
 	}
 	fmt.Printf("seq %d\n", out.Seq)
@@ -746,22 +854,33 @@ func messageSendCmd(args []string) int {
 
 func reactCmd(args []string) int {
 	if len(args) == 0 || args[0] != "add" {
-		return fail("BAD_ARGS", "usage: flf react add --message ID --emoji E [--as NAME] [--agent-id ID]")
+		return fail("BAD_ARGS", "usage: flf react add (--message ID | --thread ID --message-seq N) --emoji E [--as NAME] [--agent-id ID]")
 	}
 	return reactAddCmd(args[1:])
 }
 
 func reactAddCmd(args []string) int {
 	fs := newFlagSet("react add")
+	threadID := fs.Int64("thread", 0, "thread id")
 	messageID := fs.Int64("message", 0, "message id")
+	messageSeq := fs.Int64("message-seq", -1, "message sequence")
 	emoji := fs.String("emoji", "", "emoji")
 	as := fs.String("as", "", "name (default $USER)")
 	agentID := fs.String("agent-id", "", "agent id")
 	if err := fs.Parse(args); err != nil {
 		return fail("BAD_ARGS", err.Error())
 	}
-	if *messageID == 0 || *emoji == "" {
-		return fail("BAD_ARGS", "usage: flf react add --message ID --emoji E [--as NAME] [--agent-id ID]")
+	if *messageSeq < -1 || *messageSeq == 0 {
+		return fail("BAD_ARGS", "message-seq must be a positive integer")
+	}
+	if *messageSeq > 0 && *threadID == 0 {
+		return fail("BAD_ARGS", "--thread is required with --message-seq")
+	}
+	if *messageSeq > 0 && *messageID != 0 {
+		return fail("BAD_ARGS", "message and message-seq are mutually exclusive")
+	}
+	if *emoji == "" || (*messageID == 0 && *messageSeq <= 0) {
+		return fail("BAD_ARGS", "usage: flf react add (--message ID | --thread ID --message-seq N) --emoji E [--as NAME] [--agent-id ID]")
 	}
 	base, err := client.EnsureDaemon()
 	if err != nil {
@@ -770,7 +889,12 @@ func reactAddCmd(args []string) int {
 	name := defaultName(*as)
 	body := map[string]any{"Emoji": *emoji, "Name": name, "AgentID": *agentID}
 	var out map[string]any
-	u := base + "/v1/messages/" + strconv.FormatInt(*messageID, 10) + "/reactions"
+	var u string
+	if *messageSeq > 0 {
+		u = base + "/v1/threads/" + strconv.FormatInt(*threadID, 10) + "/messages/" + strconv.FormatInt(*messageSeq, 10) + "/reactions"
+	} else {
+		u = base + "/v1/messages/" + strconv.FormatInt(*messageID, 10) + "/reactions"
+	}
 	if code := apiPost(u, *agentID, body, &out); code != 0 {
 		return code
 	}
