@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/NoRaincheck/fluffle/internal/jsonl"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -248,5 +250,38 @@ func TestInitOutsideGitFails(t *testing.T) {
 	dir := t.TempDir()
 	if got := run([]string{"init", "--repo", dir}); got != 1 {
 		t.Fatalf("want exit 1 got %d", got)
+	}
+}
+
+func TestDumpThreadMessagesProjectsParentSequence(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/threads/7/messages" {
+			t.Errorf("path = %q, want /v1/threads/7/messages", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[
+			{"ID":41,"ThreadID":7,"Seq":1,"ParentID":null,"Name":"alice","AuthorType":"human","Role":"user","Content":"parent","CreatedAt":"2026-09-25T00:00:00Z"},
+			{"ID":42,"ThreadID":7,"Seq":2,"ParentID":{"Int64":41,"Valid":true},"Name":"bob","AuthorType":"human","Role":"user","Content":"reply","CreatedAt":"2026-09-25T00:01:00Z"}
+		]`))
+	}))
+	defer server.Close()
+
+	code, stdout, stderr := captureOutput(t, func() int {
+		return dumpThreadMessages(server.URL, 7, 0, "")
+	})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0: %s", code, stderr)
+	}
+	lines, err := jsonl.ParseLines([]byte(stdout))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lines) != 2 {
+		t.Fatalf("lines = %d, want 2", len(lines))
+	}
+	if lines[1].ParentSeq != 1 {
+		t.Fatalf("parent_seq = %d, want 1", lines[1].ParentSeq)
 	}
 }

@@ -457,10 +457,15 @@ func dumpThreadMessages(base string, threadID int64, last int, agentID string) i
 	if code := apiGet(u, agentID, &msgs); code != 0 {
 		return code
 	}
+	seqByID := make(map[int64]int64, len(msgs))
+	for _, m := range msgs {
+		seqByID[m.ID] = m.Seq
+	}
 	lines := make([]jsonl.Line, 0, len(msgs))
 	for _, m := range msgs {
 		lines = append(lines, jsonl.Line{
 			Seq:        m.Seq,
+			ParentSeq:  seqByID[m.ParentIDValue()],
 			Role:       m.Role,
 			Name:       m.Name,
 			AuthorType: m.AuthorType,
