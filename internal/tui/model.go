@@ -665,7 +665,12 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "p":
 		m.preview = !m.preview
 		if m.preview {
-			m.status = "preview on — p to hide"
+			if m.inboxLayout != inboxLayoutCompact {
+				m.inboxLayout = inboxLayoutCompact
+				m.status = "preview on — p to hide · layout:compact"
+			} else {
+				m.status = "preview on — p to hide"
+			}
 			return m, m.syncVisibleData()
 		}
 		m.status = "preview off — p to show"

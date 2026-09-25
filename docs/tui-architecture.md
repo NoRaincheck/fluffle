@@ -150,7 +150,9 @@ Preview fetching is idempotent and gated on `previewVisible()`: skips if the cur
 
 ### Preview Visibility
 
-`previewVisible()` is the single predicate for "is the right-side pane drawn". It is false when the preference is off, below 80 cols, in the detail view, and in the full inbox layout. `baseView()`, `inboxListWidth()`, `listHeight()`, and `maybeFetchPreview()` all consult it, so the pane cannot be drawn at one width while fetch decisions assume another. The `p` preference is untouched by layout switches: toggling `l` never clears it.
+`previewVisible()` is the single predicate for "is the right-side pane drawn". It is false when the preference is off, below 80 cols, in the detail view, and in the full inbox layout. `baseView()`, `inboxListWidth()`, `listHeight()`, and `maybeFetchPreview()` all consult it, so the pane cannot be drawn at one width while fetch decisions assume another.
+
+The `p` handler enforces one invariant: **preview on implies compact layout**. Enabling the preview from full layout switches to compact (status: `preview on — p to hide · layout:compact`), so the key is never a silent no-op. Disabling the preview leaves the layout untouched, so `p` twice is a no-op and `l` is still the way back to full. The check runs on the preference rather than on `viewInbox`, so the invariant holds even when the preview is toggled from the channels/threads views.
 
 ### Messages (Bubble Tea Msg Types)
 
@@ -343,7 +345,7 @@ Y := clamp(3, 20, hAvail - replyReserve - 2)
 14. **Detail view hides preview**: When in detail view, the split-pane preview is suppressed — the thread fills the full terminal width.
 15. **Inbox cursor preserved on Esc**: Entering detail saves `cursor`/`scroll`; returning via `Esc` restores them.
 16. **Preview panel hidden in detail**: `View()` early-returns for `viewInboxDetail` with single-pane rendering; the preview split condition guards `&& m.view != viewInboxDetail`.
-17. **Preview suppressed in the full layout**: full layout already inlines the original post and every reply, and a split pane is too narrow for the content column, so the rows take the full width. `previewVisible()` holds the rule; the `p` preference survives the switch.
+17. **Preview suppressed in the full layout**: full layout already inlines the original post and every reply, and a split pane is too narrow for the content column, so the rows take the full width. `previewVisible()` holds the rule. The two layouts are mutually exclusive in practice: `p` (preview on) forces compact, and `l` (full) hides the pane.
 
 ## wrapText Helper
 

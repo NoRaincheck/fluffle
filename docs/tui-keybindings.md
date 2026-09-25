@@ -53,8 +53,8 @@ Grouped table: one row per channel/thread, showing that group's most recent mess
 | `n` | New thread: opens compose, uses channel from cursor position |
 | `v` | Toggle sort: latest-desc ↔ channel/thread + time desc |
 | `f` | Open filter (substring match on channel, then channel/thread) |
-| `l` / `L` | Toggle layout: compact ↔ full |
-| `p` | Toggle preview panel |
+| `l` / `L` | Toggle layout: compact ↔ full (switching to full hides the preview pane) |
+| `p` | Toggle preview panel (turning it on also switches to compact) |
 | `q` | Quit |
 | `Ctrl+C` | Quit |
 | `Esc` | No-op (reserved for future filter clear) |
@@ -111,7 +111,9 @@ Toggled by `p`. Shows a right-side panel with preview content for the cursor-hig
 - Replies fill remaining pane height; newest-tail truncation when space runs out
 - No truncation marker on root post — always fully visible
 
-**Not shown in full layout.** The preview panel is suppressed while the full layout is active, the same way it is suppressed in the detail view — the rows already carry the original post and every reply, and a split pane leaves too little room for the content column. `p` still toggles the preference: the panel is suppressed in full layout and reappears as soon as you switch back to compact.
+**Not shown in full layout.** The preview panel is suppressed while the full layout is active, the same way it is suppressed in the detail view — the rows already carry the original post and every reply, and a split pane leaves too little room for the content column.
+
+**`p` implies compact.** Turning the preview **on** always switches the layout to compact, so `p` is never a silent no-op: enabling the preview guarantees you can see it. Turning the preview **off** leaves the layout alone, so `p` twice in a row is a no-op and `l` still gets you back to full.
 
 ## Compose Modal
 
@@ -144,7 +146,7 @@ Always visible at the bottom. Shows:
 
 - **Normal**: `inbox — N messages · ↑↓/j/k nav · r reply · v sort · f filter · q quit`
 - **Layout toggle**: `layout: full — l to switch`
-- **Preview toggle**: `preview on — p to hide`
+- **Preview toggle**: `preview on — p to hide` (or `preview on — p to hide · layout:compact` when `p` also switched layout)
 - **Error**: `error: DAEMON_DOWN: ...` (unreachable daemon), `error: DAEMON_ERROR: ...` (undecodable response), or `error: DELIVERY_UNKNOWN: ...` (a write that may have committed)
 - **Empty state**: `no messages — press n for new thread`
 - **Action feedback**: `sent`, `thread "name" created`

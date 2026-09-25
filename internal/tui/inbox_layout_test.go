@@ -483,6 +483,72 @@ func TestInboxFullLayoutDoesNotFetchPreview(t *testing.T) {
 	}
 }
 
+func TestPreviewOnSwitchesToCompactLayout(t *testing.T) {
+	m := layoutFullModel(t, 140, 24)
+	if m.inboxLayout != inboxLayoutFull {
+		t.Fatalf("precondition: expected full layout, got %v", m.inboxLayout)
+	}
+	m.preview = false
+	nm, _ := m.Update(keyRunes("p"))
+	m = toModel(nm)
+	if !m.preview {
+		t.Fatalf("p should enable preview")
+	}
+	if m.inboxLayout != inboxLayoutCompact {
+		t.Fatalf("p should switch to compact layout, got %v", m.inboxLayout)
+	}
+	if !m.previewVisible() {
+		t.Fatalf("preview should be visible after p")
+	}
+	if !strings.Contains(m.View(), "layout:compact") {
+		t.Fatalf("title should report compact, got %q", m.View())
+	}
+}
+
+func TestPreviewOffKeepsFullLayout(t *testing.T) {
+	m := layoutFullModel(t, 140, 24)
+	m.preview = true
+	nm, _ := m.Update(keyRunes("p"))
+	m = toModel(nm)
+	if m.preview {
+		t.Fatalf("p should disable preview")
+	}
+	if m.inboxLayout != inboxLayoutFull {
+		t.Fatalf("p turning preview off should not change layout, got %v", m.inboxLayout)
+	}
+}
+
+func TestPreviewOnFromCompactKeepsCompact(t *testing.T) {
+	m := layoutModel(t, "http://127.0.0.1:0", 140, 24)
+	m.preview = false
+	nm, _ := m.Update(keyRunes("p"))
+	m = toModel(nm)
+	if !m.preview || m.inboxLayout != inboxLayoutCompact {
+		t.Fatalf("p from compact should enable preview and stay compact, got preview=%v layout=%v", m.preview, m.inboxLayout)
+	}
+}
+
+func TestPreviewOnOutsideInboxStillForcesCompact(t *testing.T) {
+	m := layoutFullModel(t, 140, 24)
+	m.preview = false
+	nm, _ := m.Update(keyRunes("p"))
+	m = toModel(nm)
+	m.view = viewChannels
+	nm, _ = m.Update(keyRunes("p"))
+	m = toModel(nm)
+	if m.preview {
+		t.Fatalf("p should turn preview off")
+	}
+	nm, _ = m.Update(keyRunes("p"))
+	m = toModel(nm)
+	if !m.preview {
+		t.Fatalf("p should turn preview back on")
+	}
+	if m.inboxLayout != inboxLayoutCompact {
+		t.Fatalf("preview on should always imply compact layout, got %v", m.inboxLayout)
+	}
+}
+
 func TestInboxFullLayoutReplyOpensComposeForGroup(t *testing.T) {
 	m := layoutFullModel(t, 140, 24)
 	nm, _ := m.Update(keyRunes("r"))
