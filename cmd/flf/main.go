@@ -650,7 +650,13 @@ func postJSONLBatch(base string, threadID int64, lines []jsonl.Line, agentID str
 		Import bool         `json:"import"`
 	}{Events: lines, Import: importEvents}
 	var out batchResults
-	return apiPost(u, agentID, body, &out)
+	if code := apiPost(u, agentID, body, &out); code != 0 {
+		return code
+	}
+	if len(out) != len(lines) {
+		return fail("DELIVERY_UNKNOWN", fmt.Sprintf("read the thread before retrying: batch returned %d results for %d events", len(out), len(lines)))
+	}
+	return 0
 }
 
 func agentCmd(args []string) int {
@@ -867,7 +873,7 @@ func messageSendCmd(args []string) int {
 	if flagWasSet(fs, "reply-to-seq") && *replyToSeq <= 0 {
 		return fail("BAD_ARGS", "reply-to-seq must be a positive integer")
 	}
-	if *replyTo != 0 && *replyToSeq > 0 {
+	if flagWasSet(fs, "reply-to") && *replyToSeq > 0 {
 		return fail("BAD_ARGS", "reply-to and reply-to-seq are mutually exclusive")
 	}
 	textValue := *text
@@ -940,7 +946,7 @@ func reactAddCmd(args []string) int {
 	if *messageSeq > 0 && *threadID == 0 {
 		return fail("BAD_ARGS", "--thread is required with --message-seq")
 	}
-	if *messageSeq > 0 && *messageID != 0 {
+	if *messageSeq > 0 && flagWasSet(fs, "message") {
 		return fail("BAD_ARGS", "message and message-seq are mutually exclusive")
 	}
 	if *emoji == "" || (*messageID == 0 && *messageSeq <= 0) {

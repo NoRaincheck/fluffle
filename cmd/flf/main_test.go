@@ -742,7 +742,7 @@ func TestAgentAppendStdinPostsSingleBatch(t *testing.T) {
 		case "/v1/health":
 			_, _ = w.Write([]byte(`{"ok":true}`))
 		case "/v1/threads/7/events":
-			_, _ = w.Write([]byte(`[]`))
+			_, _ = w.Write([]byte(`[{"SourceSeq":0,"Seq":1,"MessageID":11,"ReactionID":0},{"SourceSeq":0,"Seq":0,"MessageID":11,"ReactionID":12}]`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -822,7 +822,7 @@ func TestAgentThreadImportPostsSingleImportBatch(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/channels/5/threads":
 			_, _ = w.Write([]byte(`{"id":9}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/threads/9/events":
-			_, _ = w.Write([]byte(`[]`))
+			_, _ = w.Write([]byte(`[{"SourceSeq":10,"Seq":1,"MessageID":21,"ReactionID":0},{"SourceSeq":20,"Seq":0,"MessageID":21,"ReactionID":22}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/threads/9/messages":
 			_, _ = w.Write([]byte(`{"seq":1}`))
 		default:
@@ -1136,5 +1136,92 @@ func TestAgentAppendAcceptsCompleteBatchResults(t *testing.T) {
 	})
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0: %s", code, output)
+	}
+}
+
+func TestAgentAppendRejectsBatchResultCountMismatch(t *testing.T) {
+	tests := []struct {
+		name      string
+		body      string
+		lineCount int
+	}{
+		{
+			name:      "empty result array",
+			body:      `[]`,
+			lineCount: 1,
+		},
+		{
+			name:      "short result array",
+			body:      `[{"SourceSeq":0,"Seq":1,"MessageID":9,"ReactionID":0}]`,
+			lineCount: 2,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer server.Close()
+
+			lines := make([]jsonl.Line, tt.lineCount)
+			for i := range lines {
+				lines[i] = jsonl.Line{Type: "message", Name: "alice", Role: "user", Content: "hello"}
+			}
+			code, output := captureStderr(t, func() int {
+				return postJSONLLines(server.URL, 7, lines, "")
+			})
+			if code != 2 {
+				t.Fatalf("exit = %d, want 2", code)
+			}
+			assertCLIErrorEnvelope(t, output, "DELIVERY_UNKNOWN")
+		})
+	}
+}
+
+func TestSequenceExplicitZeroLegacyIDsAreMutuallyExclusive(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{
+			name: "message reply",
+			args: []string{"message", "send", "--thread", "7", "--reply-to", "0", "--reply-to-seq", "2", "--text", "reply"},
+		},
+		{
+			name: "reaction target",
+			args: []string{"react", "add", "--thread", "7", "--message", "0", "--message-seq", "2", "--emoji", "+1"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var requests []recordedCLIRequest
+			var mu sync.Mutex
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				recordCLIRequest(&requests, &mu, r)
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Path == "/v1/health" {
+					_, _ = w.Write([]byte(`{"ok":true}`))
+					return
+				}
+				_, _ = w.Write([]byte(`{"seq":3,"ok":true}`))
+			}))
+			defer server.Close()
+			useTestDaemon(t, server)
+
+			code, output := captureStderr(t, func() int {
+				return run(tt.args)
+			})
+			if code != 1 {
+				t.Fatalf("exit = %d, want 1", code)
+			}
+			message := assertCLIErrorEnvelope(t, output, "BAD_ARGS")
+			if !strings.Contains(strings.ToLower(message), "mutually exclusive") {
+				t.Fatalf("message = %q, want mutually exclusive", message)
+			}
+			if recorded := snapshotCLIRequests(&requests, &mu); len(recorded) != 0 {
+				t.Fatalf("requests = %d, want none", len(recorded))
+			}
+		})
 	}
 }
