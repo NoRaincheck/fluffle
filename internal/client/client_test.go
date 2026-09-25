@@ -3,6 +3,8 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -32,6 +34,17 @@ func useTestDaemon(t *testing.T, server *httptest.Server) {
 		t.Fatal(err)
 	}
 	t.Setenv("FLUFFLE_HOME", home)
+}
+
+func TestIsPreDispatchErrorRecognizesDialFailure(t *testing.T) {
+	err := &url.Error{Op: "Post", URL: "http://127.0.0.1:1", Err: &net.OpError{Op: "dial", Err: errors.New("connection refused")}}
+	if !IsPreDispatchError(err) {
+		t.Fatalf("IsPreDispatchError(%v) = false", err)
+	}
+	readErr := &url.Error{Op: "Post", URL: "http://127.0.0.1:1", Err: &net.OpError{Op: "read", Err: errors.New("connection reset")}}
+	if IsPreDispatchError(readErr) {
+		t.Fatalf("IsPreDispatchError(%v) = true", readErr)
+	}
 }
 
 func TestDaemonBaseURLMissingFileErrors(t *testing.T) {

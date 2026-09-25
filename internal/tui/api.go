@@ -138,7 +138,7 @@ func (c *apiClient) SendMessage(ctx context.Context, threadID, parentID int64, t
 	body := map[string]any{"Name": "you", "Role": "user", "Content": text, "ParentID": parentID}
 	resp, err := c.do(ctx, http.MethodPost, c.base+"/v1/threads/"+fmt.Sprintf("%d", threadID)+"/messages", jsonBody(body))
 	if err != nil {
-		return fmt.Errorf("DELIVERY_UNKNOWN: %w", err)
+		return mutationTransportError(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
@@ -148,7 +148,7 @@ func (c *apiClient) SendMessage(ctx context.Context, threadID, parentID int64, t
 		Seq int64 `json:"seq"`
 	}
 	if err := decodeStrictJSON(resp.Body, &ack); err != nil {
-		return fmt.Errorf("DELIVERY_UNKNOWN: %w", err)
+		return mutationTransportError(err)
 	}
 	if ack.Seq <= 0 {
 		return fmt.Errorf("DELIVERY_UNKNOWN: message acknowledgement without an assigned sequence")
@@ -160,7 +160,7 @@ func (c *apiClient) AddReaction(ctx context.Context, messageID int64, emoji stri
 	body := map[string]any{"Emoji": emoji, "Name": "you"}
 	resp, err := c.do(ctx, http.MethodPost, c.base+"/v1/messages/"+fmt.Sprintf("%d", messageID)+"/reactions", jsonBody(body))
 	if err != nil {
-		return fmt.Errorf("DELIVERY_UNKNOWN: %w", err)
+		return mutationTransportError(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
@@ -170,7 +170,7 @@ func (c *apiClient) AddReaction(ctx context.Context, messageID int64, emoji stri
 		OK *bool `json:"ok"`
 	}
 	if err := decodeStrictJSON(resp.Body, &ack); err != nil {
-		return fmt.Errorf("DELIVERY_UNKNOWN: %w", err)
+		return mutationTransportError(err)
 	}
 	if ack.OK == nil || !*ack.OK {
 		return fmt.Errorf("DELIVERY_UNKNOWN: reaction response did not acknowledge the write")
@@ -196,10 +196,17 @@ func (c *apiClient) do(ctx context.Context, method, url string, body io.Reader) 
 	return resp, nil
 }
 
+func mutationTransportError(err error) error {
+	if client.IsPreDispatchError(err) {
+		return fmt.Errorf("DAEMON_DOWN: %w", err)
+	}
+	return fmt.Errorf("DELIVERY_UNKNOWN: %w", err)
+}
+
 func (c *apiClient) doJSON(ctx context.Context, url, method string, body any) (int64, error) {
 	resp, err := c.do(ctx, method, url, jsonBody(body))
 	if err != nil {
-		return 0, fmt.Errorf("DELIVERY_UNKNOWN: %w", err)
+		return 0, mutationTransportError(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {

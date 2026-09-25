@@ -161,12 +161,13 @@ Centers a multi-line string horizontally within `width` columns. Used for compos
 |-------|-------------|
 | Daemon down (startup or read transport) | `tui.Run()` returns exit code 2 for startup; a read failure shows `error: DAEMON_DOWN: ...` |
 | Read response cannot be decoded | Status bar or compose modal shows `error: DAEMON_ERROR: ...`; prior data is retained |
-| Mutation transport or acknowledgement failure | `error: DELIVERY_UNKNOWN: ...`; the modal stays open and the user re-reads the thread before retrying |
+| Mutation connection failure before dispatch | `error: DAEMON_DOWN: ...`; no acknowledgement is possible |
+| Dispatched mutation timeout, response loss, or acknowledgement failure | `error: DELIVERY_UNKNOWN: ...`; the modal stays open and the user re-reads the thread before retrying |
 | Daemon error response | Rendered as `error: <CODE>: <message>` from the daemon error envelope |
 | Empty compose | Compose modal shows "cannot be empty" in red |
 | Empty inbox | Status bar shows "no messages — press n for new thread" |
 
-Error strings are prefixed with a contract code: `DAEMON_DOWN` when the daemon cannot be reached, `DAEMON_ERROR` when a response cannot be decoded or the daemon reports a server-side failure, and `DELIVERY_UNKNOWN` when a write may have committed without a verifiable acknowledgement. All errors go through the status bar or compose modal — never panic.
+Error strings are prefixed with a contract code: `DAEMON_DOWN` when the daemon cannot be reached or a connection cannot be established, `DAEMON_ERROR` when a response cannot be decoded or the daemon reports a server-side failure, and `DELIVERY_UNKNOWN` when a dispatched write may have committed without a verifiable acknowledgement. All errors go through the status bar or compose modal — never panic.
 
 ## Styling System
 

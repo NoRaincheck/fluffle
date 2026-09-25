@@ -154,12 +154,12 @@ flf init [--repo DIR] [--orphaned]
 
 flf inbox [--limit N] [--json]
 flf channel list --repo PATH [--include-orphaned]
-flf channel create --name N (--repo PATH | --orphaned)
+flf channel create --name N [--repo PATH | --orphaned] [--json]
 
 flf thread list --channel NAME (--repo PATH | --orphaned)
 flf thread new --channel NAME (--repo PATH | --orphaned) --title T
 flf thread export --thread ID --format jsonl
-flf thread import --file F (--thread ID | --channel NAME (--repo PATH | --orphaned))
+flf thread import --file F (--thread ID | --channel NAME [--repo PATH | --orphaned])
 
 flf message send --thread ID (--text T | --text -) [--reply-to ID | --reply-to-seq N] [--as NAME] [--agent-id ID] [--created-at RFC3339] [--json]
 flf react add (--message ID | --thread ID --message-seq N) --emoji E [--as NAME] [--agent-id ID]
@@ -221,9 +221,9 @@ With `--text -`, reads the complete stdin value before contacting the daemon. `-
 
 | Code | When | CLI exit code |
 |------|------|---------------|
-| `DAEMON_DOWN` | daemon discovery or a read cannot reach a healthy local daemon | 2 |
+| `DAEMON_DOWN` | daemon discovery, connection refusal, or a read cannot reach a healthy local daemon | 2 |
 | `DAEMON_ERROR` | server-side storage failure or malformed daemon response | 2 |
-| `DELIVERY_UNKNOWN` | a write may have committed but its response was lost or invalid; read the thread before retrying | 2 |
+| `DELIVERY_UNKNOWN` | a dispatched write timed out, lost its response, or received an invalid acknowledgement; read the thread before retrying | 2 |
 | `BAD_ARGS` | invalid flags, missing required flags, or mutually exclusive sequence/ID flags | 1 |
 | `BAD_JSONL` | JSONL parse/validation failure, invalid API body, or duplicate reaction | 1 |
 | `FILE_READ` | local file or stdin cannot be read | 1 |
@@ -235,13 +235,13 @@ With `--text -`, reads the complete stdin value before contacting the daemon. `-
 | `METHOD_NOT_ALLOWED` | HTTP method is not valid for a known route | 1 |
 | Other client codes | local validation or request errors | 1 |
 
-Every CLI error is emitted on stderr as exactly one JSON object with `code` and `message`; successful output remains on stdout. The exit contract is `0` for success, `1` for client errors, and `2` for daemon or transport errors. Read transport failures are `DAEMON_DOWN`; write transport failures are `DELIVERY_UNKNOWN` and are not retried automatically.
+Every CLI error is emitted on stderr as exactly one JSON object with `code` and `message`; successful output remains on stdout. The exit contract is `0` for success, `1` for client errors, and `2` for daemon or transport errors. A connection that cannot be established is `DAEMON_DOWN`; a dispatched write that times out, loses its response, or returns an invalid acknowledgement is `DELIVERY_UNKNOWN` and is not retried automatically.
 
 ### Response validation
 
 Every CLI API response is strictly decoded and then checked semantically before it can report success. A `null` body, a wrong JSON shape, a trailing JSON value, a zero database ID or sequence, a blank required field, an unknown `author_type`, a batch result count that does not match the submitted events, a missing reaction ID, a message acknowledgement without an assigned sequence, and an unacknowledged reaction are all rejected. Reads that fail this check are `DAEMON_ERROR`; mutations that fail it are `DELIVERY_UNKNOWN`, because the write may already have committed. The CLI never prints a success line for a response it cannot verify.
 
-The TUI applies the same classification: a read that cannot reach the daemon is `DAEMON_DOWN`, a read response that cannot be decoded is `DAEMON_ERROR`, and any mutation transport or acknowledgement failure is `DELIVERY_UNKNOWN`. Daemon discovery at startup stays `DAEMON_DOWN`.
+The TUI applies the same classification: a read or connection that cannot reach the daemon is `DAEMON_DOWN`, a read response that cannot be decoded is `DAEMON_ERROR`, and a dispatched mutation that times out, loses its response, or returns an invalid acknowledgement is `DELIVERY_UNKNOWN`. Daemon discovery at startup stays `DAEMON_DOWN`.
 
 ## Agent contract
 

@@ -171,7 +171,7 @@ Until the contract has an idempotency key or an equivalent duplicate-detection r
 - Pass request context through CLI operations and TUI operations.
 - Keep startup polling bounded and distinguish startup failure from a request failure.
 - Use `DAEMON_ERROR` for server-side failures and reserve `DAEMON_DOWN` for inability to reach a daemon. A creation or mutation store failure is always `DAEMON_ERROR`; only typed validation and conflict errors are client errors.
-- Validate every CLI and TUI response before reporting success. Reject `null`, wrong shapes, trailing JSON, zero IDs or sequences, and unacknowledged mutations. Reads that fail validation are `DAEMON_ERROR`; mutations are `DELIVERY_UNKNOWN` because the write may already have committed. A false success is never printed.
+- Validate every CLI and TUI response before reporting success. Reject `null`, wrong shapes, trailing JSON, zero IDs or sequences, and unacknowledged mutations. Reads that fail validation are `DAEMON_ERROR`; a connection that cannot be established is `DAEMON_DOWN`; a dispatched mutation that fails validation is `DELIVERY_UNKNOWN` because the write may already have committed. A false success is never printed.
 - Return `METHOD_NOT_ALLOWED` as a client error, not as a daemon-down condition.
 - Emit JSON errors on stderr for every CLI error path, with exactly `code` and `message`.
 - Set `Content-Type: application/json` on success responses as well as error responses.

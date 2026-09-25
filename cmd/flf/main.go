@@ -146,6 +146,9 @@ func apiPost(u, agentID string, payload any, out any, check apiResponseCheck) in
 	}
 	resp, err := client.NewHTTPClient().Do(req)
 	if err != nil {
+		if client.IsPreDispatchError(err) {
+			return fail("DAEMON_DOWN", err.Error())
+		}
 		return fail("DELIVERY_UNKNOWN", fmt.Sprintf("read the thread before retrying: %v", err))
 	}
 	defer resp.Body.Close()
@@ -445,10 +448,10 @@ func channelCreateCmd(args []string) int {
 		return fail("BAD_ARGS", err.Error())
 	}
 	if *name == "" {
-		return fail("BAD_ARGS", "usage: flf channel create --name N (--repo PATH | --orphaned)")
+		return fail("BAD_ARGS", "usage: flf channel create --name N [--repo PATH | --orphaned] [--json]")
 	}
 	if *orphaned && *repoPath != "" {
-		return fail("BAD_ARGS", "usage: flf channel create --name N (--repo PATH | --orphaned)")
+		return fail("BAD_ARGS", "use --orphaned or --repo, not both")
 	}
 	var body map[string]any
 	if *orphaned {
@@ -951,11 +954,17 @@ func threadImportCmd(args []string) int {
 	if flagWasSet(fs, "thread") && *threadID <= 0 {
 		return fail("BAD_ARGS", "thread must be a positive integer")
 	}
-	if *file == "" || (*threadID == 0 && (*channel == "" || (*repoPath == "" && !*orphaned))) {
-		return fail("BAD_ARGS", "usage: flf thread import --file F (--thread ID | --channel NAME (--repo PATH | --orphaned))")
+	if *file == "" {
+		return fail("BAD_ARGS", "thread import requires --file F")
+	}
+	if *threadID == 0 && *channel == "" {
+		return fail("BAD_ARGS", "thread import requires --thread ID or --channel NAME")
 	}
 	if *threadID > 0 && (*channel != "" || *repoPath != "" || *orphaned) {
 		return fail("BAD_ARGS", "thread cannot be combined with channel import options")
+	}
+	if *threadID == 0 && *orphaned && *repoPath != "" {
+		return fail("BAD_ARGS", "use --orphaned or --repo, not both")
 	}
 	lines, code := parseJSONLFile(*file)
 	if code != 0 {

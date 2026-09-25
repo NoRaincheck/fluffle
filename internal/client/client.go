@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -25,6 +26,11 @@ type daemonFile struct {
 
 func NewHTTPClient() *http.Client {
 	return &http.Client{Timeout: httpClientTimeout}
+}
+
+func IsPreDispatchError(err error) bool {
+	var opErr *net.OpError
+	return errors.As(err, &opErr) && opErr.Op == "dial"
 }
 
 func FluffleHome() string {

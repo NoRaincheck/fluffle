@@ -91,18 +91,43 @@ func assertErrorCode(t *testing.T, err error, wantCode string) {
 	}
 }
 
-func TestAPIMutationTransportFailuresAreDeliveryUnknown(t *testing.T) {
+func TestAPIMutationConnectionFailuresAreDaemonDown(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	base := server.URL
 	server.Close()
 	c := NewAPIClient(base)
 
-	assertErrorCode(t, c.SendMessage(nil, 1, 0, "hello"), "DELIVERY_UNKNOWN")
-	assertErrorCode(t, c.AddReaction(nil, 1, "👀"), "DELIVERY_UNKNOWN")
-	if _, err := c.CreateChannel(nil, "name", "", "", false); err == nil || !strings.HasPrefix(err.Error(), "DELIVERY_UNKNOWN:") {
+	assertErrorCode(t, c.SendMessage(nil, 1, 0, "hello"), "DAEMON_DOWN")
+	assertErrorCode(t, c.AddReaction(nil, 1, "👀"), "DAEMON_DOWN")
+	if _, err := c.CreateChannel(nil, "name", "", "", false); err == nil || !strings.HasPrefix(err.Error(), "DAEMON_DOWN:") {
 		t.Fatalf("CreateChannel error = %v", err)
 	}
-	if _, err := c.CreateThread(nil, 1, "title"); err == nil || !strings.HasPrefix(err.Error(), "DELIVERY_UNKNOWN:") {
+	if _, err := c.CreateThread(nil, 1, "title"); err == nil || !strings.HasPrefix(err.Error(), "DAEMON_DOWN:") {
+		t.Fatalf("CreateThread error = %v", err)
+	}
+}
+
+func TestAPIMutationTimeoutIsDeliveryUnknown(t *testing.T) {
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseServer := func() { releaseOnce.Do(func() { close(release) }) }
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer func() {
+		releaseServer()
+		server.Close()
+	}()
+	c := NewAPIClient(server.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	assertErrorCode(t, c.SendMessage(ctx, 1, 0, "hello"), "DELIVERY_UNKNOWN")
+	assertErrorCode(t, c.AddReaction(ctx, 1, "👀"), "DELIVERY_UNKNOWN")
+	if _, err := c.CreateThread(ctx, 1, "title"); err == nil || !strings.HasPrefix(err.Error(), "DELIVERY_UNKNOWN:") {
 		t.Fatalf("CreateThread error = %v", err)
 	}
 }

@@ -220,7 +220,7 @@ func TestCLIAPIGetMalformedResponseIsDaemonError(t *testing.T) {
 	assertCLIErrorEnvelope(t, output, "DAEMON_ERROR")
 }
 
-func TestCLIAPIPostTransportFailureIsDeliveryUnknown(t *testing.T) {
+func TestCLIAPIPostConnectionFailureIsDaemonDown(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	url := server.URL
 	server.Close()
@@ -231,7 +231,7 @@ func TestCLIAPIPostTransportFailureIsDeliveryUnknown(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("exit = %d, want 2", code)
 	}
-	assertCLIErrorEnvelope(t, output, "DELIVERY_UNKNOWN")
+	assertCLIErrorEnvelope(t, output, "DAEMON_DOWN")
 }
 
 func TestCLIAPIPostTimeoutIsDeliveryUnknownWithoutRetry(t *testing.T) {
@@ -911,6 +911,80 @@ func TestAgentThreadImportPostsSingleImportBatch(t *testing.T) {
 	}
 	if !body.Import || len(body.Events) != 2 || body.Events[0].Seq != 10 || body.Events[1].MessageSeq != 10 {
 		t.Fatalf("batch body = %+v", body)
+	}
+}
+
+func TestAgentThreadImportChannelDefaultsToCwd(t *testing.T) {
+	var requests []recordedCLIRequest
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		recordCLIRequest(&requests, &mu, r)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/v1/health":
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/channels":
+			_, _ = w.Write([]byte(`[{"ID":5,"Name":"imports","IsOrphaned":false}]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/channels/5/threads":
+			_, _ = w.Write([]byte(`{"id":9}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/threads/9/events":
+			_, _ = w.Write([]byte(`[{"SourceSeq":10,"Seq":1,"MessageID":21,"ReactionID":0}]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	useTestDaemon(t, server)
+
+	path := filepath.Join(t.TempDir(), "thread.jsonl")
+	if err := os.WriteFile(path, []byte("{\"type\":\"message\",\"seq\":10,\"name\":\"alice\",\"role\":\"user\",\"content\":\"one\"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	code, stdout, stderr := captureOutput(t, func() int {
+		return run([]string{"thread", "import", "--file", path, "--channel", "imports"})
+	})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "thread 9") {
+		t.Fatalf("stdout = %q", stdout)
+	}
+	recorded := snapshotCLIRequestPaths(requests, &mu)
+	if !containsRequest(recorded, "/v1/threads/9/events") {
+		t.Fatalf("requests = %v, want batch import", recorded)
+	}
+}
+
+func snapshotCLIRequestPaths(requests []recordedCLIRequest, mu *sync.Mutex) []string {
+	mu.Lock()
+	defer mu.Unlock()
+	paths := make([]string, 0, len(requests))
+	for _, request := range requests {
+		paths = append(paths, request.Method+" "+request.Path)
+	}
+	return paths
+}
+
+func containsRequest(requests []string, path string) bool {
+	for _, request := range requests {
+		if strings.HasSuffix(request, " "+path) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestChannelCreateReportsMutuallyExclusiveRepoFlags(t *testing.T) {
+	code, output := captureStderr(t, func() int {
+		return channelCreateCmd([]string{"--name", "x", "--repo", t.TempDir(), "--orphaned"})
+	})
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	message := assertCLIErrorEnvelope(t, output, "BAD_ARGS")
+	if !strings.Contains(strings.ToLower(message), "not both") {
+		t.Fatalf("message = %q, want mutual-exclusivity guidance", message)
 	}
 }
 
