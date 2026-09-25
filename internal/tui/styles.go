@@ -31,6 +31,13 @@ var (
 	humanColor  = lipgloss.Color("#89b4fa")
 	agentColor  = lipgloss.Color("#b7b4fa")
 	systemColor = lipgloss.Color("#646478")
+
+	threadBg         = lipgloss.Color("#1e1a16")
+	threadFg         = lipgloss.Color("#cdd6f4")
+	threadOpBorder   = lipgloss.Color("#fab387")
+	threadOpHeaderFg = lipgloss.Color("#fab387")
+	threadRepliesFg  = lipgloss.Color("#f9e2af")
+	threadSepFg      = lipgloss.Color("#585062")
 )
 
 var (
@@ -115,6 +122,34 @@ var (
 	agentNameStyle  = lipgloss.NewStyle().Foreground(agentColor)
 	systemNameStyle = lipgloss.NewStyle().Foreground(systemColor)
 	inboxMoreStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#fab387")).Italic(true)
+
+	threadTitleStyle = lipgloss.NewStyle().
+				Foreground(threadOpHeaderFg).
+				Bold(true)
+
+	threadOpStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(threadOpBorder).
+			Foreground(threadFg).
+			Padding(0, 1)
+
+	threadOpHeaderStyle = lipgloss.NewStyle().
+				Foreground(threadOpHeaderFg).
+				Bold(true)
+
+	threadRepliesHeaderStyle = lipgloss.NewStyle().
+					Foreground(threadRepliesFg).
+					Bold(true)
+
+	threadSepStyle = lipgloss.NewStyle().
+			Foreground(threadSepFg)
+
+	threadRowNumStyle = lipgloss.NewStyle().
+				Foreground(threadSepFg)
+
+	threadRowNumSelectedStyle = lipgloss.NewStyle().
+					Foreground(threadRepliesFg).
+					Background(chatSelBg)
 )
 
 func getNameStyle(authorType string) lipgloss.Style {
