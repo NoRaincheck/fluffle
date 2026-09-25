@@ -173,7 +173,13 @@ func runCLI(t *testing.T, env []string, bin string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-func runCLIStdin(t *testing.T, env []string, bin, input string, args ...string) (string, string) {
+type cliResult struct {
+	stdout   string
+	stderr   string
+	exitCode int
+}
+
+func runCLIResult(t *testing.T, env []string, bin, input string, args ...string) cliResult {
 	t.Helper()
 	cmd := exec.Command(bin, args...)
 	cmd.Env = append(os.Environ(), env...)
@@ -181,10 +187,38 @@ func runCLIStdin(t *testing.T, env []string, bin, input string, args ...string) 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	exitCode := 0
 	if err := cmd.Run(); err != nil {
-		t.Fatalf("flf %v: %v\n%s", args, err, stderr.String())
+		exitErr, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("flf %v: %v", args, err)
+		}
+		exitCode = exitErr.ExitCode()
 	}
-	return strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String())
+	return cliResult{
+		stdout:   strings.TrimSpace(stdout.String()),
+		stderr:   strings.TrimSpace(stderr.String()),
+		exitCode: exitCode,
+	}
+}
+
+func startAgentDaemon(t *testing.T, bin, home string) {
+	t.Helper()
+	env := []string{"FLUFFLE_HOME=" + home}
+	result := runCLIResult(t, env, bin, "", "daemon", "start", "--background")
+	if result.exitCode != 0 {
+		t.Fatalf("daemon start failed: exit=%d stdout=%q stderr=%q", result.exitCode, result.stdout, result.stderr)
+	}
+	t.Cleanup(func() {
+		runCLIResult(t, env, bin, "", "daemon", "stop")
+	})
+	var last cliResult
+	if !waitFor(t, 10*time.Second, func() bool {
+		last = runCLIResult(t, env, bin, "", "daemon", "status")
+		return last.exitCode == 0 && strings.Contains(last.stdout, "daemon up")
+	}) {
+		t.Fatalf("daemon did not become ready: exit=%d stdout=%q stderr=%q", last.exitCode, last.stdout, last.stderr)
+	}
 }
 
 // readDaemonJSON reads and parses daemon.json.
@@ -1035,31 +1069,51 @@ func TestE2E_AgentPortableLoop(t *testing.T) {
 	repoDir := t.TempDir()
 	gitInit(t, repoDir)
 	env := []string{"FLUFFLE_HOME=" + home}
-	startDaemon(t, bin, home)
-	waitForDaemonReady(t, home, 10*time.Second)
+	startAgentDaemon(t, bin, home)
 
-	out, _ := runCLIStdin(t, env, bin, "", "channel", "create", "--name", "portable", "--repo", repoDir, "--json")
+	runOK := func(input string, args ...string) string {
+		t.Helper()
+		result := runCLIResult(t, env, bin, input, args...)
+		if result.exitCode != 0 {
+			t.Fatalf("flf %v: exit=%d stdout=%q stderr=%q", args, result.exitCode, result.stdout, result.stderr)
+		}
+		if result.stderr != "" {
+			t.Fatalf("flf %v wrote stderr: %q", args, result.stderr)
+		}
+		return result.stdout
+	}
+
+	out := runOK("", "channel", "create", "--name", "portable", "--repo", repoDir, "--json")
 	var channel struct {
 		ID int64 `json:"id"`
 	}
 	if err := json.Unmarshal([]byte(out), &channel); err != nil {
-		t.Fatal(err)
+		t.Fatalf("channel JSON: %v\n%s", err, out)
 	}
-	out, _ = runCLIStdin(t, env, bin, "", "thread", "new", "--channel", "portable", "--repo", repoDir, "--title", "portable loop", "--json")
+	if channel.ID == 0 {
+		t.Fatalf("channel = %s", out)
+	}
+
+	out = runOK("", "thread", "new", "--channel", "portable", "--repo", repoDir, "--title", "portable loop", "--json")
 	var thread struct {
 		ID int64 `json:"id"`
 	}
 	if err := json.Unmarshal([]byte(out), &thread); err != nil {
-		t.Fatal(err)
+		t.Fatalf("thread JSON: %v\n%s", err, out)
+	}
+	if thread.ID == 0 {
+		t.Fatalf("thread = %s", out)
 	}
 	threadID := strconv.FormatInt(thread.ID, 10)
 
-	runCLIStdin(t, env, bin, "", "message", "send", "--thread", threadID, "--text", "portable root", "--as", "alice", "--json")
+	runOK("", "message", "send", "--thread", threadID, "--text", "portable root", "--as", "alice", "--json")
+
 	type portableLine struct {
 		Type       string `json:"type"`
 		Seq        int64  `json:"seq"`
 		ParentSeq  int64  `json:"parent_seq"`
 		MessageSeq int64  `json:"message_seq"`
+		Role       string `json:"role"`
 		Name       string `json:"name"`
 		AuthorType string `json:"author_type"`
 		Content    string `json:"content"`
@@ -1067,8 +1121,12 @@ func TestE2E_AgentPortableLoop(t *testing.T) {
 	}
 	readEvents := func(raw string) []portableLine {
 		t.Helper()
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			return nil
+		}
 		var events []portableLine
-		for _, line := range strings.Split(strings.TrimSpace(raw), "\n") {
+		for _, line := range strings.Split(raw, "\n") {
 			var event portableLine
 			if err := json.Unmarshal([]byte(line), &event); err != nil {
 				t.Fatalf("invalid JSONL: %v\n%s", err, raw)
@@ -1077,58 +1135,64 @@ func TestE2E_AgentPortableLoop(t *testing.T) {
 		}
 		return events
 	}
+	assertStream := func(events []portableLine, label string) {
+		t.Helper()
+		if len(events) != 3 {
+			t.Fatalf("%s events = %d, want 3: %+v", label, len(events), events)
+		}
+		if events[0].Type != "message" || events[0].Seq <= 0 || events[0].Name != "alice" || events[0].AuthorType != "human" || events[0].Content != "portable root" {
+			t.Fatalf("%s root = %+v", label, events[0])
+		}
+		if events[1].Type != "message" || events[1].Seq <= events[0].Seq || events[1].ParentSeq != events[0].Seq || events[1].Name != "portable-agent" || events[1].AuthorType != "agent" || events[1].Content != "portable reply" {
+			t.Fatalf("%s reply = %+v, root seq %d", label, events[1], events[0].Seq)
+		}
+		if events[2].Type != "reaction" || events[2].MessageSeq != events[0].Seq || events[2].Name != "portable-agent" || events[2].AuthorType != "agent" || events[2].Emoji != "+1" {
+			t.Fatalf("%s reaction = %+v, root seq %d", label, events[2], events[0].Seq)
+		}
+	}
 
-	out, _ = runCLIStdin(t, env, bin, "", "agent", "read", "--thread", threadID, "--json")
-	events := readEvents(out)
-	if len(events) != 1 || events[0].Type != "message" || events[0].Name != "alice" || events[0].Content != "portable root" {
+	events := readEvents(runOK("", "agent", "read", "--thread", threadID, "--json"))
+	if len(events) != 1 || events[0].Type != "message" || events[0].Seq <= 0 || events[0].Name != "alice" || events[0].Content != "portable root" {
 		t.Fatalf("initial events = %+v", events)
 	}
 	rootSeq := events[0].Seq
 
-	out, _ = runCLIStdin(t, env, bin, "portable reply", "message", "send", "--thread", threadID, "--reply-to-seq", strconv.FormatInt(rootSeq, 10), "--text", "-", "--agent-id", "portable-agent", "--as", "portable-agent", "--json")
+	out = runOK("portable reply", "message", "send", "--thread", threadID, "--reply-to-seq", strconv.FormatInt(rootSeq, 10), "--text", "-", "--agent-id", "portable-agent", "--as", "portable-agent", "--json")
 	var reply struct {
 		Seq       int64 `json:"seq"`
 		ParentSeq int64 `json:"parent_seq"`
 	}
 	if err := json.Unmarshal([]byte(out), &reply); err != nil {
-		t.Fatal(err)
+		t.Fatalf("reply JSON: %v\n%s", err, out)
 	}
 	if reply.ParentSeq != rootSeq || reply.Seq <= rootSeq {
 		t.Fatalf("reply = %+v, root seq %d", reply, rootSeq)
 	}
 
-	out, _ = runCLIStdin(t, env, bin, "", "react", "add", "--thread", threadID, "--message-seq", strconv.FormatInt(rootSeq, 10), "--emoji", "+1", "--agent-id", "portable-agent", "--as", "portable-agent")
-	if out != "ok" {
-		t.Fatalf("reaction output = %q", out)
+	reactionOut := runOK("", "react", "add", "--thread", threadID, "--message-seq", strconv.FormatInt(rootSeq, 10), "--emoji", "+1", "--agent-id", "portable-agent", "--as", "portable-agent")
+	if reactionOut != "ok" {
+		t.Fatalf("reaction output = %q", reactionOut)
 	}
 
-	out, _ = runCLIStdin(t, env, bin, "", "agent", "read", "--thread", threadID, "--after-seq", strconv.FormatInt(rootSeq, 10), "--json")
-	events = readEvents(out)
+	events = readEvents(runOK("", "agent", "read", "--thread", threadID, "--after-seq", strconv.FormatInt(rootSeq, 10), "--json"))
 	if len(events) != 1 || events[0].Type != "message" || events[0].Seq != reply.Seq || events[0].ParentSeq != rootSeq {
 		t.Fatalf("cursor events = %+v", events)
 	}
-
-	out, _ = runCLIStdin(t, env, bin, "", "agent", "read", "--thread", threadID, "--json")
-	events = readEvents(out)
-	var foundReaction bool
-	for _, event := range events {
-		if event.Type == "reaction" && event.MessageSeq == rootSeq && event.Name == "portable-agent" && event.Emoji == "+1" {
-			foundReaction = true
-		}
-	}
-	if !foundReaction {
-		t.Fatalf("reaction event missing: %+v", events)
+	if events = readEvents(runOK("", "agent", "read", "--thread", threadID, "--after-seq", strconv.FormatInt(reply.Seq, 10), "--json")); len(events) != 0 {
+		t.Fatalf("empty cursor events = %+v", events)
 	}
 
-	out, _ = runCLIStdin(t, env, bin, "", "inbox", "--json")
+	events = readEvents(runOK("", "agent", "read", "--thread", threadID, "--json"))
+	assertStream(events, "source")
+
 	var inbox []struct {
 		ThreadID    int64  `json:"ThreadID"`
 		ChannelID   int64  `json:"channel_id"`
 		ChannelName string `json:"channel_name"`
 		Content     string `json:"Content"`
 	}
-	if err := json.Unmarshal([]byte(out), &inbox); err != nil {
-		t.Fatal(err)
+	if err := json.Unmarshal([]byte(runOK("", "inbox", "--json")), &inbox); err != nil {
+		t.Fatalf("inbox JSON: %v", err)
 	}
 	var foundRoot, foundReply bool
 	for _, message := range inbox {
@@ -1143,16 +1207,64 @@ func TestE2E_AgentPortableLoop(t *testing.T) {
 		t.Fatalf("inbox = %+v", inbox)
 	}
 
-	appendInput := "{\"type\":\"message\",\"name\":\"portable-agent\",\"author_type\":\"agent\",\"role\":\"assistant\",\"content\":\"portable appended\"}\n"
-	stdout, stderr := runCLIStdin(t, env, bin, appendInput, "agent", "append", "--thread", threadID, "--file", "-", "--agent-id", "portable-agent")
-	if stdout != "" || stderr != "" {
-		t.Fatalf("agent append output = %q, stderr = %q", stdout, stderr)
-	}
-	out, _ = runCLIStdin(t, env, bin, "", "agent", "read", "--thread", threadID, "--after-seq", strconv.FormatInt(reply.Seq, 10), "--json")
-	events = readEvents(out)
-	if len(events) != 1 || events[0].Type != "message" || events[0].Seq <= reply.Seq || events[0].Name != "portable-agent" || events[0].AuthorType != "agent" || events[0].Content != "portable appended" {
-		t.Fatalf("appended events = %+v", events)
+	exportRaw := runOK("", "thread", "export", "--thread", threadID, "--format", "jsonl")
+	exported := readEvents(exportRaw)
+	assertStream(exported, "export")
+	exportPath := filepath.Join(tmpDir, "portable.jsonl")
+	if err := os.WriteFile(exportPath, []byte(exportRaw), 0o644); err != nil {
+		t.Fatalf("write export: %v", err)
 	}
 
-	runCLIStdin(t, env, bin, "", "daemon", "stop")
+	importOut := runOK("", "thread", "import", "--file", exportPath, "--channel", "portable-import", "--repo", repoDir)
+	parts := strings.Fields(importOut)
+	if len(parts) != 2 || parts[0] != "thread" {
+		t.Fatalf("import output = %q", importOut)
+	}
+	importedID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil || importedID == 0 {
+		t.Fatalf("imported thread ID = %q: %v", importOut, err)
+	}
+
+	imported := readEvents(runOK("", "agent", "read", "--thread", strconv.FormatInt(importedID, 10), "--json"))
+	assertStream(imported, "imported")
+	if imported[0].Seq != 1 || imported[1].Seq != 2 {
+		t.Fatalf("imported sequence remap = %d,%d", imported[0].Seq, imported[1].Seq)
+	}
+
+	appendInput := "{\"type\":\"message\",\"parent_seq\":" + strconv.FormatInt(reply.Seq, 10) + ",\"name\":\"portable-agent\",\"author_type\":\"agent\",\"role\":\"assistant\",\"content\":\"portable appended\"}\n" +
+		"{\"type\":\"reaction\",\"message_seq\":" + strconv.FormatInt(reply.Seq+1, 10) + ",\"name\":\"portable-agent\",\"author_type\":\"agent\",\"emoji\":\"👀\"}\n"
+	appendResult := runCLIResult(t, env, bin, appendInput, "agent", "append", "--thread", threadID, "--file", "-", "--agent-id", "portable-agent")
+	if appendResult.exitCode != 0 || appendResult.stdout != "" || appendResult.stderr != "" {
+		t.Fatalf("agent append: exit=%d stdout=%q stderr=%q", appendResult.exitCode, appendResult.stdout, appendResult.stderr)
+	}
+	appended := readEvents(runOK("", "agent", "read", "--thread", threadID, "--after-seq", strconv.FormatInt(reply.Seq, 10), "--json"))
+	if len(appended) != 2 || appended[0].Type != "message" || appended[0].Seq != reply.Seq+1 || appended[0].ParentSeq != reply.Seq || appended[0].AuthorType != "agent" || appended[0].Content != "portable appended" {
+		t.Fatalf("appended message = %+v", appended)
+	}
+	if appended[1].Type != "reaction" || appended[1].MessageSeq != appended[0].Seq || appended[1].AuthorType != "agent" || appended[1].Emoji != "👀" {
+		t.Fatalf("appended reaction = %+v", appended)
+	}
+
+	failure := runCLIResult(t, env, bin, "", "message", "send", "--thread", threadID, "--reply-to-seq", "0", "--text", "-", "--agent-id", "portable-agent")
+	if failure.exitCode != 1 {
+		t.Fatalf("invalid sequence exit = %d, want 1", failure.exitCode)
+	}
+	if failure.stdout != "" {
+		t.Fatalf("invalid sequence stdout = %q", failure.stdout)
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal([]byte(failure.stderr), &envelope); err != nil {
+		t.Fatalf("invalid error envelope: %v\n%s", err, failure.stderr)
+	}
+	if len(envelope) != 2 || envelope["code"] != "BAD_ARGS" {
+		t.Fatalf("error envelope = %#v", envelope)
+	}
+	if message, ok := envelope["message"].(string); !ok || message == "" {
+		t.Fatalf("error message = %#v", envelope["message"])
+	}
+
+	stop := runCLIResult(t, env, bin, "", "daemon", "stop")
+	if stop.exitCode != 0 || stop.stderr != "" || stop.stdout != "daemon stopped" {
+		t.Fatalf("daemon stop: exit=%d stdout=%q stderr=%q", stop.exitCode, stop.stdout, stop.stderr)
+	}
 }

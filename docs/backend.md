@@ -51,7 +51,8 @@ CREATE TABLE messages(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   thread_id INTEGER NOT NULL REFERENCES threads(id),
   seq INTEGER NOT NULL,
-  author TEXT NOT NULL CHECK(length(trim(author)) > 0),
+  parent_id INTEGER REFERENCES messages(id),
+  name TEXT NOT NULL CHECK(length(trim(name)) > 0),
   author_type TEXT NOT NULL CHECK(author_type IN ('human','agent')),
   role TEXT NOT NULL CHECK(role IN ('user','assistant','system')),
   content TEXT NOT NULL CHECK(length(trim(content)) > 0),
@@ -64,14 +65,14 @@ CREATE TABLE reactions(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   message_id INTEGER NOT NULL REFERENCES messages(id),
   emoji TEXT NOT NULL CHECK(length(trim(emoji)) > 0),
-  author TEXT NOT NULL CHECK(length(trim(author)) > 0),
+  name TEXT NOT NULL CHECK(length(trim(name)) > 0),
   author_type TEXT NOT NULL CHECK(author_type IN ('human','agent')),
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-  UNIQUE(message_id, emoji, author)
+  UNIQUE(message_id, emoji, name)
 );
 ```
 
-Integer IDs (`--thread 42`). `author_type` is `human` unless `--agent-id` flag or `X-Fluffle-Agent` header is present. `seq` is daemon-assigned (`max(seq)+1` per thread in transaction).
+Integer IDs (`--thread 42`). Live write identity is derived by the daemon from a non-empty `X-Fluffle-Agent` header; the CLI `--agent-id` flag supplies that header. Client-supplied `author_type` is never trusted. `seq` is daemon-assigned (`max(seq)+1` per thread in transaction).
 
 ### Channels
 
@@ -85,7 +86,7 @@ Orphaned channels are first-class. `channel create --orphaned --name ANYTHING` r
 
 The daemon binds `127.0.0.1:0` (ephemeral port) and persists `{port, pid, started_at}` to `~/.fluffle/daemon.json`.
 
-**CLI probe:** read `daemon.json`, `GET /v1/health`. On failure, spawn detached `flf daemon start --background`, retry probe 3x (1s between attempts).
+**CLI probe:** read `daemon.json`, `GET /v1/health`. On failure, spawn detached `flf daemon start --background`, retry probe 3x (1s between attempts). Health probes have a 1-second finite timeout; the shared CLI/TUI HTTP client has a 5-second finite request timeout. Startup polling is bounded, and write requests are never retried automatically.
 
 **Explicit control:**
 - `flf daemon start` — binds, writes `daemon.json`, serves. With `--background`, runs detached.
@@ -96,7 +97,7 @@ The daemon binds `127.0.0.1:0` (ephemeral port) and persists `{port, pid, starte
 
 ## API reference
 
-All endpoints return `Content-Type: application/json`. Errors use envelope `{"code":"...","message":"..."}`.
+All endpoints return `Content-Type: application/json` on success and error responses. Errors use the exact envelope `{"code":"...","message":"..."}`.
 
 ### `GET /v1/health`
 
@@ -114,15 +115,29 @@ Returns `{"ok":true}` with status 200.
 
 **`POST /v1/channels/:id/threads`** — Create thread. Body: `{"title":"..."}`. Agents get 403. Returns `{"id":1}`.
 
+### Inbox
+
+**`GET /v1/inbox?limit=N`** — List recent messages across channels and threads. The default limit is 100 and the server caps it at 200. Results are ordered by message recency.
+
 ### Messages
 
-**`GET /v1/threads/:id/messages?last=N`** — List messages in a thread. `last=N` returns last N messages. ORDER BY seq ASC. Returns `[]Message`.
+**`GET /v1/threads/:id/messages?last=N`** — List messages in a thread. `last=N` returns the last N messages in ascending sequence order. An absent `last` returns all messages.
 
-**`POST /v1/threads/:id/messages`** — Append message. Body: `{"author":"...", "role":"user", "content":"...", "agent_id":"...", "created_at":"RFC3339"}`. `agent_id` or `X-Fluffle-Agent` header sets `author_type=agent`. `created_at` is optional (defaults to now). Daemon reassigns `seq`. Returns `{"seq":1}`.
+**`GET /v1/threads/:id/messages?after_seq=N`** — Return only messages whose thread-local `seq` is strictly greater than `N`, in ascending order. `after_seq` and `last` are mutually exclusive; `after_seq=0` is a valid cursor at the beginning of the thread.
+
+**`POST /v1/threads/:id/messages`** — Append one message. The body accepts `name` (or the legacy `author` alias), `role`, `content`, optional `parent_seq` or legacy `parent_id`, `agent_id`, and optional RFC3339 `created_at`. The daemon derives `author_type` from `X-Fluffle-Agent` and reassigns `seq`. Returns `{"seq":N}`.
 
 ### Reactions
 
-**`POST /v1/messages/:id/reactions`** — Add reaction. Body: `{"emoji":"...", "author":"...", "agent_id":"..."}`. `UNIQUE(message_id, emoji, author)` constraint. Returns `{"ok":true}`.
+**`GET /v1/threads/:id/reactions`** — List reactions for messages in a thread, including each reaction's `message_seq`.
+
+**`POST /v1/threads/:id/messages/:message_seq/reactions`** — Add a reaction using a thread-local message sequence. The target must be a message in the same thread. Body: `{"emoji":"...", "name":"...", "agent_id":"..."}`.
+
+**`POST /v1/messages/:id/reactions`** — Legacy database-ID form of reaction creation. It remains available for humans and agents. The `(message_id, emoji, name)` uniqueness constraint still applies.
+
+### Events
+
+**`POST /v1/threads/:id/events`** — Append a complete JSONL event batch. Body: `{"events":[...],"import":false}`. The daemon validates and commits the batch in one transaction. `import=true` is reserved for a human-controlled import and preserves serialized attribution as provenance; it does not grant permissions. Live agent requests derive every event's `author_type` from `X-Fluffle-Agent`.
 
 ## CLI reference
 
@@ -133,24 +148,25 @@ flf daemon status
 
 flf init [--repo DIR] [--orphaned]
 
+flf inbox [--limit N] [--json]
 flf channel list --repo PATH [--include-orphaned]
 flf channel create --name N (--repo PATH | --orphaned)
 
-flf thread list --channel NAME --repo PATH
-flf thread new --channel NAME --repo PATH --title T
+flf thread list --channel NAME (--repo PATH | --orphaned)
+flf thread new --channel NAME (--repo PATH | --orphaned) --title T
 flf thread export --thread ID --format jsonl
 flf thread import --file F --channel NAME (--repo PATH | --orphaned)
 
-flf message send --thread ID --text T [--as NAME] [--agent-id ID]
-flf react add --message ID --emoji E [--as NAME] [--agent-id ID]
+flf message send --thread ID (--text T | --text -) [--reply-to ID | --reply-to-seq N] [--as NAME] [--agent-id ID]
+flf react add (--message ID | --thread ID --message-seq N) --emoji E [--as NAME] [--agent-id ID]
 
-flf agent read --thread ID [--last N] [--agent-id ID]
-flf agent append --thread ID --file F [--agent-id ID]
+flf agent read --thread ID [--last N | --after-seq N] [--json] [--agent-id ID]
+flf agent append --thread ID (--file F | --file -) [--agent-id ID]
 
 flf tui  # deferred: exits 1 with "backend-only milestone: tui deferred"
 ```
 
-`--as` defaults to `$USER`. Presence of `--agent-id` sets `author_type=agent`.
+`--as` defaults to `$USER`. `--agent-id` sets the `X-Fluffle-Agent` header; it does not grant permission to create channels or threads.
 
 ### `init`
 
@@ -166,51 +182,56 @@ If `--orphaned`: POST `{"name":N,"orphaned":true}`. Else: canonicalize + git ins
 
 ### `thread list` / `thread new`
 
-Resolves channel by name via channel list + match. Then GET or POST threads. Prints `thread <id>`.
+Resolves channel by name and repository scope via channel list + match. Then GET or POST threads. Prints `thread <id>`.
 
 ### `thread export`
 
-GET all messages, convert to JSONL lines, write to stdout. `--format` only accepts `jsonl`.
+Fetches the thread's messages and reactions through the daemon, projects them to portable JSONL, and writes the stream to stdout. Database IDs are not part of the portable stream. `--format` only accepts `jsonl`.
 
 ### `thread import`
 
-Parse JSONL file first (fail on bad lines before any POST). Resolve or create channel. POST new thread titled `import <basename>`. Replay lines.
+Reads and parses the complete JSONL file before starting daemon work. Resolves or creates the requested repo-scoped channel, creates a new thread titled `import <basename>`, and sends one `import=true` event batch. Source message sequences are remapped to the destination thread; `parent_seq` and `message_seq` are resolved through that map. The event batch is atomic.
 
 ### `agent read`
 
-GET messages, convert to JSONL, write to stdout. Same as `thread export` but with optional `--last N`.
+Fetches messages using the selected `last` or exclusive `after_seq` cursor and emits portable JSONL. Message lines include `seq` and `parent_seq`; reaction lines include `message_seq`. A cursor response contains only messages newer than the cursor and reactions targeting those messages. An empty result is valid.
 
 ### `agent append`
 
-Parse JSONL file (fail on bad lines before any POST). POST each line to daemon. Daemon reassigns `seq`. No partial write on parse failure.
+Reads the complete file or stdin before daemon startup, parses every JSONL line, and sends one atomic event batch. Incoming live `seq` values are ignored and the daemon assigns destination sequences. A response lost after dispatch is reported as `DELIVERY_UNKNOWN`; the command does not retry the write.
 
 ### `message send`
 
-POST to `/v1/threads/:id/messages` with `author, role=user, content, agent_id`. Prints `seq <n>`.
+With `--text -`, reads the complete stdin value before contacting the daemon. `--reply-to-seq N` targets the parent by thread-local sequence; it is mutually exclusive with legacy `--reply-to ID`. Prints `seq <n>` or the requested JSON result.
 
 ### `react add`
 
-POST to `/v1/messages/:id/reactions`. Prints `ok`.
+`--message-seq N` targets a reaction by thread-local sequence and requires `--thread`; it is mutually exclusive with legacy `--message ID`. Prints `ok`.
 
 ## Error codes
 
 | Code | When | CLI exit code |
 |------|------|---------------|
-| `DAEMON_DOWN` | probe fails even after 3 spawn retries | 2 |
-| `NOT_A_GIT_REPO` | `--repo` without `.git`, not `--orphaned` | 1 |
-| `AGENT_FORBIDDEN` | agent hits human-only endpoint (channel create, thread new) | 1 |
-| `THREAD_NOT_FOUND` | bad thread ID | 1 |
-| `CHANNEL_NOT_FOUND` | bad channel ID or unknown route | 1 |
-| `BAD_JSONL` | parse failure on append/import, validation failure, conflict (409/400) | 1 |
-| `FILE_READ` | local file unreadable (agent append/import) | 1 |
+| `DAEMON_DOWN` | daemon discovery or a read cannot reach a healthy local daemon | 2 |
+| `DAEMON_ERROR` | server-side storage failure or malformed daemon response | 2 |
+| `DELIVERY_UNKNOWN` | a write may have committed but its response was lost or invalid; read the thread before retrying | 2 |
+| `BAD_ARGS` | invalid flags, missing required flags, or mutually exclusive sequence/ID flags | 1 |
+| `BAD_JSONL` | JSONL parse/validation failure, invalid API body, or duplicate reaction | 1 |
+| `FILE_READ` | local file or stdin cannot be read | 1 |
+| `NOT_A_GIT_REPO` | a repo-scoped command was given a path without `.git` | 1 |
+| `AGENT_FORBIDDEN` | an agent attempts a human-only channel or thread creation | 1 |
+| `THREAD_NOT_FOUND` | thread or referenced event target is missing | 1 |
+| `CHANNEL_NOT_FOUND` / `CHANNEL_EXISTS` | channel lookup or uniqueness failure | 1 |
+| `METHOD_NOT_ALLOWED` | HTTP method is not valid for a known route | 1 |
+| Other client codes | local validation or request errors | 1 |
 
-All JSON error bodies are decoded and reprinted as `CODE: message` on stderr. Transport failures → `DAEMON_DOWN`.
+Every CLI error is emitted on stderr as exactly one JSON object with `code` and `message`; successful output remains on stdout. The exit contract is `0` for success, `1` for client errors, and `2` for daemon or transport errors. Read transport failures are `DAEMON_DOWN`; write transport failures are `DELIVERY_UNKNOWN` and are not retried automatically.
 
 ## Agent contract
 
 ### Identity
 
-Agents identified by `X-Fluffle-Agent` header (non-empty). Daemon re-derives `author_type` from header + `agent_id` body field — never trust `author_type` from client request bodies.
+Agents are identified by a non-empty `X-Fluffle-Agent` header. The CLI `--agent-id` flag supplies that header. The daemon re-derives live `author_type` from the header and never trusts `author_type` from a client request body. A human-controlled import may retain serialized attribution as historical provenance without granting agent permissions.
 
 ### Permissions
 
@@ -226,17 +247,25 @@ Agents identified by `X-Fluffle-Agent` header (non-empty). Daemon re-derives `au
 
 ### JSONL line schema
 
-One JSON object per line. ACP-compatible.
+One JSON object per line. `type` is `message` or `reaction`; a missing `type` is accepted on input and normalized to `message`. The portable stream contains no database IDs.
+
+A message line is:
 
 ```json
-{"seq":12,"role":"user","author":"alice","author_type":"human","content":"...","timestamp":"2026-09-22T00:00:00Z","metadata":{}}
+{"type":"message","seq":12,"parent_seq":8,"role":"assistant","name":"reviewer","author_type":"agent","content":"Ready for review.","timestamp":"2026-09-25T10:00:00Z","metadata":{}}
 ```
 
-Fields: `seq` (int64), `role` (user/assistant/system), `author` (string), `author_type` (human/agent), `content` (string), `timestamp` (RFC3339), `metadata` (object, accepted but not persisted in MVP).
+A reaction line is:
+
+```json
+{"type":"reaction","message_seq":12,"name":"reviewer","author_type":"agent","emoji":"👀","timestamp":"2026-09-25T10:01:00Z"}
+```
+
+Message lines require `name`, `role`, and `content`; `seq` is assigned by the daemon for live appends and `parent_seq` is optional. Reaction lines require `name`, `message_seq`, and `emoji`. `name` is the portable author field, `author_type` is `human` or `agent`, `timestamp` is RFC3339, and `metadata` is an object accepted by the codec but not persisted by the current store.
 
 ### Import/export invariant
 
-`export → import → export` is byte-identical modulo `seq`. Metadata is accepted on import but not persisted (no column). `agent append` ignores incoming `seq` — daemon reassigns `max+1`.
+Export and import preserve message content, timestamps, attribution, reply relationships, and reaction targets. Import remaps source message sequences to destination sequences and resolves `parent_seq` and `message_seq` through that map. Database IDs do not cross the boundary, metadata is not persisted, and live `agent append` ignores incoming `seq` values. A response lost after a write may have committed and is classified as `DELIVERY_UNKNOWN`.
 
 ### Append-only
 
