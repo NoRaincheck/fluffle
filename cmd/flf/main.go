@@ -26,13 +26,11 @@ import (
 
 func main() { os.Exit(run(os.Args[1:])) }
 
+const rootUsage = "usage: flf <daemon|init|channel|thread|message|react|agent|tui>\n  Channel: repo-anchored or --orphaned room (e.g. general)\n  Thread: titled conversation inside a channel\n  Message: chat line inside a thread (use --thread ID)"
+
 func run(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: flf <daemon|init|channel|thread|message|react|agent|tui>")
-		fmt.Fprintln(os.Stderr, "  Channel: repo-anchored or --orphaned room (e.g. general)")
-		fmt.Fprintln(os.Stderr, "  Thread: titled conversation inside a channel")
-		fmt.Fprintln(os.Stderr, "  Message: chat line inside a thread (use --thread ID)")
-		return 1
+		return fail("BAD_ARGS", rootUsage)
 	}
 	switch args[0] {
 	case "daemon":
@@ -52,8 +50,7 @@ func run(args []string) int {
 	case "tui":
 		return tui.Run()
 	default:
-		fmt.Fprintln(os.Stderr, "usage: flf <daemon|init|channel|thread|message|react|agent|tui>")
-		return 1
+		return fail("BAD_ARGS", rootUsage)
 	}
 }
 
@@ -63,32 +60,28 @@ type apiErrBody struct {
 }
 
 func printAPIError(resp *http.Response) int {
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fail("DAEMON_ERROR", fmt.Sprintf("read error response: %v", err))
+	}
 	var eb apiErrBody
 	if err := json.Unmarshal(body, &eb); err != nil || eb.Code == "" {
-		fmt.Fprintf(os.Stderr, "DAEMON_DOWN: status %d\n", resp.StatusCode)
-		return 1
+		return fail("DAEMON_ERROR", fmt.Sprintf("status %d: invalid error response", resp.StatusCode))
 	}
-	fmt.Fprintf(os.Stderr, "%s: %s\n", eb.Code, eb.Message)
-	if eb.Code == "DAEMON_DOWN" {
-		return 2
-	}
-	return 1
+	return fail(eb.Code, eb.Message)
 }
 
 func apiGet(u, agentID string, out any) int {
 	req, err := http.NewRequest(http.MethodGet, u, nil)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
-		return 2
+		return fail("DAEMON_ERROR", err.Error())
 	}
 	if agentID != "" {
 		req.Header.Set("X-Fluffle-Agent", agentID)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
-		return 2
+		return fail("DAEMON_DOWN", err.Error())
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
@@ -96,8 +89,7 @@ func apiGet(u, agentID string, out any) int {
 	}
 	if out != nil {
 		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-			fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
-			return 2
+			return fail("DAEMON_ERROR", err.Error())
 		}
 	}
 	return 0
@@ -106,13 +98,11 @@ func apiGet(u, agentID string, out any) int {
 func apiPost(u, agentID string, payload any, out any) int {
 	raw, err := json.Marshal(payload)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
-		return 2
+		return fail("BAD_REQUEST", err.Error())
 	}
 	req, err := http.NewRequest(http.MethodPost, u, bytes.NewReader(raw))
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
-		return 2
+		return fail("BAD_REQUEST", err.Error())
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if agentID != "" {
@@ -120,8 +110,7 @@ func apiPost(u, agentID string, payload any, out any) int {
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
-		return 2
+		return fail("DELIVERY_UNKNOWN", fmt.Sprintf("read the thread before retrying: %v", err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
@@ -129,38 +118,40 @@ func apiPost(u, agentID string, payload any, out any) int {
 	}
 	if out != nil {
 		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-			fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
-			return 2
+			return fail("DAEMON_ERROR", err.Error())
 		}
 	}
 	return 0
 }
 
+func newFlagSet(name string) *flag.FlagSet {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	return fs
+}
+
 func initCmd(args []string) int {
-	fs := flag.NewFlagSet("init", flag.ContinueOnError)
+	fs := newFlagSet("init")
 	repoFlag := fs.String("repo", "", "repo directory (default: cwd)")
 	orphaned := fs.Bool("orphaned", false, "allow initializing outside a git repo")
 	if err := fs.Parse(args); err != nil {
-		return 1
+		return fail("BAD_ARGS", err.Error())
 	}
 	dir := *repoFlag
 	if dir == "" {
 		cwd, err := os.Getwd()
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "NOT_A_GIT_REPO:", err)
-			return 1
+			return fail("NOT_A_GIT_REPO", err.Error())
 		}
 		dir = cwd
 	}
 	abs, err := repo.Canonicalize(dir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "NOT_A_GIT_REPO: %s is not a git repo (suggest --orphaned)\n", dir)
-		return 1
+		return fail("NOT_A_GIT_REPO", fmt.Sprintf("%s is not a git repo (suggest --orphaned)", dir))
 	}
 	_, _, isGit := repo.InspectGitDir(abs)
 	if !isGit && !*orphaned {
-		fmt.Fprintf(os.Stderr, "NOT_A_GIT_REPO: %s is not a git repo (suggest --orphaned)\n", abs)
-		return 1
+		return fail("NOT_A_GIT_REPO", fmt.Sprintf("%s is not a git repo (suggest --orphaned)", abs))
 	}
 	fmt.Printf("initialized %s\n", abs)
 	return 0
@@ -168,9 +159,7 @@ func initCmd(args []string) int {
 
 func channelCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: flf channel <list|create>")
-		fmt.Fprintln(os.Stderr, "  Channel: repo-anchored room or --orphaned (no git)")
-		return 1
+		return fail("BAD_ARGS", "usage: flf channel <list|create>\n  Channel: repo-anchored room or --orphaned (no git)")
 	}
 	switch args[0] {
 	case "list":
@@ -178,32 +167,29 @@ func channelCmd(args []string) int {
 	case "create":
 		return channelCreateCmd(args[1:])
 	default:
-		fmt.Fprintln(os.Stderr, "usage: flf channel <list|create>")
-		return 1
+		return fail("BAD_ARGS", "usage: flf channel <list|create>")
 	}
 }
 
 func channelListCmd(args []string) int {
-	fs := flag.NewFlagSet("channel list", flag.ContinueOnError)
+	fs := newFlagSet("channel list")
 	repoPath := fs.String("repo", "", "repo path (default: cwd)")
 	includeOrphaned := fs.Bool("include-orphaned", false, "include orphaned channels")
 	jsonOut := fs.Bool("json", false, "JSON output")
 	if err := fs.Parse(args); err != nil {
-		return 1
+		return fail("BAD_ARGS", err.Error())
 	}
 	var abs string
 	if *repoPath != "" {
 		var err error
 		abs, err = repo.Canonicalize(*repoPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "NOT_A_GIT_REPO: %s\n", *repoPath)
-			return 1
+			return fail("NOT_A_GIT_REPO", *repoPath)
 		}
 	}
 	base, err := client.EnsureDaemon()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
-		return 2
+		return fail("DAEMON_DOWN", err.Error())
 	}
 	inc := "0"
 	if *includeOrphaned {
@@ -233,21 +219,19 @@ func channelListCmd(args []string) int {
 }
 
 func channelCreateCmd(args []string) int {
-	fs := flag.NewFlagSet("channel create", flag.ContinueOnError)
+	fs := newFlagSet("channel create")
 	name := fs.String("name", "", "channel name")
 	repoPath := fs.String("repo", "", "repo path (default: cwd)")
 	orphaned := fs.Bool("orphaned", false, "create orphaned channel")
 	jsonOut := fs.Bool("json", false, "JSON output")
 	if err := fs.Parse(args); err != nil {
-		return 1
+		return fail("BAD_ARGS", err.Error())
 	}
 	if *name == "" {
-		fmt.Fprintln(os.Stderr, "usage: flf channel create --name N (--repo PATH | --orphaned)")
-		return 1
+		return fail("BAD_ARGS", "usage: flf channel create --name N (--repo PATH | --orphaned)")
 	}
 	if *orphaned && *repoPath != "" {
-		fmt.Fprintln(os.Stderr, "usage: flf channel create --name N (--repo PATH | --orphaned)")
-		return 1
+		return fail("BAD_ARGS", "usage: flf channel create --name N (--repo PATH | --orphaned)")
 	}
 	var body map[string]any
 	if *orphaned {
@@ -258,26 +242,22 @@ func channelCreateCmd(args []string) int {
 			var err error
 			abs, err = os.Getwd()
 			if err != nil {
-				fmt.Fprintln(os.Stderr, "CWD_ERROR:", err)
-				return 1
+				return fail("CWD_ERROR", err.Error())
 			}
 		}
 		abs, err := repo.Canonicalize(abs)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "NOT_A_GIT_REPO: %s (suggest --orphaned)\n", abs)
-			return 1
+			return fail("NOT_A_GIT_REPO", fmt.Sprintf("%s (suggest --orphaned)", abs))
 		}
 		remote, head, isGit := repo.InspectGitDir(abs)
 		if !isGit {
-			fmt.Fprintf(os.Stderr, "NOT_A_GIT_REPO: %s (suggest --orphaned)\n", abs)
-			return 1
+			return fail("NOT_A_GIT_REPO", fmt.Sprintf("%s (suggest --orphaned)", abs))
 		}
 		body = map[string]any{"Name": *name, "RepoAbsPath": abs, "RepoRemote": remote, "RepoHeadSHA": head, "Orphaned": false}
 	}
 	base, err := client.EnsureDaemon()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
-		return 2
+		return fail("DAEMON_DOWN", err.Error())
 	}
 	var out struct {
 		ID int64 `json:"id"`
@@ -309,8 +289,7 @@ func channelCreateCmd(args []string) int {
 
 func threadCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: flf thread <list|new|export|import>")
-		return 1
+		return fail("BAD_ARGS", "usage: flf thread <list|new|export|import>")
 	}
 	switch args[0] {
 	case "list":
@@ -322,8 +301,7 @@ func threadCmd(args []string) int {
 	case "import":
 		return threadImportCmd(args[1:])
 	default:
-		fmt.Fprintln(os.Stderr, "usage: flf thread <list|new|export|import>")
-		return 1
+		return fail("BAD_ARGS", "usage: flf thread <list|new|export|import>")
 	}
 }
 
@@ -343,8 +321,7 @@ func resolveChannelID(base, abs, name string, orphaned bool) (int64, int) {
 			return c.ID, 0
 		}
 	}
-	fmt.Fprintf(os.Stderr, "CHANNEL_NOT_FOUND: %s\n", name)
-	return 0, 1
+	return 0, fail("CHANNEL_NOT_FOUND", name)
 }
 
 func resolveChannelIDLegacy(base, abs, name string) (int64, int) {
@@ -352,21 +329,19 @@ func resolveChannelIDLegacy(base, abs, name string) (int64, int) {
 }
 
 func threadListCmd(args []string) int {
-	fs := flag.NewFlagSet("thread list", flag.ContinueOnError)
+	fs := newFlagSet("thread list")
 	channel := fs.String("channel", "", "channel name")
 	repoPath := fs.String("repo", "", "repo path (default: cwd)")
 	orphaned := fs.Bool("orphaned", false, "list threads in orphaned channel")
 	jsonOut := fs.Bool("json", false, "JSON output")
 	if err := fs.Parse(args); err != nil {
-		return 1
+		return fail("BAD_ARGS", err.Error())
 	}
 	if *channel == "" {
-		fmt.Fprintln(os.Stderr, "usage: flf thread list --channel NAME [--repo PATH | --orphaned] [--json]")
-		return 1
+		return fail("BAD_ARGS", "usage: flf thread list --channel NAME [--repo PATH | --orphaned] [--json]")
 	}
 	if *orphaned && *repoPath != "" {
-		fmt.Fprintln(os.Stderr, "usage: flf thread list --channel NAME [--repo PATH | --orphaned]")
-		return 1
+		return fail("BAD_ARGS", "usage: flf thread list --channel NAME [--repo PATH | --orphaned]")
 	}
 	var abs string
 	if !*orphaned {
@@ -375,21 +350,18 @@ func threadListCmd(args []string) int {
 			var err error
 			abs, err = os.Getwd()
 			if err != nil {
-				fmt.Fprintln(os.Stderr, "CWD_ERROR:", err)
-				return 1
+				return fail("CWD_ERROR", err.Error())
 			}
 		}
 		var err error
 		abs, err = repo.Canonicalize(abs)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "NOT_A_GIT_REPO: %s\n", abs)
-			return 1
+			return fail("NOT_A_GIT_REPO", abs)
 		}
 	}
 	base, err := client.EnsureDaemon()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
-		return 2
+		return fail("DAEMON_DOWN", err.Error())
 	}
 	id, code := resolveChannelID(base, abs, *channel, *orphaned)
 	if code != 0 {
@@ -415,22 +387,20 @@ func threadListCmd(args []string) int {
 }
 
 func threadNewCmd(args []string) int {
-	fs := flag.NewFlagSet("thread new", flag.ContinueOnError)
+	fs := newFlagSet("thread new")
 	channel := fs.String("channel", "", "channel name")
 	repoPath := fs.String("repo", "", "repo path (default: cwd)")
 	orphaned := fs.Bool("orphaned", false, "create thread in orphaned channel")
 	title := fs.String("title", "", "thread title")
 	jsonOut := fs.Bool("json", false, "JSON output")
 	if err := fs.Parse(args); err != nil {
-		return 1
+		return fail("BAD_ARGS", err.Error())
 	}
 	if *channel == "" || *title == "" {
-		fmt.Fprintln(os.Stderr, "usage: flf thread new --channel NAME --title T [--repo PATH | --orphaned] [--json]")
-		return 1
+		return fail("BAD_ARGS", "usage: flf thread new --channel NAME --title T [--repo PATH | --orphaned] [--json]")
 	}
 	if *orphaned && *repoPath != "" {
-		fmt.Fprintln(os.Stderr, "usage: flf thread new --channel NAME --title T [--repo PATH | --orphaned]")
-		return 1
+		return fail("BAD_ARGS", "usage: flf thread new --channel NAME --title T [--repo PATH | --orphaned]")
 	}
 	var abs string
 	if !*orphaned {
@@ -439,21 +409,18 @@ func threadNewCmd(args []string) int {
 			var err error
 			abs, err = os.Getwd()
 			if err != nil {
-				fmt.Fprintln(os.Stderr, "CWD_ERROR:", err)
-				return 1
+				return fail("CWD_ERROR", err.Error())
 			}
 		}
 		var err error
 		abs, err = repo.Canonicalize(abs)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "NOT_A_GIT_REPO: %s\n", abs)
-			return 1
+			return fail("NOT_A_GIT_REPO", abs)
 		}
 	}
 	base, err := client.EnsureDaemon()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
-		return 2
+		return fail("DAEMON_DOWN", err.Error())
 	}
 	id, code := resolveChannelID(base, abs, *channel, *orphaned)
 	if code != 0 {
@@ -504,13 +471,11 @@ func dumpThreadMessages(base string, threadID int64, last int, agentID string) i
 func parseJSONLFile(path string) ([]jsonl.Line, int) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "FILE_READ: %s\n", err)
-		return nil, 1
+		return nil, fail("FILE_READ", err.Error())
 	}
 	lines, err := jsonl.ParseLines(raw)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return nil, 1
+		return nil, fail("BAD_JSONL", err.Error())
 	}
 	return lines, 0
 }
@@ -535,8 +500,7 @@ func postJSONLLines(base string, threadID int64, lines []jsonl.Line, agentID str
 
 func agentCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: flf agent <read|append>")
-		return 1
+		return fail("BAD_ARGS", "usage: flf agent <read|append>")
 	}
 	switch args[0] {
 	case "read":
@@ -544,28 +508,25 @@ func agentCmd(args []string) int {
 	case "append":
 		return agentAppendCmd(args[1:])
 	default:
-		fmt.Fprintln(os.Stderr, "usage: flf agent <read|append>")
-		return 1
+		return fail("BAD_ARGS", "usage: flf agent <read|append>")
 	}
 }
 
 func agentReadCmd(args []string) int {
-	fs := flag.NewFlagSet("agent read", flag.ContinueOnError)
+	fs := newFlagSet("agent read")
 	threadID := fs.Int64("thread", 0, "thread id")
 	last := fs.Int("last", 0, "last N messages (0 = all)")
 	agentID := fs.String("agent-id", "", "agent id")
 	jsonOut := fs.Bool("json", false, "JSON output")
 	if err := fs.Parse(args); err != nil {
-		return 1
+		return fail("BAD_ARGS", err.Error())
 	}
 	if *threadID == 0 {
-		fmt.Fprintln(os.Stderr, "usage: flf agent read --thread ID [--last N] [--agent-id ID]")
-		return 1
+		return fail("BAD_ARGS", "usage: flf agent read --thread ID [--last N] [--agent-id ID]")
 	}
 	base, err := client.EnsureDaemon()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
-		return 2
+		return fail("DAEMON_DOWN", err.Error())
 	}
 	if *jsonOut {
 		return dumpThreadMessages(base, *threadID, *last, *agentID)
@@ -585,16 +546,15 @@ func agentReadCmd(args []string) int {
 }
 
 func agentAppendCmd(args []string) int {
-	fs := flag.NewFlagSet("agent append", flag.ContinueOnError)
+	fs := newFlagSet("agent append")
 	threadID := fs.Int64("thread", 0, "thread id")
 	file := fs.String("file", "", "JSONL file to append")
 	agentID := fs.String("agent-id", "", "agent id")
 	if err := fs.Parse(args); err != nil {
-		return 1
+		return fail("BAD_ARGS", err.Error())
 	}
 	if *threadID == 0 || *file == "" {
-		fmt.Fprintln(os.Stderr, "usage: flf agent append --thread ID --file F [--agent-id ID]")
-		return 1
+		return fail("BAD_ARGS", "usage: flf agent append --thread ID --file F [--agent-id ID]")
 	}
 	lines, code := parseJSONLFile(*file)
 	if code != 0 {
@@ -602,31 +562,27 @@ func agentAppendCmd(args []string) int {
 	}
 	base, err := client.EnsureDaemon()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
-		return 2
+		return fail("DAEMON_DOWN", err.Error())
 	}
 	return postJSONLLines(base, *threadID, lines, *agentID)
 }
 
 func threadExportCmd(args []string) int {
-	fs := flag.NewFlagSet("thread export", flag.ContinueOnError)
+	fs := newFlagSet("thread export")
 	threadID := fs.Int64("thread", 0, "thread id")
 	format := fs.String("format", "jsonl", "export format (only jsonl)")
 	if err := fs.Parse(args); err != nil {
-		return 1
+		return fail("BAD_ARGS", err.Error())
 	}
 	if *threadID == 0 {
-		fmt.Fprintln(os.Stderr, "usage: flf thread export --thread ID --format jsonl")
-		return 1
+		return fail("BAD_ARGS", "usage: flf thread export --thread ID --format jsonl")
 	}
 	if *format != "jsonl" {
-		fmt.Fprintln(os.Stderr, "BAD_JSONL: only jsonl supported")
-		return 1
+		return fail("BAD_JSONL", "only jsonl supported")
 	}
 	base, err := client.EnsureDaemon()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
-		return 2
+		return fail("DAEMON_DOWN", err.Error())
 	}
 	return dumpThreadMessages(base, *threadID, 0, "")
 }
@@ -653,8 +609,7 @@ func ensureImportChannel(base, name, repoPath string, orphaned bool) (int64, int
 	}
 	abs, err := repo.Canonicalize(repoPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "NOT_A_GIT_REPO: %s\n", repoPath)
-		return 0, 1
+		return 0, fail("NOT_A_GIT_REPO", repoPath)
 	}
 	var list []store.Channel
 	if code := apiGet(base+"/v1/channels?repo="+url.QueryEscape(abs), "", &list); code != 0 {
@@ -667,8 +622,7 @@ func ensureImportChannel(base, name, repoPath string, orphaned bool) (int64, int
 	}
 	remote, head, isGit := repo.InspectGitDir(abs)
 	if !isGit {
-		fmt.Fprintf(os.Stderr, "NOT_A_GIT_REPO: %s is not a git repo (suggest --orphaned)\n", abs)
-		return 0, 1
+		return 0, fail("NOT_A_GIT_REPO", fmt.Sprintf("%s is not a git repo (suggest --orphaned)", abs))
 	}
 	var out struct {
 		ID int64 `json:"id"`
@@ -681,17 +635,16 @@ func ensureImportChannel(base, name, repoPath string, orphaned bool) (int64, int
 }
 
 func threadImportCmd(args []string) int {
-	fs := flag.NewFlagSet("thread import", flag.ContinueOnError)
+	fs := newFlagSet("thread import")
 	file := fs.String("file", "", "JSONL file to import")
 	channel := fs.String("channel", "", "channel name")
 	repoPath := fs.String("repo", "", "repo path")
 	orphaned := fs.Bool("orphaned", false, "import into an orphaned channel")
 	if err := fs.Parse(args); err != nil {
-		return 1
+		return fail("BAD_ARGS", err.Error())
 	}
 	if *file == "" || *channel == "" || (*repoPath == "" && !*orphaned) {
-		fmt.Fprintln(os.Stderr, "usage: flf thread import --file F --channel NAME (--repo PATH | --orphaned)")
-		return 1
+		return fail("BAD_ARGS", "usage: flf thread import --file F --channel NAME (--repo PATH | --orphaned)")
 	}
 	lines, code := parseJSONLFile(*file)
 	if code != 0 {
@@ -699,8 +652,7 @@ func threadImportCmd(args []string) int {
 	}
 	base, err := client.EnsureDaemon()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
-		return 2
+		return fail("DAEMON_DOWN", err.Error())
 	}
 	chID, code := ensureImportChannel(base, *channel, *repoPath, *orphaned)
 	if code != 0 {
@@ -723,8 +675,7 @@ func threadImportCmd(args []string) int {
 
 func messageCmd(args []string) int {
 	if len(args) == 0 || args[0] != "send" {
-		fmt.Fprintln(os.Stderr, "usage: flf message send --thread ID --text T [--as NAME] [--agent-id ID]")
-		return 1
+		return fail("BAD_ARGS", "usage: flf message send --thread ID --text T [--as NAME] [--agent-id ID]")
 	}
 	return messageSendCmd(args[1:])
 }
@@ -740,7 +691,7 @@ func defaultName(as string) string {
 }
 
 func messageSendCmd(args []string) int {
-	fs := flag.NewFlagSet("message send", flag.ContinueOnError)
+	fs := newFlagSet("message send")
 	threadID := fs.Int64("thread", 0, "thread id")
 	text := fs.String("text", "", "message text")
 	as := fs.String("as", "", "name (default $USER)")
@@ -749,16 +700,14 @@ func messageSendCmd(args []string) int {
 	createdAt := fs.String("created-at", "", "message timestamp (RFC3339, e.g. 2025-01-15T10:30:00Z)")
 	jsonOut := fs.Bool("json", false, "JSON output")
 	if err := fs.Parse(args); err != nil {
-		return 1
+		return fail("BAD_ARGS", err.Error())
 	}
 	if *threadID == 0 || *text == "" {
-		fmt.Fprintln(os.Stderr, "usage: flf message send --thread ID --text T [--as NAME] [--agent-id ID] [--reply-to ID] [--created-at TS] [--json]")
-		return 1
+		return fail("BAD_ARGS", "usage: flf message send --thread ID --text T [--as NAME] [--agent-id ID] [--reply-to ID] [--created-at TS] [--json]")
 	}
 	base, err := client.EnsureDaemon()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
-		return 2
+		return fail("DAEMON_DOWN", err.Error())
 	}
 	name := defaultName(*as)
 	body := map[string]any{"Name": name, "Role": "user", "Content": *text, "AgentID": *agentID}
@@ -787,29 +736,26 @@ func messageSendCmd(args []string) int {
 
 func reactCmd(args []string) int {
 	if len(args) == 0 || args[0] != "add" {
-		fmt.Fprintln(os.Stderr, "usage: flf react add --message ID --emoji E [--as NAME] [--agent-id ID]")
-		return 1
+		return fail("BAD_ARGS", "usage: flf react add --message ID --emoji E [--as NAME] [--agent-id ID]")
 	}
 	return reactAddCmd(args[1:])
 }
 
 func reactAddCmd(args []string) int {
-	fs := flag.NewFlagSet("react add", flag.ContinueOnError)
+	fs := newFlagSet("react add")
 	messageID := fs.Int64("message", 0, "message id")
 	emoji := fs.String("emoji", "", "emoji")
 	as := fs.String("as", "", "name (default $USER)")
 	agentID := fs.String("agent-id", "", "agent id")
 	if err := fs.Parse(args); err != nil {
-		return 1
+		return fail("BAD_ARGS", err.Error())
 	}
 	if *messageID == 0 || *emoji == "" {
-		fmt.Fprintln(os.Stderr, "usage: flf react add --message ID --emoji E [--as NAME] [--agent-id ID]")
-		return 1
+		return fail("BAD_ARGS", "usage: flf react add --message ID --emoji E [--as NAME] [--agent-id ID]")
 	}
 	base, err := client.EnsureDaemon()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
-		return 2
+		return fail("DAEMON_DOWN", err.Error())
 	}
 	name := defaultName(*as)
 	body := map[string]any{"Emoji": *emoji, "Name": name, "AgentID": *agentID}
@@ -823,21 +769,19 @@ func reactAddCmd(args []string) int {
 }
 
 func daemonCmd(args []string) int {
-	fs := flag.NewFlagSet("daemon", flag.ContinueOnError)
+	fs := newFlagSet("daemon")
 	jsonOut := fs.Bool("json", false, "JSON output")
 	if err := fs.Parse(args); err != nil {
-		return 1
+		return fail("BAD_ARGS", err.Error())
 	}
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: flf daemon <start|stop|status> [--json]")
-		return 1
+		return fail("BAD_ARGS", "usage: flf daemon <start|stop|status> [--json]")
 	}
 	switch args[0] {
 	case "status":
 		base, err := client.DaemonBaseURL()
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "daemon down")
-			return 2
+			return fail("DAEMON_DOWN", "daemon down")
 		}
 		if *jsonOut {
 			enc := json.NewEncoder(os.Stdout)
@@ -851,32 +795,29 @@ func daemonCmd(args []string) int {
 		return daemonStart(background)
 	case "stop":
 		return daemonStop()
+	default:
+		return fail("BAD_ARGS", "usage: flf daemon <start|stop|status> [--json]")
 	}
-	return 1
 }
 
 func daemonStop() int {
 	b, err := os.ReadFile(filepath.Join(client.FluffleHome(), "daemon.json"))
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "DAEMON_DOWN: not running")
-		return 2
+		return fail("DAEMON_DOWN", "not running")
 	}
 	var df struct {
 		PID int `json:"pid"`
 	}
 	if err := json.Unmarshal(b, &df); err != nil {
-		fmt.Fprintln(os.Stderr, "DAEMON_DOWN: bad daemon.json")
-		return 2
+		return fail("DAEMON_DOWN", "bad daemon.json")
 	}
 	proc, err := os.FindProcess(df.PID)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
-		return 2
+		return fail("DAEMON_DOWN", err.Error())
 	}
 	if err := proc.Kill(); err != nil {
-		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
 		os.Remove(filepath.Join(client.FluffleHome(), "daemon.json"))
-		return 2
+		return fail("DAEMON_DOWN", err.Error())
 	}
 	os.Remove(filepath.Join(client.FluffleHome(), "daemon.json"))
 	fmt.Println("daemon stopped")
@@ -889,29 +830,24 @@ func daemonStart(background bool) int {
 	}
 	home := client.FluffleHome()
 	if err := os.MkdirAll(home, 0o755); err != nil {
-		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
-		return 2
+		return fail("DAEMON_ERROR", err.Error())
 	}
 	dbPath := filepath.Join(home, "fluffle.db")
 	s, err := store.Open(dbPath)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
-		return 2
+		return fail("DAEMON_ERROR", err.Error())
 	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
-		return 2
+		return fail("DAEMON_ERROR", err.Error())
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
 	payload, err := json.Marshal(map[string]any{"port": port, "pid": os.Getpid(), "started_at": time.Now().UTC().Format(time.RFC3339)})
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
-		return 2
+		return fail("DAEMON_ERROR", err.Error())
 	}
 	if err := os.WriteFile(filepath.Join(home, "daemon.json"), payload, 0o644); err != nil {
-		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
-		return 2
+		return fail("DAEMON_ERROR", err.Error())
 	}
 	fmt.Println("fluffle daemon on 127.0.0.1:" + strconv.Itoa(port))
 	srv := &http.Server{Handler: apiserver.NewHandler(s)}
@@ -919,8 +855,7 @@ func daemonStart(background bool) int {
 		srv.Close()
 	})
 	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
-		return 2
+		return fail("DAEMON_ERROR", err.Error())
 	}
 	return 0
 }
@@ -928,8 +863,7 @@ func daemonStart(background bool) int {
 func daemonStartBackground() int {
 	home := client.FluffleHome()
 	if err := os.MkdirAll(home, 0o755); err != nil {
-		fmt.Fprintln(os.Stderr, "DAEMON_DOWN:", err)
-		return 2
+		return fail("DAEMON_ERROR", err.Error())
 	}
 
 	// Fork the daemon into a detached subprocess.
@@ -937,16 +871,14 @@ func daemonStartBackground() int {
 	// server loop while the parent exits immediately.
 	bin, err := os.Executable()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "DAEMON_DOWN: "+err.Error())
-		return 2
+		return fail("DAEMON_ERROR", err.Error())
 	}
 	cmd := exec.Command(bin, "daemon", "start")
 	cmd.Stdin = nil
 	cmd.Stdout, cmd.Stderr = nil, nil
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
-		fmt.Fprintln(os.Stderr, "DAEMON_DOWN: "+err.Error())
-		return 2
+		return fail("DAEMON_ERROR", err.Error())
 	}
 	// Wait briefly for the child to write daemon.json so we can report the port.
 	for i := 0; i < 50; i++ {

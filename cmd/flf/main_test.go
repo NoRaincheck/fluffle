@@ -1,10 +1,154 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func captureStderr(t *testing.T, fn func() int) (int, string) {
+	t.Helper()
+	file, err := os.CreateTemp(t.TempDir(), "stderr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := os.Stderr
+	os.Stderr = file
+	code := fn()
+	os.Stderr = original
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(file.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return code, string(raw)
+}
+
+func assertCLIErrorEnvelope(t *testing.T, output, wantCode string) string {
+	t.Helper()
+	var fields map[string]any
+	if err := json.Unmarshal([]byte(output), &fields); err != nil {
+		t.Fatalf("invalid JSON error %q: %v", output, err)
+	}
+	if len(fields) != 2 {
+		t.Fatalf("error fields = %d, want 2: %q", len(fields), output)
+	}
+	code, ok := fields["code"].(string)
+	if !ok || code != wantCode {
+		t.Fatalf("code = %#v, want %q: %q", fields["code"], wantCode, output)
+	}
+	message, ok := fields["message"].(string)
+	if !ok || message == "" {
+		t.Fatalf("message = %#v, want nonempty string: %q", fields["message"], output)
+	}
+	return message
+}
+
+func TestCLIErrorEnvelope(t *testing.T) {
+	var buf bytes.Buffer
+	if got := writeCLIError(&buf, "DAEMON_ERROR", "storage failed"); got != 2 {
+		t.Fatalf("exit = %d, want 2", got)
+	}
+	const want = "{\"code\":\"DAEMON_ERROR\",\"message\":\"storage failed\"}\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+	if strings.Contains(buf.String(), "retryable") {
+		t.Fatal("unexpected retryable field")
+	}
+}
+
+func TestExitCodeForClassification(t *testing.T) {
+	tests := []struct {
+		code string
+		want int
+	}{
+		{"DAEMON_DOWN", 2},
+		{"DAEMON_ERROR", 2},
+		{"DELIVERY_UNKNOWN", 2},
+		{"BAD_ARGS", 1},
+		{"BAD_JSONL", 1},
+		{"FILE_READ", 1},
+		{"CHANNEL_NOT_FOUND", 1},
+		{"PERMISSION_DENIED", 1},
+		{"VALIDATION_ERROR", 1},
+		{"METHOD_NOT_ALLOWED", 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.code, func(t *testing.T) {
+			if got := exitCodeFor(tt.code); got != tt.want {
+				t.Fatalf("exitCodeFor(%q) = %d, want %d", tt.code, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCLIFlagParseErrorEnvelope(t *testing.T) {
+	code, output := captureStderr(t, func() int {
+		return run([]string{"init", "--unknown"})
+	})
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	message := assertCLIErrorEnvelope(t, output, "BAD_ARGS")
+	if !strings.Contains(message, "unknown") {
+		t.Fatalf("message = %q, want unknown flag", message)
+	}
+}
+
+func TestCLIAPIGetMalformedResponseIsDaemonError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("not-json"))
+	}))
+	defer server.Close()
+	code, output := captureStderr(t, func() int {
+		var out any
+		return apiGet(server.URL, "", &out)
+	})
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2", code)
+	}
+	assertCLIErrorEnvelope(t, output, "DAEMON_ERROR")
+}
+
+func TestCLIAPIPostTransportFailureIsDeliveryUnknown(t *testing.T) {
+	originalClient := http.DefaultClient
+	http.DefaultClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("connection reset")
+	})}
+	t.Cleanup(func() { http.DefaultClient = originalClient })
+	code, output := captureStderr(t, func() int {
+		return apiPost("http://127.0.0.1/messages", "", map[string]any{"content": "hello"}, nil)
+	})
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2", code)
+	}
+	assertCLIErrorEnvelope(t, output, "DELIVERY_UNKNOWN")
+}
+
+func TestCLIAPIPostLocalFailureIsClientError(t *testing.T) {
+	code, output := captureStderr(t, func() int {
+		return apiPost("http://127.0.0.1/messages", "", map[string]any{"bad": make(chan struct{})}, nil)
+	})
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	assertCLIErrorEnvelope(t, output, "BAD_REQUEST")
+}
 
 func TestTuiDaemonRequired(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "not-a-dir")
