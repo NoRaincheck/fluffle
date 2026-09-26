@@ -16,6 +16,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/NoRaincheck/fluffle/internal/store"
 )
 
 // waitFor polls fn every 50ms until it returns true or timeout expires.
@@ -1538,4 +1540,272 @@ func TestE2E_ReactionAfterCursorSurvivesOnOlderMessage(t *testing.T) {
 	}
 
 	stop()
+}
+
+type e2eAgentListItem struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Command     string `json:"command"`
+	Reply       string `json:"reply"`
+	Source      string `json:"source"`
+}
+
+func decodeE2EAgentList(t *testing.T, raw string) map[string]e2eAgentListItem {
+	t.Helper()
+	var payload struct {
+		Agents []e2eAgentListItem `json:"agents"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		t.Fatalf("agent list JSON: %v\n%s", err, raw)
+	}
+	byName := map[string]e2eAgentListItem{}
+	for _, item := range payload.Agents {
+		byName[item.Name] = item
+	}
+	return byName
+}
+
+func TestE2E_AgentListCmd(t *testing.T) {
+	tmpDir := t.TempDir()
+	home := filepath.Join(tmpDir, "fluffle")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := buildTestBinary(t, tmpDir)
+	env := []string{"FLUFFLE_HOME=" + home}
+
+	repoDir := t.TempDir()
+	gitInit(t, repoDir)
+	spacedDir := filepath.Join(t.TempDir(), "repo with space")
+	if err := os.MkdirAll(spacedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitInit(t, spacedDir)
+
+	repoConfig := "[[agents]]\nname=\"local\"\ncommand=\"/bin/local\"\ndescription=\"repo agent\"\n"
+	if err := os.WriteFile(filepath.Join(repoDir, ".flf.toml"), []byte(repoConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	spacedConfig := "[[agents]]\nname=\"spaced\"\ncommand=\"/bin/spaced\"\n"
+	if err := os.WriteFile(filepath.Join(spacedDir, ".flf.toml"), []byte(spacedConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	globalConfig := "[[agents]]\nname=\"shared\"\ncommand=\"/bin/shared\"\nreply=\"cli\"\n"
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(globalConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stop := startAgentDaemon(t, bin, home)
+	runOK := func(args ...string) string {
+		t.Helper()
+		result := runCLIResult(t, env, bin, "", args...)
+		if result.exitCode != 0 {
+			t.Fatalf("flf %v: exit=%d stdout=%q stderr=%q", args, result.exitCode, result.stdout, result.stderr)
+		}
+		if result.stderr != "" {
+			t.Fatalf("flf %v wrote stderr: %q", args, result.stderr)
+		}
+		return result.stdout
+	}
+
+	agents := decodeE2EAgentList(t, runOK("agent", "list", "--repo", repoDir, "--json"))
+	local, ok := agents["local"]
+	if !ok {
+		t.Fatalf("agents = %+v, want the repo entry", agents)
+	}
+	if local.Description != "repo agent" || local.Command != "/bin/local" || local.Reply != "auto" {
+		t.Fatalf("repo entry = %+v", local)
+	}
+	if local.Source != filepath.Join(repoDir, ".flf.toml") {
+		t.Fatalf("repo entry source = %q, want %q", local.Source, filepath.Join(repoDir, ".flf.toml"))
+	}
+	shared, ok := agents["shared"]
+	if !ok {
+		t.Fatalf("agents = %+v, want the global entry alongside the repo entry", agents)
+	}
+	if shared.Reply != "cli" || shared.Command != "/bin/shared" || shared.Description != "" {
+		t.Fatalf("global entry = %+v", shared)
+	}
+	if shared.Source != filepath.Join(home, "config.toml") {
+		t.Fatalf("global entry source = %q, want %q", shared.Source, filepath.Join(home, "config.toml"))
+	}
+
+	agents = decodeE2EAgentList(t, runOK("agent", "list", "--json"))
+	if len(agents) != 1 || agents["shared"].Command != "/bin/shared" {
+		t.Fatalf("agents without --repo = %+v, want only the global entry", agents)
+	}
+
+	agents = decodeE2EAgentList(t, runOK("agent", "list", "--repo", spacedDir, "--json"))
+	if spaced, ok := agents["spaced"]; !ok || spaced.Source != filepath.Join(spacedDir, ".flf.toml") {
+		t.Fatalf("agents for a spaced repo path = %+v, want the spaced entry", agents)
+	}
+
+	human := runOK("agent", "list", "--repo", repoDir)
+	for _, want := range []string{"local", "/bin/local", "shared", "/bin/shared", "repo agent", filepath.Join(repoDir, ".flf.toml")} {
+		if !strings.Contains(human, want) {
+			t.Fatalf("human output missing %q:\n%s", want, human)
+		}
+	}
+	if strings.Contains(human, "spaced") {
+		t.Fatalf("human output listed an agent from another repo:\n%s", human)
+	}
+
+	stop()
+}
+
+func TestE2E_AgentSessionCmd(t *testing.T) {
+	tmpDir := t.TempDir()
+	home := filepath.Join(tmpDir, "fluffle")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := buildTestBinary(t, tmpDir)
+	env := []string{"FLUFFLE_HOME=" + home}
+	repoDir := t.TempDir()
+	gitInit(t, repoDir)
+
+	probe := filepath.Join(tmpDir, "probe-agent")
+	if err := os.WriteFile(probe, []byte("#!/bin/sh\ncat > /dev/null\nprintf 'the answer'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	config := "[[agents]]\nname=\"probe\"\ncommand=\"" + probe + "\"\nreply=\"stdout\"\ntimeout_secs=20\n"
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stop := startAgentDaemon(t, bin, home)
+	runOK := func(args ...string) string {
+		t.Helper()
+		result := runCLIResult(t, env, bin, "", args...)
+		if result.exitCode != 0 {
+			t.Fatalf("flf %v: exit=%d stdout=%q stderr=%q", args, result.exitCode, result.stdout, result.stderr)
+		}
+		if result.stderr != "" {
+			t.Fatalf("flf %v wrote stderr: %q", args, result.stderr)
+		}
+		return result.stdout
+	}
+
+	channelOut := runOK("channel", "create", "--name", "eng", "--repo", repoDir, "--json")
+	var channel struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(channelOut), &channel); err != nil || channel.ID <= 0 {
+		t.Fatalf("channel create: err=%v out=%s", err, channelOut)
+	}
+	threadOut := runOK("thread", "new", "--channel", "eng", "--repo", repoDir, "--title", "t", "--json")
+	var thread struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(threadOut), &thread); err != nil || thread.ID <= 0 {
+		t.Fatalf("thread new: err=%v out=%s", err, threadOut)
+	}
+	threadID := strconv.FormatInt(thread.ID, 10)
+	runOK("message", "send", "--thread", threadID, "--text", "hello", "--as", "alice", "--json")
+	runOK("message", "send", "--thread", threadID, "--text", "@probe hi", "--as", "alice", "--json")
+
+	// A fresh home holds one session, the one this mention creates, so it is id 1.
+	// The poll covers the real race: the run finishing after the trigger returns.
+	var last cliResult
+	if !waitFor(t, 40*time.Second, func() bool {
+		last = runCLIResult(t, env, bin, "", "agent", "session", "--id", "1", "--json")
+		return last.exitCode == 0 && strings.Contains(last.stdout, `"Status": "succeeded"`)
+	}) {
+		t.Fatalf("session never succeeded: exit=%d stdout=%q stderr=%q", last.exitCode, last.stdout, last.stderr)
+	}
+
+	var payload struct {
+		Session store.Session        `json:"session"`
+		Events  []store.SessionEvent `json:"events"`
+	}
+	if err := json.Unmarshal([]byte(last.stdout), &payload); err != nil {
+		t.Fatalf("session JSON: %v\n%s", err, last.stdout)
+	}
+	sess := payload.Session
+	if sess.AgentName != "probe" || sess.Status != store.SessionSucceeded || sess.ReplyMode != "stdout" {
+		t.Fatalf("session = %+v", sess)
+	}
+	if sess.ThreadID != thread.ID || sess.TriggerMessageID <= 0 {
+		t.Fatalf("session references = %+v, want thread %d", sess, thread.ID)
+	}
+	canonicalRepo, err := filepath.EvalSymlinks(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.Cwd == nil || *sess.Cwd != canonicalRepo {
+		t.Fatalf("session cwd = %v, want %q", sess.Cwd, canonicalRepo)
+	}
+	if sess.Command != probe {
+		t.Fatalf("session command = %q, want %q", sess.Command, probe)
+	}
+	if sess.ExitCode == nil || *sess.ExitCode != 0 {
+		t.Fatalf("session exit code = %v, want 0", sess.ExitCode)
+	}
+	if sess.Error != nil {
+		t.Fatalf("session error = %q, want none", *sess.Error)
+	}
+	if sess.ReplyMessageID == nil {
+		t.Fatalf("session has no reply message: %+v", sess)
+	}
+
+	byType := map[string]store.SessionEvent{}
+	for i, event := range payload.Events {
+		if event.Seq != int64(i+1) || event.SessionID != sess.ID {
+			t.Fatalf("event %d = %+v", i, event)
+		}
+		byType[event.Type] = event
+	}
+	if byType[store.SessionEventPrompt].Content == "" {
+		t.Fatalf("events = %+v, want a prompt", payload.Events)
+	}
+	if !strings.Contains(byType[store.SessionEventStdout].Content, "the answer") {
+		t.Fatalf("events = %+v, want the agent stdout", payload.Events)
+	}
+	if byType[store.SessionEventExit].Content != "0" {
+		t.Fatalf("events = %+v, want the exit code", payload.Events)
+	}
+
+	human := runOK("agent", "session", "--id", "1")
+	for _, want := range []string{"session 1", "probe", "reply=stdout", "command: " + probe, "cwd: ", "reply: message " + strconv.FormatInt(*sess.ReplyMessageID, 10), "the answer"} {
+		if !strings.Contains(human, want) {
+			t.Fatalf("human output missing %q:\n%s", want, human)
+		}
+	}
+	if strings.Contains(human, "error:") {
+		t.Fatalf("human output reported an error for a succeeded session:\n%s", human)
+	}
+
+	stop()
+}
+
+func TestE2E_AgentSessionCmdMissingIsExitOne(t *testing.T) {
+	tmpDir := t.TempDir()
+	home := filepath.Join(tmpDir, "fluffle")
+	bin := buildTestBinary(t, tmpDir)
+	env := []string{"FLUFFLE_HOME=" + home}
+	stop := startAgentDaemon(t, bin, home)
+
+	assertE2ECLIErrorResult(t, runCLIResult(t, env, bin, "", "agent", "session", "--id", "9999"), "SESSION_NOT_FOUND")
+
+	stop()
+}
+
+func TestE2E_AgentSessionCmdRequiresID(t *testing.T) {
+	tmpDir := t.TempDir()
+	home := filepath.Join(tmpDir, "fluffle")
+	bin := buildTestBinary(t, tmpDir)
+	env := []string{"FLUFFLE_HOME=" + home}
+
+	assertE2ECLIErrorResult(t, runCLIResult(t, env, bin, "", "agent", "session"), "BAD_ARGS")
+	assertE2ECLIErrorResult(t, runCLIResult(t, env, bin, "", "agent", "session", "--id", "0"), "BAD_ARGS")
+	assertE2ECLIErrorResult(t, runCLIResult(t, env, bin, "", "agent", "session", "--id", "abc"), "BAD_ARGS")
+
+	missing := runCLIResult(t, env, bin, "", "agent", "session")
+	var envelope map[string]any
+	if err := json.Unmarshal([]byte(missing.stderr), &envelope); err != nil {
+		t.Fatalf("invalid error envelope: %v\n%s", err, missing.stderr)
+	}
+	if message, _ := envelope["message"].(string); !strings.Contains(message, "--id") {
+		t.Fatalf("error message = %q, want it to name the missing flag", message)
+	}
 }

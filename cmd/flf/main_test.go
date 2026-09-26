@@ -2222,3 +2222,133 @@ func TestDaemonStopWaitsForTheProcessBeforeForcingAKill(t *testing.T) {
 		}
 	})
 }
+
+func TestAgentListEncodesRepoAndNeverDefaultsToCwd(t *testing.T) {
+	var requests []recordedCLIRequest
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		recordCLIRequest(&requests, &mu, r)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/health":
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		case "/v1/agents":
+			if r.URL.Query().Get("repo") == "" {
+				_, _ = w.Write([]byte(`{"agents":[{"name":"shared","description":"","command":"/bin/shared","reply":"cli","source":"/home/test/config.toml"}]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"agents":[{"name":"local","description":"repo agent","command":"/bin/local","reply":"auto","source":"/repo/.flf.toml"},{"name":"shared","description":"","command":"/bin/shared","reply":"cli","source":"/home/test/config.toml"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	useTestDaemon(t, server)
+
+	code, stdout, stderr := captureOutput(t, func() int {
+		return run([]string{"agent", "list", "--json"})
+	})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0: %s", code, stderr)
+	}
+	var payload struct {
+		Agents []struct {
+			Name string `json:"name"`
+		} `json:"agents"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("agent list JSON: %v\n%s", err, stdout)
+	}
+	if len(payload.Agents) != 1 || payload.Agents[0].Name != "shared" {
+		t.Fatalf("agents = %+v, want the global config only", payload.Agents)
+	}
+
+	relative := filepath.Join("nested repo", "..", "repo with space")
+	abs, err := filepath.Abs(relative)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr = captureOutput(t, func() int {
+		return run([]string{"agent", "list", "--repo", relative, "--json"})
+	})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, `"name": "local"`) || !strings.Contains(stdout, `"name": "shared"`) {
+		t.Fatalf("stdout = %q, want the repo and global entries", stdout)
+	}
+
+	recorded := snapshotCLIRequests(&requests, &mu)
+	if len(recorded) != 4 {
+		t.Fatalf("requests = %d, want two health probes and two agent reads", len(recorded))
+	}
+	if got := recorded[1]; got.Method != http.MethodGet || got.Path != "/v1/agents" || got.RawQuery != "repo=" {
+		t.Fatalf("agent read without --repo = %s %s?%s, want an empty repo parameter", got.Method, got.Path, got.RawQuery)
+	}
+	if got := recorded[3]; got.Method != http.MethodGet || got.Path != "/v1/agents" || got.RawQuery != "repo="+url.QueryEscape(abs) {
+		t.Fatalf("agent read = %s %s?%s, want repo=%s", got.Method, got.Path, got.RawQuery, url.QueryEscape(abs))
+	}
+}
+
+func TestAgentSessionRejectsUnverifiableResponse(t *testing.T) {
+	t.Run("session without an id is a daemon error", func(t *testing.T) {
+		var requests []recordedCLIRequest
+		var mu sync.Mutex
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			recordCLIRequest(&requests, &mu, r)
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/v1/health":
+				_, _ = w.Write([]byte(`{"ok":true}`))
+			case "/v1/sessions/1":
+				_, _ = w.Write([]byte(`{"session":{"ID":0,"ThreadID":2,"TriggerMessageID":3,"AgentName":"probe","Status":"succeeded","ReplyMode":"stdout","Command":"/bin/probe"},"events":[]}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+		useTestDaemon(t, server)
+
+		code, stdout, stderr := captureOutput(t, func() int {
+			return run([]string{"agent", "session", "--id", "1", "--json"})
+		})
+		if code != 2 {
+			t.Fatalf("exit = %d, want 2: %s", code, stderr)
+		}
+		if stdout != "" {
+			t.Fatalf("stdout = %q, want empty", stdout)
+		}
+		assertCLIErrorEnvelope(t, stderr, "DAEMON_ERROR")
+		recorded := snapshotCLIRequests(&requests, &mu)
+		if len(recorded) != 2 || recorded[1].Path != "/v1/sessions/1" {
+			t.Fatalf("requests = %+v, want a read of the requested session", recorded)
+		}
+	})
+
+	t.Run("event from another session is a daemon error", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/v1/health":
+				_, _ = w.Write([]byte(`{"ok":true}`))
+			case "/v1/sessions/1":
+				_, _ = w.Write([]byte(`{"session":{"ID":1,"ThreadID":2,"TriggerMessageID":3,"AgentName":"probe","Status":"running","ReplyMode":"stdout","Command":"/bin/probe"},"events":[{"ID":9,"SessionID":2,"Seq":1,"Type":"stdout","Content":"the answer","CreatedAt":""}]}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+		useTestDaemon(t, server)
+
+		code, stdout, stderr := captureOutput(t, func() int {
+			return run([]string{"agent", "session", "--id", "1", "--json"})
+		})
+		if code != 2 {
+			t.Fatalf("exit = %d, want 2: %s", code, stderr)
+		}
+		if stdout != "" {
+			t.Fatalf("stdout = %q, want empty", stdout)
+		}
+		assertCLIErrorEnvelope(t, stderr, "DAEMON_ERROR")
+	})
+}

@@ -807,15 +807,19 @@ func postJSONLBatch(base string, threadID int64, lines []jsonl.Line, agentID str
 
 func agentCmd(args []string) int {
 	if len(args) == 0 {
-		return fail("BAD_ARGS", "usage: flf agent <read|append>")
+		return fail("BAD_ARGS", "usage: flf agent <read|append|list|session>")
 	}
 	switch args[0] {
 	case "read":
 		return agentReadCmd(args[1:])
 	case "append":
 		return agentAppendCmd(args[1:])
+	case "list":
+		return agentListCmd(args[1:])
+	case "session":
+		return agentSessionCmd(args[1:])
 	default:
-		return fail("BAD_ARGS", "usage: flf agent <read|append>")
+		return fail("BAD_ARGS", "usage: flf agent <read|append|list|session>")
 	}
 }
 
