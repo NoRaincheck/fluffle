@@ -4702,8 +4702,10 @@ func (m *model) fetchSessionEvents(sessionID int64) tea.Cmd
 func (m model) renderSessionPreview(w, h int) string
 func (m *model) handleSessionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool)
 func (m *model) syncSessionTick() tea.Cmd
-func (m *model) applySessions(sessions []store.Session) tea.Cmd
+func (m *model) applySessions(sessions []store.Session) (tea.Model, tea.Cmd)
 ```
+
+`applySessions` returns `(tea.Model, tea.Cmd)` — the brief's interface block originally said `tea.Cmd`, but its own Step 5 handler and two transcribed tests require two returns, and the house style is that a `tea.Model, tea.Cmd` helper drops into `Update` with no unwrapping. **The two-value form is authoritative.**
 
 - [ ] **Step 1: Add the API methods**
 
