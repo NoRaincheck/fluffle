@@ -1,6 +1,6 @@
 # TUI Architecture
 
-Bubble Tea v1.3.10 terminal UI for Fluffle. Flat inbox table with right-side preview panel (wide terminals), centered compose modal overlay. The preview pane has two modes — the thread, and the agent session triggered by the message under the cursor — switched with `s`.
+Bubble Tea v1.3.10 terminal UI for Fluffle. Flat inbox table with right-side preview panel (wide terminals), centered compose modal overlay. The preview pane has two modes — the thread, and the agent session started by the cursor row's representative message — switched with `s`.
 
 ## Overview
 
@@ -36,7 +36,7 @@ Press `l` for the full layout, where each group expands to its original post plu
 │                                         > one more thing                       │
 ```
 
-Single flat **Global Inbox** table showing all channels/threads, one row per channel/thread group. `l` toggles between two layouts: **compact** (default — one line per group, most recent message) and **full** (original post plus every reply, inline). `p` toggles a right-side preview panel showing the word-wrapped original post + replies; `s` swaps that pane's content for the agent session triggered by the message under the cursor. Preview auto-enables at ≥100 cols, respects toggle at ≥80 cols, forced off below 80, and is suppressed in the detail view and in the full layout.
+Single flat **Global Inbox** table showing all channels/threads, one row per channel/thread group. `l` toggles between two layouts: **compact** (default — one line per group, most recent message) and **full** (original post plus every reply, inline). `p` toggles a right-side preview panel showing the word-wrapped original post + replies; `s` swaps that pane's content for the agent session started by the cursor row's representative message. Preview auto-enables at ≥100 cols, respects toggle at ≥80 cols, forced off below 80, and is suppressed in the detail view and in the full layout.
 
 ## Package Structure
 
@@ -80,7 +80,7 @@ No new external dependencies beyond the Bubble Tea ecosystem. The TUI reuses `in
                     ┌──────────────────────────────────────┐
                     │                                      │
                     ▼                                      │
-  [Inbox Table] ──r/c/n──▶ [Compose]                      │
+  [Inbox Table] ──r──────▶ [Compose]                      │
      ▲                       │    │                        │
      │                       │    │ Esc (cancel)           │
      │                       │    │                        │
@@ -90,7 +90,9 @@ No new external dependencies beyond the Bubble Tea ecosystem. The TUI reuses `in
                     └─────Esc──────┘                        │
 ```
 
-Single view: **Inbox Table** (tracked as `viewInbox`). Navigation is cursor-based: `↑/↓` or `j/k` moves through groups. `r`/`c` opens compose for reply. `Enter` opens detail view. `v` toggles sort, `f` opens the filter, `l`/`L` toggles layout, `p` toggles the preview panel.
+Five views exist, tracked by `viewKind`: `viewInbox` (the flat table, one row per channel/thread group), `viewInboxDetail` (`Enter` from the inbox), and the older `viewChannels` → `viewThreads` → `viewMessages` stack, which is what the app starts on (`New()` sets `viewChannels`). Navigation is cursor-based everywhere: `↑/↓` or `j/k` moves through rows. In the inbox, `r` opens compose for a reply, `Enter` opens the detail view, `v` toggles sort, `f` opens the filter, `l`/`L` toggles layout, `p` toggles the preview panel, and `s` switches the pane to the agent session. `Esc` returns from any pushed view to the one beneath it.
+
+The character keys `handleKey` acts on are `q`, `k`/`↑`, `j`/`↓`, `r`, `v`, `f`, `l`/`L`, `p`, `s`, `g`, `G`, plus `ctrl+c`; every other rune falls through untouched. Notably `c` and `n` are **not bound** — `simple_test.go` asserts that neither opens compose, and `handleNewThread` no longer exists in the codebase at all.
 
 ### State Fields
 
@@ -110,12 +112,14 @@ Single view: **Inbox Table** (tracked as `viewInbox`). Navigation is cursor-base
 | `width, height` | Current terminal dimensions (from `WindowSizeMsg`) |
 | `previewMode` | `previewThread` or `previewSession` — which content the right pane shows |
 | `sessions` | Sessions for `previewThreadID`, as returned by the last poll |
-| `sessionsByMsg` | `triggerMessageID → Session` index built from `sessions`; the pane's lookup key |
+| `sessionsByMsg` | `triggerMessageID → Session` index built from `sessions`; the pane's lookup key, which is the **trigger** message id |
 | `session` | The session whose events are loaded (`nil` until `s` fetches them) |
 | `sessionEvents` | Events for `session`, in `seq` order |
-| `sessionPollThreadID` | Thread the current poll is armed for; `0` means no poll is armed |
+| `sessionPollThreadID` | Thread whose session list was last fetched, and the poll's arming target; `0` means released |
 | `sessionTickThread` | Thread a tick is in flight for, so arming stays idempotent |
 | `sessionTickGen` | Monotonic tick generation; a `sessionTickMsg` with a stale gen is dropped |
+
+`sessionForCursor()` resolves the pane's session by looking `sessionsByMsg` up with the **id of the message the cursor's inbox row represents**. A row is a channel/thread group whose representative is that group's newest message, so `s` only resolves while the `@mention` that started the run is still the group's most recent message. So when a newer message lands — normally the agent's own reply — that message becomes the representative, the row resolves to a message with no session, and `s` reports `no session on this message`. The finished run is still in the API; the inbox row just no longer points at it.
 
 ### Data Fetching
 
@@ -136,9 +140,15 @@ Message data is fetched on demand. Agent session data is **polled**: while a ses
 
 Preview message fetching is idempotent and gated on `previewVisible()`: skips if the cursor hasn't changed, if width < 80, if the same thread is already cached, or if the pane is not actually drawn (detail view, or full inbox layout).
 
-The session fetch is gated on `previewVisible()` too, plus three more conditions: the view must be the inbox, the preview thread must be non-zero, and no poll may already be armed for that thread (`sessionPollThreadID`). The tick handler re-checks the generation, the armed thread, `previewVisible()`, and "is anything still live" before it re-fetches, and releases the poll (setting `sessionPollThreadID` back to `0`) when the pane is hidden or a fetch fails. A `sessionTickMsg` whose generation is stale is dropped without touching state, so an in-flight tick from a previous thread or a superseded arming cannot resurrect a poll.
+The session fetch is gated on `previewVisible()` too, plus three more conditions: the view must be the inbox, the preview thread must be non-zero, and this thread's session list must not already have been fetched (`sessionPollThreadID` must not equal the preview thread — it is a "already fetched, do not repeat" lock, not an in-flight marker). The tick handler re-checks the generation, the thread match, `previewVisible()`, and "is anything still live" before it re-fetches. A `sessionTickMsg` whose generation is stale is dropped without touching state, and one whose `threadID` no longer matches `sessionPollThreadID` is dropped too, so an in-flight tick from a previous thread or a superseded arming cannot resurrect a poll. A thread change does not stop the poll — the new thread's response overwrites `sessionPollThreadID` and `applySessions` arms a fresh tick for it, so the poll is re-aimed rather than ended.
 
-The poll covers the *lifetime of a live session*, not the thread: once every session in the thread is terminal, `syncSessionTick()` arms no further tick. Because the per-thread dedupe key is only cleared when the pane is hidden, a fetch fails, or the cursor moves to a different thread, a session started in that thread afterwards arrives on the next fetch — moving to another thread and back, or toggling the pane — not on its own.
+`releaseSessionPoll()` has exactly three call sites: `syncSessionTick()`'s `!previewVisible()` branch, the `sessionsFetchedMsg` error path, and the `sessionTickMsg` handler's `!previewVisible() || !anySessionActive()` branch. Each needs a tick, a response, or a failure to arrive — so in the all-terminal state described below, none of the three can fire. That gives the poll a hard boundary:
+
+> The poll covers the *lifetime of a live session*, not the thread. Once every session in the thread is terminal, `syncSessionTick()` returns at its `!anySessionActive()` check without arming a tick and **without** releasing the dedupe key.
+
+In that state no tick is in flight, so the tick handler cannot run; no response is arriving, so the `!previewVisible()` branch of `syncSessionTick()` cannot run either; and nothing failed, so the error path cannot run. The only way the key clears is the cursor reaching a different thread: that thread's response sets `sessionPollThreadID` to the new id, which makes a return to the original thread fetch again. A session started in the meantime is therefore discovered on the next **thread switch and back**, and not before. Toggling `p` does not clear it — `p`-off returns without syncing, and `p`-on re-runs `syncVisibleData()`, whose `fetchSessionsForPreview()` is suppressed by the very key that is stuck.
+
+`TestTickStopsAfterReachingTerminal` and `TestTickHandlerRefetchesWhileActiveThenStops` do reach the all-terminal state, but they only assert that no tick is rescheduled; neither asserts anything about `sessionPollThreadID`. The three re-arm tests (`...AfterThePaneIsHiddenAndShown`, `...AfterADetailRoundTrip`, `...AfterAResizeBackAboveThePaneMinimum`) all start from a **running** session and inject a response *while the pane is hidden*, so their release comes from `syncSessionTick`'s `!previewVisible()` branch. No test starts from the all-terminal state and asks whether the same thread can be fetched again.
 
 `syncVisibleData()` is the single entry point for cursor-move-driven fetches. It returns `tea.Batch(maybeFetchPreview(), maybeFetchFullRows(), fetchSessionsForPreview())`; `tea.Batch` returns the sole non-nil command directly, so the three fetches collapse to however many actually need to run.
 
@@ -199,7 +209,7 @@ The poll covers the *lifetime of a live session*, not the thread: once every ses
 | `tea.WindowSizeMsg` | `Width`, `Height` | Terminal resize |
 | `tea.KeyMsg` | key code/text | Any key press |
 
-`sessionsFetchedMsg` is discarded when its `threadID` is no longer the preview thread, and a failed session fetch releases the poll instead of retrying. `sessionEventsFetchedMsg` also sets `previewMode = previewSession`, so the pane cannot show a session the user did not ask for.
+`sessionsFetchedMsg` is discarded when its `threadID` is no longer the preview thread, and a failed session fetch releases the poll instead of retrying. `sessionEventsFetchedMsg` assigns `m.session`, `m.sessionEvents`, and `previewMode = previewSession` unconditionally — it does not check where the cursor is, so a response that lands after the cursor has moved elsewhere still becomes the pane's loaded session.
 
 ## Rendering Pipeline
 
@@ -241,12 +251,12 @@ The thread branch:
 
 ### `renderSessionPreview(w, h)` (`session.go`)
 
-Renders the agent session triggered by the message under the cursor. It re-resolves the session from `sessionForCursor()` on every render, so moving the cursor updates the pane without another fetch, and it falls back to the loaded `m.session` when the polled list has no entry for the row.
+Renders the agent session started by the message the cursor's inbox row represents. It re-resolves the session from `sessionForCursor()` on every render, so moving the cursor updates the pane without another fetch, and it falls back to the loaded `m.session` when the polled list has no entry for the row — which is how a session stays on screen after the cursor has moved to a row that has none.
 
 - Header: `SESSION  <agent> · <status> · <reply mode> · #<id>`, plus elapsed duration once terminal, `replied #<seq>` when the daemon posted the reply, and the failure reason when there is one. Stripped of ANSI and newlines, then truncated to the pane width.
-- Events: one line per event, `<type>` in a fixed 8-column field, then the **first line** of the event content with tabs expanded, truncated to the pane width. Events whose session differs from the loaded `m.session` are not shown — the pane will not display one session's events under another's header.
+- Events: one line per event, `<type>` in a fixed 8-column field, then the **first line** of the event content with tabs expanded, truncated to the pane width. `loaded` is `m.session != nil && m.session.ID == s.ID`; when it is false the events are suppressed entirely, so the pane will not display one session's events under another's header.
 - Overflow: the oldest events that fit are shown and a `… N hidden …` line counts the rest. The tail of a verbose run is not reachable from the pane.
-- Placeholders: `no session on this message`, `(no events loaded)`, `(running…)`, `(no events)`.
+- Placeholders, in the order the code tests them: `no session on this message` when the resolved session is nil; `(no events loaded)` when a session resolves but it is not the loaded one; `(running…)` when the loaded session is `queued`/`running`; `(no events)` when it is terminal. `handleSessionKey` installs `m.session` *before* dispatching the events fetch, so `loaded` is already true while that fetch is in flight and if it fails — the pane shows `(running…)` or `(no events)`, never `(no events loaded)`.
 - Returns `""` when the pane is under 3 rows tall, and clamps its width up to `minContentWidth` otherwise, so a narrow terminal cannot panic the renderer.
 
 ### `helpView()`
@@ -304,9 +314,9 @@ model.Update(tea.KeyMsg)
   └─ no ──▶ handleKey(key)
               │
               ├─ ↑↓/j/k ──▶ cursor++, cursor-- ──▶ syncVisibleData()
-              ├─ r/c ──▶ handleReply() ──▶ compose.Open(composeModeMessage)
+              ├─ r ──▶ handleReply() ──▶ compose.Open(composeModeMessage)
               ├─ Enter ──▶ viewInboxDetail (fullscreen thread)
-              ├─ n ──▶ handleNewThread() ──▶ compose.Open(composeModeNewThread)
+              ├─ v ──▶ toggle sort ──▶ syncVisibleData()
               ├─ l/L ──▶ toggle inbox layout ──▶ syncVisibleData()
               ├─ p ──▶ toggle preview ──▶ syncVisibleData()
               ├─ s ──▶ handleSessionKey() ──▶ toggle previewMode
@@ -388,7 +398,7 @@ Y := clamp(3, 20, hAvail - replyReserve - 2)
 
 1. **Flat inbox over 3-view stack**: All messages in one table. Eliminates Enter/Esc navigation for scanning. `↑↓` is the only nav.
 2. **Preview panel**: Shows the word-wrapped original post + replies. Adaptive Y prevents overflow. Toggle with `p`.
-3. **Reply via `r`/`c`**: Opens compose with `threadID` + `parentID` set from cursor position for threaded replies.
+3. **Reply via `r`**: Opens compose with `threadID` + `parentID` set from cursor position for threaded replies. `c` was the original alias and is no longer bound.
 4. **Enter opens detail view**: On inbox, `Enter` opens the selected thread in a fullscreen scrollable detail view. `Esc` returns to inbox, preserving cursor position. Detail view is read-only; `r` from detail opens compose for reply.
 5. **Full-post wrapping in preview and detail**: Preview root post is word-wrapped with no truncation (via `wrapText`), replies fill remaining pane height with newest-tail truncation. Detail view wraps all messages fully — no ellipsis truncation on message content.
 6. **Fill-to-height preview**: Replies in the preview pane fill available space; when content exceeds height, oldest replies are dropped and newest are kept (tail truncation).

@@ -155,7 +155,7 @@ A mention of a name that does not resolve is inert: no session row, no subproces
 
 Sessions are created only from a **human** message append — `POST /v1/threads/:id/messages` or `POST /v1/threads/:id/events` without `X-Fluffle-Agent`. A request carrying that header is a human-only gate: an agent cannot start a session, and therefore an agent cannot start an agent. Scanning happens after the message is committed, so a session's prompt always includes its own trigger message. A mention that is not leading (`text @reviewer`) does not trigger.
 
-`mentions.Parse` accepts a run of `@name` tokens at the very start of the content, allowing whitespace between them, and returns each distinct name once. A name is `[A-Za-z0-9]` plus `_`/`-` after the first byte. The text after the mention run is the request; the whole message content is what the agent sees.
+`mentions.Parse` accepts a run of `@name` tokens at the very start of the content, allowing whitespace between them, and returns each distinct name once. A name is `[A-Za-z0-9]` plus `_`/`-` after the first byte. It also returns the text following the mention run, but the trigger discards that value: the prompt quotes the trigger message in full, mentions and all.
 
 `UNIQUE(trigger_message_id, agent_name)` makes a repeated trigger on the same message a no-op rather than a second run.
 
@@ -163,7 +163,18 @@ Sessions are created only from a **human** message append — `POST /v1/threads/
 
 At most 4 sessions run concurrently; further sessions stay `queued` and are admitted as slots free. A queued session is visible in the API before it starts, so the TUI can show it.
 
-The prompt is assembled as: the agent's `system_prompt` (if any), a `## Thread` header carrying channel, thread title, and repo path, a `## History` section of the thread's JSONL message and reaction lines, a `## Request` section quoting the trigger message by sequence, and — when the reply mode is not `stdout` — a `## Replying` section with the exact `flf message send --reply-to-seq` command to run. The subprocess runs with the thread's repo as its working directory, `env` layered over the daemon's environment, in its own process group so cancellation kills the whole tree, with a finite `timeout_secs` and at most 1 MiB of retained output per stream (head and tail kept, the middle elided).
+The prompt is assembled as: the agent's `system_prompt` (if any), a `## Thread` header carrying channel, thread title, and repo path, a `## History` section of the thread's JSONL message and reaction lines, a `## Request` section quoting the trigger message by sequence, and — when the reply mode is not `stdout` — a `## Replying` section with the exact `flf message send --reply-to-seq` command to run.
+
+How that prompt reaches the subprocess is decided by `{prompt}` in `args`, and the two branches are mutually exclusive:
+
+| `args` | Prompt delivery | stdin |
+|--------|-----------------|-------|
+| Any element **contains** `{prompt}` | Substituted into every element that contains it, via `strings.ReplaceAll` — so `args = ["-p", "{prompt}"]` becomes `["-p", "<the whole prompt>"]` | **empty** |
+| No element contains `{prompt}` | Passed through unchanged | the whole prompt, on stdin |
+
+`{prompt}` is matched as a substring, not as a whole element, so `args = ["--query={prompt}"]` also works. A config that forgets `{prompt}` entirely therefore gets the prompt on stdin — which is the right default for a filter-style CLI, and silently the wrong thing for a tool that only accepts the prompt as an argument. There is no warning either way.
+
+The subprocess runs with the thread's repo as its working directory. Where the thread has no repo — an orphaned channel — `req.Cwd` is left empty, so `cmd.Dir` is empty and the subprocess inherits the **daemon's** cwd, not the user's. `env` is layered over the daemon's environment by key, so a config `env` entry replaces the inherited value rather than adding a duplicate. Each run gets its own process group, so cancellation kills the whole tree, and it is bounded by a finite `timeout_secs` and at most 1 MiB of retained output per stream (head and tail kept, the middle elided).
 
 On startup the daemon reconciles: any session still `queued` or `running` from a previous process is marked `canceled` with `daemon restarted while <status>`. On shutdown, still-queued sessions are marked `canceled` and running subprocesses are killed, without waiting for their goroutines to unwind.
 
@@ -353,7 +364,7 @@ With `--text -`, reads the complete stdin value before contacting the daemon. `-
 | `BAD_ARGS` | invalid flags, missing required flags, or mutually exclusive sequence/ID flags | 1 |
 | `BAD_JSONL` | JSONL parse/validation failure, invalid API body, or duplicate reaction | 1 |
 | `FILE_READ` | local file or stdin cannot be read | 1 |
-| `NOT_A_GIT_REPO` | a repo-scoped CLI command was given a path without `.git` (client-side check) | 1 |
+| `NOT_A_GIT_REPO` | a repo-scoped CLI command was given a path without `.git`, or `flf agent list --repo` was given a path that does not exist (client-side check) | 1 |
 | `AGENT_FORBIDDEN` | an agent attempts a human-only channel or thread creation, daemon shutdown, or session cancellation | 1 |
 | `THREAD_NOT_FOUND` | thread or referenced event target is missing | 1 |
 | `SESSION_NOT_FOUND` | the requested session does not exist, or the path is not a known session route | 1 |
@@ -454,7 +465,7 @@ These are product expansions, not prerequisites for a useful local agent loop. T
 3. **Agent read loop:** add `after_seq`, expose `flf inbox`, verify no duplicate or skipped messages.
 4. **Agent write loop:** add stdin, atomic batch append, reaction-by-sequence, response-loss handling.
 5. **Transport hardening:** centralize finite HTTP clients, contexts, structured CLI errors.
-6. **Measured enhancements:** consider compact output, search, reaction browsing, and human-triggered invocation only after observing real usage.
+6. **Measured enhancements:** consider compact output, search, and reaction browsing only after observing real usage. Human-triggered invocation shipped as the `@mention` trigger rather than as a separate invoke command.
 
 ### Key design choices
 

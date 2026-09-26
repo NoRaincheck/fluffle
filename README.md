@@ -2,7 +2,7 @@
 
 A local-first, TUI-first communication hub for developer teams and local AI agents.
 
-**Glossary:** Channel = repo-anchored or `--orphaned` room · Thread = titled conversation in a channel · Message = chat line in a thread (reply via `--reply-to` or `--reply-to-seq`) · Reaction = emoji attached to a message · Inbox = unified view of recent messages across all channels · Session = one local agent run started by an `@mention`, with its prompt, output, and result.
+**Glossary:** Channel = repo-anchored or `--orphaned` room · Thread = titled conversation in a channel · Message = chat line in a thread (reply via `--reply-to` or `--reply-to-seq`) · Reaction = emoji attached to a message · Inbox = unified view of recent messages across all channels · **Agent session** = one local agent run started by an `@mention`, with its prompt, output, and result. Note the two unrelated senses of *session* in this project: an **agent session** is a run of a subprocess, recorded in the `agent_sessions` table and never part of an export; a *session* in `flf thread export`/`import` and in `VISION.md` is a **portable JSONL thread** — the exported conversation, not the run.
 
 ```bash
 go build ./cmd/flf
@@ -33,7 +33,7 @@ printf '[[agents]]\nname="reviewer"\ncommand="claude"\nargs=["-p","{prompt}"]\n'
 ./flf message send --thread 1 --text "@reviewer what changed in the auth refactor?" --as alice
 ./flf agent session --id 1 --json      # the full run: prompt, stdout, exit
 
-# thread export / import — portable JSONL session handoff
+# thread export / import — portable JSONL handoff (a "session" here is the exported thread, not an agent run)
 ./flf thread export --thread 1 --format jsonl > session.jsonl
 ./flf thread import --file session.jsonl --channel refactor
 
