@@ -284,8 +284,9 @@ func TestTickHandlerRefetchesWhileActiveThenStops(t *testing.T) {
 	m.sessions = []store.Session{{ID: 1, Status: store.SessionRunning}}
 	m.sessionPollThreadID = 7
 	m.sessionTickThread = 7
+	m.sessionTickGen = 1
 	m.previewThreadID = 7
-	next, cmd := m.Update(sessionTickMsg{threadID: 7})
+	next, cmd := m.Update(sessionTickMsg{threadID: 7, gen: 1})
 	if cmd == nil {
 		t.Fatal("a tick while running must reschedule through the fetch it issues")
 	}
@@ -658,8 +659,7 @@ func TestHiddenPaneIssuesNoSessionFetchesOnKeyPresses(t *testing.T) {
 
 func TestTwoAcceptedResponsesProduceOneChain(t *testing.T) {
 	running := store.Session{ID: 3, TriggerMessageID: 42, ThreadID: 7, Status: store.SessionRunning}
-	m, hits := pollModel(t, []store.Session{running})
-	before := len(hits())
+	m, _ := pollModel(t, []store.Session{running})
 	m.sessionTickThread = 0
 
 	next, cmd := m.Update(sessionsFetchedMsg{threadID: 7, sessions: []store.Session{running}})
@@ -677,9 +677,8 @@ func TestTwoAcceptedResponsesProduceOneChain(t *testing.T) {
 		t.Fatal("a duplicate accepted response must not schedule a second chain")
 	}
 	if m.sessionTickThread != 7 {
-		t.Fatalf("the surviving chain must still be pending, got thread %d", m.sessionTickThread)
+		t.Fatalf("the surviving chain must still be outstanding, got thread %d", m.sessionTickThread)
 	}
-	_ = before
 }
 
 func TestTickAfterWithdrawnArmingDoesNotFetchThreadZero(t *testing.T) {
@@ -698,7 +697,7 @@ func TestTickAfterWithdrawnArmingDoesNotFetchThreadZero(t *testing.T) {
 		t.Fatalf("precondition: a tick scheduled before the hide is still outstanding, got thread %d", m.sessionTickThread)
 	}
 
-	next, cmd := m.Update(sessionTickMsg{threadID: 7})
+	next, cmd := m.Update(sessionTickMsg{threadID: 7, gen: m.sessionTickGen})
 	m = toModel(next)
 	if cmd != nil {
 		flattenMsgs(cmd())
@@ -716,7 +715,7 @@ func TestFetchErrorReleasesTheArmingSoTheNextSyncRetries(t *testing.T) {
 	m, hits := pollModel(t, []store.Session{running})
 	before := len(hits())
 
-	next, cmd := m.Update(sessionTickMsg{threadID: 7})
+	next, cmd := m.Update(sessionTickMsg{threadID: 7, gen: m.sessionTickGen})
 	m = toModel(next)
 	if cmd == nil {
 		t.Fatal("precondition: the chain must fetch")
@@ -819,29 +818,46 @@ func TestStaleTickForAnAbandonedThreadDoesNotFetch(t *testing.T) {
 	nine := store.Session{ID: 2, TriggerMessageID: 99, ThreadID: 9, Status: store.SessionRunning}
 	all := []store.Session{seven, nine}
 	m, hits := twoThreadPollModel(t, all)
-	before := len(hits())
 
 	next, _ := m.Update(previewMessagesFetchedMsg{threadID: 7})
 	m = toModel(next)
-	m.sessionPollThreadID = 9
-	m.sessionTickThread = 9
+	next, _ = m.Update(sessionsFetchedMsg{threadID: 7, sessions: all})
+	m = toModel(next)
+	live := m.sessionTickGen
+	if live == 0 {
+		t.Fatal("precondition: a chain must be outstanding")
+	}
 
-	next, cmd := m.Update(sessionTickMsg{threadID: 7})
+	m.sessionPollThreadID = 9
+	before := len(hits())
+	next, cmd := m.Update(sessionTickMsg{threadID: 7, gen: live})
 	m = toModel(next)
 	if cmd != nil {
 		flattenMsgs(cmd())
 	}
 	if got := len(hits()) - before; got != 0 {
-		t.Fatalf("a tick for the abandoned thread 7 issued %d fetches while thread 9 is armed: %v", got, hits())
-	}
-	if m.sessionTickThread != 9 {
-		t.Fatalf("a foreign tick must not clear the armed chain for thread 9, got thread %d", m.sessionTickThread)
-	}
-	if m.sessionTickThread != 9 {
-		t.Fatalf("a foreign tick must not disturb the armed chain, got thread %d", m.sessionTickThread)
+		t.Fatalf("a tick for the abandoned thread 7 fetched %d times while thread 9 was armed: %v", got, hits())
 	}
 	if m.sessionPollThreadID != 9 {
-		t.Fatalf("a foreign tick must not disturb the arming, got %d", m.sessionPollThreadID)
+		t.Fatalf("a tick for the abandoned thread must not disturb the arming, got %d", m.sessionPollThreadID)
+	}
+
+	m.sessionTickGen = live + 1
+	m.sessionTickThread = 9
+	before = len(hits())
+	next, cmd = m.Update(sessionTickMsg{threadID: 7, gen: live})
+	m = toModel(next)
+	if cmd != nil {
+		flattenMsgs(cmd())
+	}
+	if got := len(hits()) - before; got != 0 {
+		t.Fatalf("a superseded tick issued %d fetches: %v", got, hits())
+	}
+	if m.sessionTickGen != live+1 {
+		t.Fatalf("a superseded tick must not consume the current chain, got gen %d", m.sessionTickGen)
+	}
+	if m.sessionTickThread != 9 {
+		t.Fatalf("a superseded tick must not disturb the armed chain, got thread %d", m.sessionTickThread)
 	}
 }
 
@@ -862,7 +878,7 @@ func TestStaleTickAfterAReleasedArmingDoesNotFetch(t *testing.T) {
 		t.Fatalf("precondition: the outstanding tick must survive, got thread %d", m.sessionTickThread)
 	}
 
-	next, cmd := m.Update(sessionTickMsg{threadID: 7})
+	next, cmd := m.Update(sessionTickMsg{threadID: 7, gen: m.sessionTickGen})
 	m = toModel(next)
 	if cmd != nil {
 		flattenMsgs(cmd())
@@ -872,6 +888,87 @@ func TestStaleTickAfterAReleasedArmingDoesNotFetch(t *testing.T) {
 	}
 	if m.sessionTickThread != 0 {
 		t.Fatalf("the tick must clear its own outstanding mark, got thread %d", m.sessionTickThread)
+	}
+}
+
+func TestASupersededChainIsDiscardedRatherThanFetching(t *testing.T) {
+	seven := store.Session{ID: 1, TriggerMessageID: 42, ThreadID: 7, Status: store.SessionRunning}
+	nine := store.Session{ID: 2, TriggerMessageID: 99, ThreadID: 9, Status: store.SessionRunning}
+	all := []store.Session{seven, nine}
+	m, hits := twoThreadPollModel(t, all)
+
+	next, _ := m.Update(previewMessagesFetchedMsg{threadID: 7})
+	m = toModel(next)
+	next, _ = m.Update(sessionsFetchedMsg{threadID: 7, sessions: all})
+	m = toModel(next)
+	first := m.sessionTickGen
+	if first == 0 {
+		t.Fatal("precondition: the first chain must be outstanding")
+	}
+
+	next, _ = m.Update(previewMessagesFetchedMsg{threadID: 9})
+	m = toModel(next)
+	next, _ = m.Update(sessionsFetchedMsg{threadID: 9, sessions: all})
+	m = toModel(next)
+	next, _ = m.Update(previewMessagesFetchedMsg{threadID: 7})
+	m = toModel(next)
+	next, _ = m.Update(sessionsFetchedMsg{threadID: 7, sessions: all})
+	m = toModel(next)
+	if m.sessionTickGen == first {
+		t.Fatal("precondition: the round trip must supersede the first chain")
+	}
+	before := len(hits())
+
+	next, cmd := m.Update(sessionTickMsg{threadID: 7, gen: first})
+	m = toModel(next)
+	if cmd != nil {
+		flattenMsgs(cmd())
+	}
+	if got := len(hits()) - before; got != 0 {
+		t.Fatalf("the superseded chain's tick issued %d fetches; a chain must be identified by more than its thread: %v", got, hits())
+	}
+	if m.sessionTickGen != 0 && m.sessionTickGen == first {
+		t.Fatal("a superseded tick must not consume the current chain")
+	}
+}
+
+func TestTickIsStoppedWhenAnAllTerminalAcceptChangesTheArmedThread(t *testing.T) {
+	seven := store.Session{ID: 1, TriggerMessageID: 42, ThreadID: 7, Status: store.SessionRunning}
+	terminal := store.Session{ID: 2, TriggerMessageID: 99, ThreadID: 9, Status: store.SessionSucceeded}
+	m, hits := twoThreadPollModel(t, []store.Session{seven, terminal})
+
+	next, _ := m.Update(previewMessagesFetchedMsg{threadID: 7})
+	m = toModel(next)
+	next, _ = m.Update(sessionsFetchedMsg{threadID: 7, sessions: []store.Session{seven}})
+	m = toModel(next)
+	gen := m.sessionTickGen
+	if gen == 0 {
+		t.Fatal("precondition: the thread 7 chain must be outstanding")
+	}
+
+	// An all-terminal accept re-arms thread 9 without re-stamping a chain.
+	next, _ = m.Update(previewMessagesFetchedMsg{threadID: 9})
+	m = toModel(next)
+	next, _ = m.Update(sessionsFetchedMsg{threadID: 9, sessions: []store.Session{terminal}})
+	m = toModel(next)
+	if m.sessionPollThreadID != 9 {
+		t.Fatalf("precondition: thread 9 must be armed, got %d", m.sessionPollThreadID)
+	}
+	if m.sessionTickGen != gen {
+		t.Fatal("precondition: an all-terminal accept must not re-stamp a chain")
+	}
+	before := len(hits())
+
+	next, cmd := m.Update(sessionTickMsg{threadID: 7, gen: gen})
+	m = toModel(next)
+	if cmd != nil {
+		flattenMsgs(cmd())
+	}
+	if got := len(hits()) - before; got != 0 {
+		t.Fatalf("the thread 7 tick fetched %d times after thread 9 was armed: %v", got, hits())
+	}
+	if m.sessionPollThreadID != 9 {
+		t.Fatalf("the thread 9 arming must survive the stale tick, got %d", m.sessionPollThreadID)
 	}
 }
 
@@ -1141,9 +1238,10 @@ func TestTickSurvivesAcrossAFetchAndStopsWhenTheFetchFails(t *testing.T) {
 	m := sessionModel(t, []store.Session{running}, nil)
 	m.sessionPollThreadID = 7
 	m.sessionTickThread = 7
+	m.sessionTickGen = 1
 	m.previewThreadID = 7
 	m.sessions = []store.Session{running}
-	next, cmd := m.Update(sessionTickMsg{threadID: 7})
+	next, cmd := m.Update(sessionTickMsg{threadID: 7, gen: 1})
 	if cmd == nil {
 		t.Fatal("precondition: the tick must refetch")
 	}

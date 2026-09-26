@@ -38,10 +38,11 @@ type sessionEventsFetchedMsg struct {
 
 type sessionTickMsg struct {
 	threadID int64
+	gen      int64
 }
 
-func sessionTickCmd(threadID int64, d time.Duration) tea.Cmd {
-	return tea.Tick(d, func(time.Time) tea.Msg { return sessionTickMsg{threadID: threadID} })
+func sessionTickCmd(threadID, gen int64, d time.Duration) tea.Cmd {
+	return tea.Tick(d, func(time.Time) tea.Msg { return sessionTickMsg{threadID: threadID, gen: gen} })
 }
 
 func (m *model) releaseSessionPoll() {
@@ -111,8 +112,9 @@ func (m *model) syncSessionTick() tea.Cmd {
 	if m.sessionPollThreadID != 0 && m.sessionTickThread == m.sessionPollThreadID {
 		return nil
 	}
+	m.sessionTickGen++
 	m.sessionTickThread = m.sessionPollThreadID
-	return sessionTickCmd(m.sessionTickThread, sessionTickInterval)
+	return sessionTickCmd(m.sessionTickThread, m.sessionTickGen, sessionTickInterval)
 }
 
 func (m *model) sessionForCursor() (store.Session, bool) {

@@ -110,6 +110,7 @@ type model struct {
 	sessionEvents       []store.SessionEvent
 	sessionPollThreadID int64
 	sessionTickThread   int64
+	sessionTickGen      int64
 }
 
 func New(base string) tea.Model {
@@ -361,9 +362,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case sessionTickMsg:
-		if m.sessionTickThread != msg.threadID {
+		if m.sessionTickGen != msg.gen {
 			return m, nil
 		}
+		m.sessionTickGen = 0
 		m.sessionTickThread = 0
 		if m.sessionPollThreadID == 0 || msg.threadID != m.sessionPollThreadID {
 			return m, nil
