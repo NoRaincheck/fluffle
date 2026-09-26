@@ -38,7 +38,6 @@ CREATE TABLE channels(
   repo_head_branch TEXT,
   is_orphaned INTEGER NOT NULL DEFAULT 0 CHECK(is_orphaned IN (0,1)),
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-  archived_at TEXT,
   CHECK ((is_orphaned = 1 AND repo_abs_path IS NULL)
       OR (is_orphaned = 0 AND repo_abs_path IS NOT NULL)),
   UNIQUE(name, repo_abs_path)
@@ -49,8 +48,7 @@ CREATE TABLE threads(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   channel_id INTEGER NOT NULL REFERENCES channels(id),
   title TEXT NOT NULL CHECK(length(trim(title)) > 0),
-  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-  archived_at TEXT
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_threads_channel ON threads(channel_id, id);
 
@@ -117,6 +115,8 @@ On every `store.Open`, `migrate` probes `PRAGMA table_info(messages)` for a `par
 - **Column absent** — the database predates the threaded-reply change, and `migrate` **drops and rebuilds** `reactions`, `messages`, `threads`, and `channels` against the current schema. This is destructive by design: a pre-`parent_id` database loses all channels, threads, messages, and reactions. `store_test.go` asserts that data does not survive the rebuild.
 
 There is no schema version table, and the probe keys on one specific column, so drift that does not involve `messages.parent_id` takes the additive path — where `CREATE TABLE IF NOT EXISTS` silently skips a table that already exists, and a missing column on that table is never added.
+
+The one exception is a column that has been *removed*. `channels.archived_at` and `threads.archived_at` were dropped after being found never to be written by any code path, and because `CREATE TABLE IF NOT EXISTS` skips a table that already exists, removing them from the schema alone would have left the column in place on an existing database. So `migrate` follows the schema application with `ALTER TABLE ... DROP COLUMN` whenever it finds one. Dropping the column rather than rebuilding the table is what preserves the rows.
 
 Integer IDs (`--thread 42`). Live write identity is derived by the daemon from a non-empty `X-Fluffle-Agent` header; the CLI `--agent-id` flag supplies that header. Client-supplied `author_type` is never trusted. `seq` is daemon-assigned (`max(seq)+1` per thread in transaction). `agent_sessions` and `agent_session_events` are an audit trail for local agent runs, not part of the append-only message/reaction contract: nothing in them is portable JSONL and nothing in them is ever sent back to an agent.
 

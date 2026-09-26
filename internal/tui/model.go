@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -279,6 +280,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.compose.Close()
 		m.status = fmt.Sprintf("thread %q created", msg.title)
 		return m, m.fetchThreads(msg.channelID)
+
+	case channelCreatedMsg:
+		if msg.err != nil {
+			m.compose.SetError(msg.err.Error())
+			return m, nil
+		}
+		m.compose.Close()
+		m.status = fmt.Sprintf("channel %q created", msg.name)
+		return m, m.fetchChannels()
 
 	case messagesFetchedMsg:
 		if msg.err != nil {
@@ -662,6 +672,12 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.syncVisibleData()
 	case "r":
 		return m.handleThreadReply()
+	case "n":
+		return m.handleNewThread()
+	case "C":
+		return m.handleNewChannel()
+	case "e":
+		return m.handleReact()
 	case "v":
 		if m.view == viewInbox {
 			if m.inboxSort == inboxSortLatestDesc {
@@ -1107,12 +1123,112 @@ func (m *model) maybeFetchPreview() tea.Cmd {
 	return nil
 }
 
+func (m *model) currentChannelID() int64 {
+	if m.view == viewChannels {
+		if m.cursor >= 0 && m.cursor < len(m.channels) {
+			return m.channels[m.cursor].ID
+		}
+		return 0
+	}
+	if m.selectedThread != nil {
+		return m.selectedThread.ChannelID
+	}
+	return 0
+}
+
+func (m *model) cursorMessage() (store.Message, bool) {
+	if m.view != viewInboxDetail {
+		return store.Message{}, false
+	}
+	sorted := sortedMessagesAsc(m.messages)
+	_, replies := threadSplit(sorted)
+	if m.detailCursor < 0 || m.detailCursor >= len(replies) {
+		return store.Message{}, false
+	}
+	return replies[m.detailCursor], true
+}
+
+func (m *model) handleNewThread() (tea.Model, tea.Cmd) {
+	channelID := m.currentChannelID()
+	if channelID == 0 {
+		m.status = "no channel selected — open a thread first"
+		return m, nil
+	}
+	name := "channel"
+	if m.selectedChannel != nil {
+		name = m.selectedChannel.Name
+	}
+	m.compose.Open(composeModeNewThread, name, m.height)
+	m.compose.state.channelID = channelID
+	return m, nil
+}
+
+func (m *model) handleNewChannel() (tea.Model, tea.Cmd) {
+	m.compose.Open(composeModeNewChannel, "", m.height)
+	return m, nil
+}
+
+func (m *model) handleReact() (tea.Model, tea.Cmd) {
+	target, ok := m.cursorMessage()
+	if !ok {
+		return m, nil
+	}
+	m.compose.Open(composeModeReact, target.Content, m.height)
+	m.compose.state.threadID = m.detailThreadID
+	m.compose.state.parentID = target.ID
+	return m, nil
+}
+
+func (m *model) createThread(title string) (tea.Model, tea.Cmd) {
+	channelID := m.compose.state.channelID
+	id, err := m.api.CreateThread(nil, channelID, title)
+	if err != nil {
+		m.compose.SetError(err.Error())
+		return m, nil
+	}
+	msg := threadCreatedMsg{channelID: channelID, threadID: id, title: title}
+	return m, func() tea.Msg { return msg }
+}
+
+func (m *model) createChannel(name string) (tea.Model, tea.Cmd) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		m.compose.SetError(err.Error())
+		return m, nil
+	}
+	id, err := m.api.CreateChannel(nil, name, cwd, "", false)
+	if err != nil {
+		m.compose.SetError(err.Error())
+		return m, nil
+	}
+	msg := channelCreatedMsg{channelID: id, name: name}
+	return m, func() tea.Msg { return msg }
+}
+
+func (m *model) addReaction(emoji string) (tea.Model, tea.Cmd) {
+	if err := m.api.AddReaction(nil, m.compose.state.parentID, emoji); err != nil {
+		m.compose.SetError(err.Error())
+		return m, nil
+	}
+	m.compose.Close()
+	m.status = "reaction added"
+	return m, nil
+}
+
 func (m *model) handleComposeSend(msg composeSendMsg) (tea.Model, tea.Cmd) {
 	if msg.text == "" {
 		m.compose.SetError("cannot be empty")
 		return m, nil
 	}
 	m.compose.ClearError()
+	switch msg.mode {
+	case composeModeNewThread:
+		return m.createThread(msg.text)
+	case composeModeNewChannel:
+		return m.createChannel(msg.text)
+	case composeModeReact:
+		return m.addReaction(msg.text)
+	}
 	threadID := m.compose.state.threadID
 	parentID := m.compose.state.parentID
 	if threadID == 0 && m.selectedThread != nil {
@@ -2706,15 +2822,15 @@ func (m model) helpView() string {
 		if m.previewMode == previewSession {
 			sessionHint = hintKeyStyle.Render("s") + " thread"
 		}
-		parts = []string{hintKeyStyle.Render("↑↓/j/k") + " nav", hintKeyStyle.Render("Enter") + " view", hintKeyStyle.Render("r") + " reply", hintKeyStyle.Render("v") + " sort", hintKeyStyle.Render("f") + " filter", hintKeyStyle.Render("l") + " layout", sessionHint, previewHint, hintKeyStyle.Render("q") + " quit"}
+		parts = []string{hintKeyStyle.Render("↑↓/j/k") + " nav", hintKeyStyle.Render("Enter") + " view", hintKeyStyle.Render("r") + " reply", hintKeyStyle.Render("n") + " new thread", hintKeyStyle.Render("C") + " new channel", hintKeyStyle.Render("v") + " sort", hintKeyStyle.Render("f") + " filter", hintKeyStyle.Render("l") + " layout", sessionHint, previewHint, hintKeyStyle.Render("q") + " quit"}
 	case viewInboxDetail:
-		parts = []string{hintKeyStyle.Render("↑↓/j/k") + " scroll", hintKeyStyle.Render("g/G") + " top/bottom", hintKeyStyle.Render("r") + " reply", hintKeyStyle.Render("Esc") + " back", previewHint, hintKeyStyle.Render("q") + " quit"}
+		parts = []string{hintKeyStyle.Render("↑↓/j/k") + " scroll", hintKeyStyle.Render("g/G") + " top/bottom", hintKeyStyle.Render("r") + " reply", hintKeyStyle.Render("e") + " react", hintKeyStyle.Render("n") + " new thread", hintKeyStyle.Render("Esc") + " back", previewHint, hintKeyStyle.Render("q") + " quit"}
 	case viewChannels:
-		parts = []string{hintKeyStyle.Render("↑↓/j/k") + " nav", hintKeyStyle.Render("Enter") + " open", previewHint, hintKeyStyle.Render("q") + " quit"}
+		parts = []string{hintKeyStyle.Render("↑↓/j/k") + " nav", hintKeyStyle.Render("Enter") + " open", hintKeyStyle.Render("n") + " new thread", hintKeyStyle.Render("C") + " new channel", previewHint, hintKeyStyle.Render("q") + " quit"}
 	case viewThreads:
-		parts = []string{hintKeyStyle.Render("↑↓") + " nav", hintKeyStyle.Render("Enter") + " open", hintKeyStyle.Render("r") + " reply", hintKeyStyle.Render("Esc") + " back", previewHint, hintKeyStyle.Render("q") + " quit"}
+		parts = []string{hintKeyStyle.Render("↑↓") + " nav", hintKeyStyle.Render("Enter") + " open", hintKeyStyle.Render("r") + " reply", hintKeyStyle.Render("n") + " new thread", hintKeyStyle.Render("Esc") + " back", previewHint, hintKeyStyle.Render("q") + " quit"}
 	case viewMessages:
-		parts = []string{hintKeyStyle.Render("↑↓") + " nav", hintKeyStyle.Render("r") + " reply", hintKeyStyle.Render("Esc") + " back", previewHint, hintKeyStyle.Render("q") + " quit"}
+		parts = []string{hintKeyStyle.Render("↑↓") + " nav", hintKeyStyle.Render("r") + " reply", hintKeyStyle.Render("n") + " new thread", hintKeyStyle.Render("Esc") + " back", previewHint, hintKeyStyle.Render("q") + " quit"}
 	}
 	return hintStyle.Render(strings.Join(parts, "  "))
 }

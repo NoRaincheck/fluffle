@@ -13,16 +13,19 @@ const (
 	composeModeMessage composeMode = iota
 	composeModeReply
 	composeModeNewThread
+	composeModeNewChannel
+	composeModeReact
 )
 
 type composeState struct {
-	mode     composeMode
-	context  string
-	text     string
-	cursor   int
-	error    string
-	threadID int64
-	parentID int64
+	mode      composeMode
+	context   string
+	text      string
+	cursor    int
+	error     string
+	threadID  int64
+	channelID int64
+	parentID  int64
 }
 
 type composeModel struct {
@@ -184,6 +187,12 @@ type threadCreatedMsg struct {
 	err       error
 }
 
+type channelCreatedMsg struct {
+	channelID int64
+	name      string
+	err       error
+}
+
 func (m *composeModel) SetError(err string) {
 	m.state.error = err
 }
@@ -303,7 +312,11 @@ func composeContext(mode composeMode, context string) string {
 		preview := truncate(context, 40)
 		return "Reply to: " + preview
 	case composeModeNewThread:
-		return context
+		return "New thread in " + context
+	case composeModeNewChannel:
+		return "New channel name (anchored to cwd)"
+	case composeModeReact:
+		return "React to: " + truncate(context, 40)
 	default:
 		return context
 	}

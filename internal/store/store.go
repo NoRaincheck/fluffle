@@ -545,16 +545,6 @@ func (m Message) ParentIDValue() int64 {
 	return 0
 }
 
-func (s *Store) ListMessagesByParent(threadID int64, parentID int64) ([]Message, error) {
-	q := `SELECT m.id, m.thread_id, m.seq, m.parent_id, p.seq, m.name, m.author_type, m.role, m.content, COALESCE(m.created_at,'') FROM messages m LEFT JOIN messages p ON p.id = m.parent_id WHERE m.thread_id = ? AND m.parent_id = ? ORDER BY m.seq ASC`
-	rows, err := s.db.Query(q, threadID, parentID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanMessages(rows)
-}
-
 func (s *Store) ListInbox(limit int) ([]InboxMessage, error) {
 	if limit <= 0 {
 		limit = 100
@@ -591,14 +581,6 @@ func (s *Store) ListInbox(limit int) ([]InboxMessage, error) {
 		out = []InboxMessage{}
 	}
 	return out, nil
-}
-
-func (s *Store) CountReplies(threadID int64, parentID int64) (int, error) {
-	var n int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE thread_id = ? AND parent_id = ?`, threadID, parentID).Scan(&n); err != nil {
-		return 0, err
-	}
-	return n, nil
 }
 
 func (s *Store) AddReaction(messageID int64, emoji, name, authorType string) error {
