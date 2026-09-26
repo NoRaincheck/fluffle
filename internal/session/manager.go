@@ -55,7 +55,9 @@ func NewManager(s *store.Store, agents *agentcfg.Loader, r runner.Runner) *Manag
 	}
 }
 
-func nowRFC3339() string { return time.Now().UTC().Format(time.RFC3339) }
+const sessionStampLayout = "2006-01-02T15:04:05.000Z"
+
+func nowRFC3339() string { return time.Now().UTC().Format(sessionStampLayout) }
 
 func stringPtr(s string) *string { return &s }
 
@@ -338,7 +340,6 @@ func (m *Manager) agentPosted(threadID int64, name string, sessionID int64) bool
 	if sess.StartedAt != nil {
 		since = *sess.StartedAt
 	}
-	since = strings.TrimSuffix(since, "Z")
 	deadline := time.Now().Add(ReplyGracePeriod)
 	for {
 		n, err := m.store.CountAgentMessagesSince(threadID, name, since)

@@ -2,11 +2,14 @@ package session
 
 import (
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/NoRaincheck/fluffle/internal/store"
 )
+
+const msStampLayout = "2006-01-02T15:04:05.000Z"
 
 func cfgWith(reply string) string {
 	return "[[agents]]\nname=\"probe\"\ncommand=\"/bin/probe\"\nreply=\"" + reply + "\"\ntimeout_secs=5\n"
@@ -178,5 +181,106 @@ func TestHumanPostDoesNotCountAsSelfPost(t *testing.T) {
 	got := waitSession(t, s, onlySession(t, s, thID).ID, 15*time.Second)
 	if got.ReplyMessageID == nil {
 		t.Fatal("a human post must not suppress the stdout fallback")
+	}
+}
+
+func TestSessionTimestampsSortExactlyAgainstMessageTimestamps(t *testing.T) {
+	s, m, thID, msgID := harness(t, cfgWith("stdout"), &fakeRunner{})
+	m.Start(thID, msgID, []string{"probe"})
+	got := waitSession(t, s, onlySession(t, s, thID).ID, 10*time.Second)
+
+	if got.StartedAt == nil || got.FinishedAt == nil {
+		t.Fatalf("timestamps = %v / %v", got.StartedAt, got.FinishedAt)
+	}
+	trigger, err := s.MessageByID(msgID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ts := range []string{*got.StartedAt, *got.FinishedAt} {
+		if len(ts) != len(trigger.CreatedAt) {
+			t.Fatalf("session timestamp %q is %d chars, created_at %q is %d", ts, len(ts), trigger.CreatedAt, len(trigger.CreatedAt))
+		}
+		if _, err := time.Parse(msStampLayout, ts); err != nil {
+			t.Fatalf("session timestamp %q is not a fixed 3-digit millisecond stamp: %v", ts, err)
+		}
+	}
+
+	start, err := time.Parse(time.RFC3339, *got.StartedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := start.Add(time.Millisecond).Format(msStampLayout)
+	before := start.Add(-time.Millisecond).Format(msStampLayout)
+
+	if _, err := s.AppendMessageAt(thID, "probe", "agent", "assistant", "just after the start", after); err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.CountAgentMessagesSince(thID, "probe", *got.StartedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("agent messages %d at or after the session start, want 1", n)
+	}
+
+	if _, err := s.AppendMessageAt(thID, "probe", "agent", "assistant", "just before the start", before); err != nil {
+		t.Fatal(err)
+	}
+	n, err = s.CountAgentMessagesSince(thID, "probe", *got.StartedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("agent messages %d, want the pre-session post to stay excluded", n)
+	}
+}
+
+func TestASecondSessionInTheSameSecondDoesNotCountTheFirstSessionsPost(t *testing.T) {
+	s, m, thID, msgID := harness(t, cfgWith("auto"), &fakeRunner{stdout: "second stdout"})
+	fr := m.runner.(*fakeRunner)
+	var once sync.Once
+	fr.onStart = func() { once.Do(func() { selfPost(t, s, thID, "probe", "first reply") }) }
+
+	m.Start(thID, msgID, []string{"probe"})
+	first := waitSession(t, s, onlySession(t, s, thID).ID, 10*time.Second)
+	if first.Status != store.SessionSucceeded || first.ReplyMessageID != nil {
+		t.Fatalf("first session = %+v", first)
+	}
+
+	seq, err := s.AppendMessage(thID, "alice", "human", "user", "@probe again")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondTrigger, err := s.MessageIDBySeq(thID, seq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Start(thID, secondTrigger, []string{"probe"})
+	sessions, err := s.ListSessions(thID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 2 {
+		t.Fatalf("sessions = %+v, want 2", sessions)
+	}
+	second := waitSession(t, s, sessions[1].ID, 15*time.Second)
+	t.Logf("first started_at = %s, second started_at = %s", *first.StartedAt, *second.StartedAt)
+
+	if second.Status != store.SessionSucceeded {
+		t.Fatalf("second status = %q error %v", second.Status, second.Error)
+	}
+	if second.ReplyMessageID == nil {
+		t.Fatal("the second session counted the first session's post as its own reply")
+	}
+	msg, err := s.MessageByID(*second.ReplyMessageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Content != "second stdout" {
+		t.Fatalf("content = %q", msg.Content)
+	}
+	msgs, _ := s.ListMessages(thID, 0)
+	if len(msgs) != 4 {
+		t.Fatalf("messages = %+v, want two triggers, the first post, and the second stdout fallback", msgs)
 	}
 }
