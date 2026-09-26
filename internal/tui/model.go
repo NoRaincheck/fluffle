@@ -71,44 +71,44 @@ func inboxLayoutName(l inboxLayout) string {
 }
 
 type model struct {
-	width, height     int
-	quitting          bool
-	view              viewKind
-	cursor            int
-	scroll            int
-	status            string
-	api               *apiClient
-	channels          []store.Channel
-	threads           []store.Thread
-	messages          []store.Message
-	inbox             []store.InboxMessage
-	selectedChannel   *store.Channel
-	selectedThread    *store.Thread
-	compose           composeModel
-	filter            filterModel
-	inboxSort         inboxSort
-	inboxLayout       inboxLayout
-	fullThreads       map[int64][]store.Message
-	inboxFilterChan   string
-	inboxFilterThread string
-	preview           bool
-	previewThreads    []store.Thread
-	previewMessages   []store.Message
-	previewChannelID  int64
-	previewThreadID   int64
-	prevView          viewKind
-	hasPrev           bool
-	detailThreadID    int64
-	detailScroll      int
-	detailCursor      int
-	savedInboxCursor  int
-	savedInboxScroll  int
-	previewMode       previewMode
-	sessions          []store.Session
-	sessionsByMsg     map[int64]store.Session
-	session           *store.Session
-	sessionEvents     []store.SessionEvent
-	sessionScroll     int
+	width, height       int
+	quitting            bool
+	view                viewKind
+	cursor              int
+	scroll              int
+	status              string
+	api                 *apiClient
+	channels            []store.Channel
+	threads             []store.Thread
+	messages            []store.Message
+	inbox               []store.InboxMessage
+	selectedChannel     *store.Channel
+	selectedThread      *store.Thread
+	compose             composeModel
+	filter              filterModel
+	inboxSort           inboxSort
+	inboxLayout         inboxLayout
+	fullThreads         map[int64][]store.Message
+	inboxFilterChan     string
+	inboxFilterThread   string
+	preview             bool
+	previewThreads      []store.Thread
+	previewMessages     []store.Message
+	previewChannelID    int64
+	previewThreadID     int64
+	prevView            viewKind
+	hasPrev             bool
+	detailThreadID      int64
+	detailScroll        int
+	detailCursor        int
+	savedInboxCursor    int
+	savedInboxScroll    int
+	previewMode         previewMode
+	sessions            []store.Session
+	sessionsByMsg       map[int64]store.Session
+	session             *store.Session
+	sessionEvents       []store.SessionEvent
+	sessionPollThreadID int64
 }
 
 func New(base string) tea.Model {
@@ -335,13 +335,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.previewMessages = msg.messages
 		m.previewThreadID = msg.threadID
-		return m, nil
+		return m, m.fetchSessionsForPreview()
 
 	case sessionsFetchedMsg:
 		if msg.err != nil {
 			m.status = fmt.Sprintf("error: %v", msg.err)
 			return m, nil
 		}
+		if msg.threadID != m.previewThreadID {
+			return m, nil
+		}
+		m.sessionPollThreadID = msg.threadID
 		return m.applySessions(msg.sessions)
 
 	case sessionEventsFetchedMsg:
@@ -351,7 +355,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.session = &msg.session
 		m.sessionEvents = msg.events
-		m.sessionScroll = 0
 		m.previewMode = previewSession
 		return m, nil
 
@@ -359,7 +362,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.anySessionActive() {
 			return m, nil
 		}
-		return m, tea.Batch(m.fetchSessions(m.previewThreadID), sessionTickCmd(sessionTickInterval))
+		return m, m.fetchSessions(m.sessionPollThreadID)
 
 	case fullRowsFetchedMsg:
 		if msg.err != nil && len(msg.rows) == 0 {
@@ -1067,7 +1070,7 @@ func (m *model) maybeFetchPreview() tea.Cmd {
 		if im.ThreadID == m.previewThreadID {
 			return nil
 		}
-		return tea.Batch(m.fetchPreviewMessages(im.ThreadID), m.fetchSessions(im.ThreadID))
+		return m.fetchPreviewMessages(im.ThreadID)
 	case viewChannels:
 		if len(m.channels) == 0 || m.cursor < 0 || m.cursor >= len(m.channels) {
 			return nil

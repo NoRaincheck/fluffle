@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -24,6 +25,7 @@ const (
 )
 
 type sessionsFetchedMsg struct {
+	threadID int64
 	sessions []store.Session
 	err      error
 }
@@ -43,7 +45,7 @@ func sessionTickCmd(d time.Duration) tea.Cmd {
 func (m *model) fetchSessions(threadID int64) tea.Cmd {
 	return func() tea.Msg {
 		sessions, err := m.api.ListSessions(nil, threadID)
-		return sessionsFetchedMsg{sessions: sessions, err: err}
+		return sessionsFetchedMsg{threadID: threadID, sessions: sessions, err: err}
 	}
 }
 
@@ -52,6 +54,16 @@ func (m *model) fetchSessionEvents(sessionID int64) tea.Cmd {
 		sess, events, err := m.api.GetSession(nil, sessionID)
 		return sessionEventsFetchedMsg{session: sess, events: events, err: err}
 	}
+}
+
+func (m *model) fetchSessionsForPreview() tea.Cmd {
+	if m.view != viewInbox || m.previewThreadID == 0 {
+		return nil
+	}
+	if m.sessionPollThreadID == m.previewThreadID {
+		return nil
+	}
+	return m.fetchSessions(m.previewThreadID)
 }
 
 func (m *model) applySessions(sessions []store.Session) (tea.Model, tea.Cmd) {
@@ -83,7 +95,7 @@ func (m *model) anySessionActive() bool {
 }
 
 func (m *model) syncSessionTick() tea.Cmd {
-	if !m.anySessionActive() {
+	if !m.anySessionActive() || !m.previewVisible() {
 		return nil
 	}
 	return sessionTickCmd(sessionTickInterval)
@@ -102,14 +114,13 @@ func (m *model) handleSessionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	if msg.Type != tea.KeyRunes || string(msg.Runes) != "s" {
 		return m, nil, false
 	}
-	if !m.previewVisible() {
+	if m.view != viewInbox || !m.previewVisible() {
 		return m, nil, false
 	}
 	if m.previewMode == previewSession {
 		m.previewMode = previewThread
 		m.session = nil
 		m.sessionEvents = nil
-		m.sessionScroll = 0
 		return m, nil, true
 	}
 	sess, ok := m.sessionForCursor()
@@ -120,7 +131,6 @@ func (m *model) handleSessionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	m.previewMode = previewSession
 	m.session = &sess
 	m.sessionEvents = nil
-	m.sessionScroll = 0
 	return m, m.fetchSessionEvents(sess.ID), true
 }
 
@@ -131,10 +141,14 @@ func (m model) renderSessionPreview(w, h int) string {
 	if w < minContentWidth {
 		w = minContentWidth
 	}
-	if m.session == nil {
+	sess := m.session
+	if resolved, ok := m.sessionForCursor(); ok {
+		sess = &resolved
+	}
+	if sess == nil {
 		return lipgloss.NewStyle().Width(w).Render("  no session on this message")
 	}
-	s := *m.session
+	s := *sess
 	head := fmt.Sprintf("SESSION  %s · %s · %s · #%d", s.AgentName, s.Status, s.ReplyMode, s.ID)
 	if !isSessionLive(s.Status) && s.StartedAt != nil && s.FinishedAt != nil {
 		if d := sessionDuration(*s.StartedAt, *s.FinishedAt); d != "" {
@@ -159,32 +173,17 @@ func (m model) renderSessionPreview(w, h int) string {
 	}
 
 	rows := len(m.sessionEvents)
-	visible := h - 3
-	if visible < 1 {
-		visible = 1
+	end := min(h-3, rows)
+	if end < 1 {
+		end = 1
 	}
-	start, end := 0, rows
-	if rows > visible {
-		hidden := rows - visible
-		start = min(m.sessionScroll, hidden)
-		if start < 0 {
-			start = 0
-		}
-		end = min(start+visible, rows)
-	}
-	if start > 0 {
-		lines = append(lines, fmt.Sprintf("  … %d hidden …", start))
-	}
-	for i := start; i < end; i++ {
+	for i := 0; i < end; i++ {
 		e := m.sessionEvents[i]
 		content := strings.ReplaceAll(firstLine(e.Content), "\t", "    ")
 		lines = append(lines, fmt.Sprintf("  %s %s", formatFixedName(e.Type, sessionTypeWidth), truncRunes(content, max(1, w-2-sessionTypeWidth-1))))
 	}
 	if end < rows {
 		lines = append(lines, fmt.Sprintf("  … %d hidden …", rows-end))
-	}
-	for len(lines) > h {
-		lines = lines[:h]
 	}
 	return lipgloss.NewStyle().Width(w).Render(strings.Join(lines, "\n"))
 }
@@ -216,12 +215,21 @@ func truncRunes(s string, maxLen int) string {
 	if maxLen < 1 {
 		return ""
 	}
-	rs := []rune(s)
-	if len(rs) <= maxLen {
+	if len(s) <= maxLen {
 		return s
 	}
 	if maxLen <= ellipsisReserve {
-		return string(rs[:maxLen])
+		return trimPartialRune(s, maxLen)
 	}
-	return string(rs[:maxLen-ellipsisReserve]) + "..."
+	return trimPartialRune(s, maxLen-ellipsisReserve) + "..."
+}
+
+func trimPartialRune(s string, n int) string {
+	if n > len(s) {
+		n = len(s)
+	}
+	for n > 0 && n < len(s) && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
