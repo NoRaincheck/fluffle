@@ -122,8 +122,22 @@ func (m *model) sessionForCursor() (store.Session, bool) {
 	if m.cursor < 0 || m.cursor >= len(rows) {
 		return store.Session{}, false
 	}
-	s, ok := m.sessionsByMsg[rows[m.cursor].ID]
-	return s, ok
+	row := rows[m.cursor]
+	if s, ok := m.sessionsByMsg[row.ID]; ok {
+		return s, true
+	}
+	newest := store.Session{}
+	found := false
+	for _, s := range m.sessions {
+		if s.ThreadID != row.ThreadID {
+			continue
+		}
+		if !found || s.ID > newest.ID {
+			newest = s
+			found = true
+		}
+	}
+	return newest, found
 }
 
 func (m *model) handleSessionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {

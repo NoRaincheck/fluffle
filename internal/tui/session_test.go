@@ -972,6 +972,125 @@ func TestTickIsStoppedWhenAnAllTerminalAcceptChangesTheArmedThread(t *testing.T)
 	}
 }
 
+// driftedRow builds a thread whose inbox row's representative has moved off the
+// session's trigger message, which is what groupInboxByChannelThread produces once any
+// later message exists in the thread.
+func driftedRow(t *testing.T, m *model, later store.Message, sessions []store.Session) {
+	t.Helper()
+	trigger := store.InboxMessage{
+		Message:     store.Message{ID: 1, ThreadID: 7, CreatedAt: "2026-09-26T10:00:00Z"},
+		ChannelID:   7,
+		ChannelName: "core",
+		ThreadTitle: "work",
+	}
+	follow := later
+	follow.ThreadID = 7
+	m.inbox = []store.InboxMessage{trigger, {Message: follow, ChannelID: 7, ChannelName: "core", ThreadTitle: "work"}}
+	rows := m.inboxFilteredSorted()
+	if len(rows) != 1 {
+		t.Fatalf("precondition: one thread must collapse to one row, got %d", len(rows))
+	}
+	if rows[0].ID == 1 {
+		t.Fatal("precondition: the row representative must have drifted off the trigger")
+	}
+	m.sessions = sessions
+	m.sessionsByMsg = map[int64]store.Session{}
+	for _, sess := range sessions {
+		m.sessionsByMsg[sess.TriggerMessageID] = sess
+	}
+}
+
+func TestSessionResolvesWhenAnAgentReplyMovedTheRowRepresentative(t *testing.T) {
+	sess := store.Session{ID: 5, TriggerMessageID: 1, ThreadID: 7, AgentName: "reviewer", Status: store.SessionSucceeded}
+	m := sessionModel(t, []store.Session{sess}, nil)
+	driftedRow(t, &m, store.Message{ID: 2, CreatedAt: "2026-09-26T10:05:00Z", AuthorType: "agent"}, []store.Session{sess})
+	row := m.inboxFilteredSorted()[0]
+	if _, ok := m.sessionsByMsg[row.ID]; ok {
+		t.Fatalf("precondition: the trigger-keyed index must miss, but it holds the row's id %d", row.ID)
+	}
+	next, _, handled := m.handleSessionKey(keyRunes("s"))
+	got := toModel(next)
+	if !handled {
+		t.Fatalf("s must resolve after an agent reply moved the representative, status = %q", got.status)
+	}
+	if got.session == nil || got.session.ID != 5 {
+		t.Fatalf("session = %+v", got.session)
+	}
+}
+
+func TestSessionResolvesWhenAHumanMessageMovedTheRowRepresentative(t *testing.T) {
+	sess := store.Session{ID: 5, TriggerMessageID: 1, ThreadID: 7, AgentName: "reviewer", Status: store.SessionSucceeded}
+	m := sessionModel(t, []store.Session{sess}, nil)
+	driftedRow(t, &m, store.Message{ID: 3, CreatedAt: "2026-09-26T10:09:00Z", AuthorType: "human"}, []store.Session{sess})
+	next, _, handled := m.handleSessionKey(keyRunes("s"))
+	got := toModel(next)
+	if !handled {
+		t.Fatalf("s must resolve after a human message moved the representative, status = %q", got.status)
+	}
+	if got.session == nil || got.session.ID != 5 {
+		t.Fatalf("session = %+v", got.session)
+	}
+}
+
+func TestSessionPicksTheNewestSessionInTheThread(t *testing.T) {
+	old := store.Session{ID: 4, TriggerMessageID: 1, ThreadID: 7, AgentName: "older", Status: store.SessionFailed}
+	recent := store.Session{ID: 9, TriggerMessageID: 1, ThreadID: 7, AgentName: "newer", Status: store.SessionSucceeded}
+	m := sessionModel(t, []store.Session{old, recent}, nil)
+	driftedRow(t, &m, store.Message{ID: 2, CreatedAt: "2026-09-26T10:05:00Z"}, []store.Session{old, recent})
+	got, ok := m.sessionForCursor()
+	if !ok {
+		t.Fatal("the thread's session must resolve")
+	}
+	if got.ID != recent.ID {
+		t.Fatalf("resolved session %d (%s), want the newest %d (%s)", got.ID, got.AgentName, recent.ID, recent.AgentName)
+	}
+}
+
+func TestSessionDoesNotLeakAnotherThreadsSession(t *testing.T) {
+	other := store.Session{ID: 5, TriggerMessageID: 1, ThreadID: 8, AgentName: "elsewhere", Status: store.SessionSucceeded}
+	m := sessionModel(t, []store.Session{other}, nil)
+	driftedRow(t, &m, store.Message{ID: 2, CreatedAt: "2026-09-26T10:05:00Z"}, []store.Session{other})
+	if _, ok := m.sessionForCursor(); ok {
+		t.Fatal("a row whose thread has no sessions must not resolve another thread's session")
+	}
+	next, _, handled := m.handleSessionKey(keyRunes("s"))
+	got := toModel(next)
+	if handled {
+		t.Fatal("s must not be handled for a thread with no sessions")
+	}
+	if got.status != "no session on this message" {
+		t.Fatalf("status = %q, want the no-session hint", got.status)
+	}
+}
+
+func TestSessionSurvivesToggleBackOnADriftedRow(t *testing.T) {
+	sess := store.Session{ID: 5, TriggerMessageID: 1, ThreadID: 7, AgentName: "reviewer", Status: store.SessionSucceeded}
+	m := sessionModel(t, []store.Session{sess}, nil)
+	driftedRow(t, &m, store.Message{ID: 2, CreatedAt: "2026-09-26T10:05:00Z"}, []store.Session{sess})
+
+	next, _, handled := m.handleSessionKey(keyRunes("s"))
+	m = toModel(next)
+	if !handled || m.previewMode != previewSession {
+		t.Fatalf("first s: handled = %v mode = %v", handled, m.previewMode)
+	}
+	next, _, handled = m.handleSessionKey(keyRunes("s"))
+	m = toModel(next)
+	if !handled || m.previewMode != previewThread {
+		t.Fatalf("second s: handled = %v mode = %v", handled, m.previewMode)
+	}
+	if m.session != nil || m.sessionEvents != nil {
+		t.Fatal("toggling back must clear the loaded transcript, or the re-open test is vacuous")
+	}
+	next, _, handled = m.handleSessionKey(keyRunes("s"))
+	m = toModel(next)
+	if !handled || m.previewMode != previewSession {
+		t.Fatalf("third s must re-open the session, handled = %v mode = %v", handled, m.previewMode)
+	}
+	if m.session == nil || m.session.ID != 5 {
+		t.Fatalf("re-opening must re-resolve the session, got %+v", m.session)
+	}
+}
+
 func TestHelpMentionsTheSessionKey(t *testing.T) {
 	m := sessionModel(t, nil, nil)
 	if out := stripAnsi(m.helpView()); !strings.Contains(out, "s session") {
@@ -1052,12 +1171,13 @@ func TestEventWindowIsTopAnchoredAndBounded(t *testing.T) {
 }
 
 func TestSessionKeyResolvesThroughAnActiveFilter(t *testing.T) {
-	one := store.Session{ID: 5, TriggerMessageID: 42, Status: store.SessionSucceeded}
+	one := store.Session{ID: 5, TriggerMessageID: 42, ThreadID: 8, Status: store.SessionSucceeded}
 	m := sessionModel(t, []store.Session{one}, nil)
 	m.inbox = []store.InboxMessage{
 		{Message: store.Message{ID: 1, ThreadID: 7, CreatedAt: "2026-09-26T12:00:00Z"}, ChannelID: 1, ChannelName: "ui", ThreadTitle: "alpha"},
 		{Message: store.Message{ID: 42, ThreadID: 8, CreatedAt: "2026-09-26T10:00:00Z"}, ChannelID: 2, ChannelName: "core", ThreadTitle: "beta"},
 	}
+	m.sessions = []store.Session{one}
 	m.sessionsByMsg = map[int64]store.Session{42: one}
 	if _, ok := m.sessionForCursor(); ok {
 		t.Fatal("precondition: unfiltered, the cursor row must have no session")
