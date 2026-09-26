@@ -35,6 +35,7 @@ CREATE TABLE channels(
   repo_abs_path TEXT,
   repo_remote TEXT,
   repo_head_sha TEXT,
+  repo_head_branch TEXT,
   is_orphaned INTEGER NOT NULL DEFAULT 0 CHECK(is_orphaned IN (0,1)),
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   archived_at TEXT,
@@ -65,6 +66,7 @@ CREATE TABLE messages(
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   UNIQUE(thread_id, seq)
 );
+CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(parent_id);
 CREATE INDEX IF NOT EXISTS idx_messages_thread_seq ON messages(thread_id, seq);
 
 CREATE TABLE reactions(
@@ -276,12 +278,16 @@ There is no `POST /v1/sessions` and no `flf agent invoke`: a session can only be
 
 **`POST /api/shutdown`** — Stop the daemon. Humans only: a request carrying `X-Fluffle-Agent` is rejected with `403 AGENT_FORBIDDEN` and the daemon keeps running.
 
+### Unrouted paths
+
+The mux never emits a bare HTML 404: `jsonResponseWriter` rewrites any unmatched status into the JSON error envelope, so every response carries `Content-Type: application/json`. The catch-all uses code `CHANNEL_NOT_FOUND` with the message `unknown route` for **any** unrouted path, so `GET /v1/nonsense` reports a channel error. This is deliberate and asserted by a test, but it is worth knowing when reading a 404 from an unexpected URL.
+
 ## CLI reference
 
 ```
 flf daemon start [--background]
 flf daemon stop
-flf daemon status
+flf daemon status [--json]
 
 flf init [--repo DIR] [--orphaned]
 
@@ -371,6 +377,8 @@ With `--text -`, reads the complete stdin value before contacting the daemon. `-
 | `DAEMON_ERROR` | server-side storage failure or malformed daemon response | 2 |
 | `DELIVERY_UNKNOWN` | a dispatched write timed out, lost its response, or received an invalid acknowledgement; read the thread before retrying | 2 |
 | `BAD_ARGS` | invalid flags, missing required flags, or mutually exclusive sequence/ID flags | 1 |
+| `BAD_REQUEST` | the CLI could not marshal its payload or construct the HTTP request | 1 |
+| `CWD_ERROR` | `os.Getwd` failed while resolving a repo-scoped channel, thread, or import target | 1 |
 | `BAD_JSONL` | JSONL parse/validation failure, invalid API body, or duplicate reaction | 1 |
 | `FILE_READ` | local file or stdin cannot be read | 1 |
 | `NOT_A_GIT_REPO` | a repo-scoped CLI command was given a path without `.git`, or `flf agent list --repo` was given a path that does not exist (client-side check) | 1 |
@@ -389,7 +397,7 @@ Every CLI error is emitted on stderr as exactly one JSON object with `code` and 
 
 Every CLI API response is strictly decoded and then checked semantically before it can report success. A `null` body, a wrong JSON shape, a trailing JSON value, a zero database ID or sequence, a blank required field, an unknown `author_type`, a batch result count that does not match the submitted events, a missing reaction ID, a message acknowledgement without an assigned sequence, and an unacknowledged reaction are all rejected. Reads that fail this check are `DAEMON_ERROR`; mutations that fail it are `DELIVERY_UNKNOWN`, because the write may already have committed. The CLI never prints a success line for a response it cannot verify.
 
-The TUI applies the same classification: a read or connection that cannot reach the daemon is `DAEMON_DOWN`, a read response that cannot be decoded is `DAEMON_ERROR`, and a dispatched mutation that times out, loses its response, or returns an invalid acknowledgement is `DELIVERY_UNKNOWN`. Daemon discovery at startup stays `DAEMON_DOWN`.
+The TUI applies the same classification: a read or connection that cannot reach the daemon is `DAEMON_DOWN`, a read response that cannot be decoded is `DAEMON_ERROR`, and a dispatched mutation that times out, loses its response, or returns an invalid acknowledgement is `DELIVERY_UNKNOWN`. Daemon discovery at startup stays `DAEMON_DOWN`. A Bubble Tea runtime failure surfaces as `TUI_ERROR`.
 
 ## Agent contract
 
@@ -421,7 +429,7 @@ One JSON object per line. `type` is `message` or `reaction`; a missing `type` is
 A message line is:
 
 ```json
-{"type":"message","seq":12,"parent_seq":8,"role":"assistant","name":"reviewer","author_type":"agent","content":"Ready for review.","timestamp":"2026-09-25T10:00:00Z","metadata":{}}
+{"type":"message","seq":12,"parent_seq":8,"role":"assistant","name":"reviewer","author_type":"agent","content":"Ready for review.","timestamp":"2026-09-25T10:00:00Z"}
 ```
 
 A reaction line is:
@@ -430,7 +438,7 @@ A reaction line is:
 {"type":"reaction","message_seq":12,"name":"reviewer","author_type":"agent","emoji":"👀","timestamp":"2026-09-25T10:01:00Z"}
 ```
 
-Message lines require `name`, `role`, and `content`; `seq` is assigned by the daemon for live appends and `parent_seq` is optional. Reaction lines require `name`, `message_seq`, and `emoji`. `name` is the portable author field, `author_type` is `human` or `agent`, `timestamp` is RFC3339, and `metadata` is an object accepted by the codec but not persisted by the current store.
+Message lines require `name`, `role`, and `content`; `seq` is assigned by the daemon for live appends and `parent_seq` is optional. Reaction lines require `name`, `message_seq`, and `emoji`. `name` is the portable author field, `author_type` is `human` or `agent`, and `timestamp` is RFC3339. `metadata` is an object accepted by the codec but never persisted, and because it is tagged `omitempty` it does not appear in output at all — neither example above is missing it by accident.
 
 ### Import/export invariant
 
