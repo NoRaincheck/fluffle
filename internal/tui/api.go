@@ -111,6 +111,52 @@ func (c *apiClient) ListMessages(ctx context.Context, threadID int64) ([]store.M
 	return msgs, nil
 }
 
+func (c *apiClient) ListSessions(ctx context.Context, threadID int64) ([]store.Session, error) {
+	url := c.base + "/v1/threads/" + fmt.Sprintf("%d", threadID) + "/sessions"
+	resp, err := c.do(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("DAEMON_DOWN: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return nil, readAPIError(resp)
+	}
+	var sessions []store.Session
+	if err := decodeStrictJSON(resp.Body, &sessions); err != nil {
+		return nil, fmt.Errorf("DAEMON_ERROR: %w", err)
+	}
+	if sessions == nil {
+		sessions = []store.Session{}
+	}
+	return sessions, nil
+}
+
+func (c *apiClient) GetSession(ctx context.Context, sessionID int64) (store.Session, []store.SessionEvent, error) {
+	url := c.base + "/v1/sessions/" + fmt.Sprintf("%d", sessionID)
+	resp, err := c.do(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return store.Session{}, nil, fmt.Errorf("DAEMON_DOWN: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return store.Session{}, nil, readAPIError(resp)
+	}
+	var payload struct {
+		Session store.Session        `json:"session"`
+		Events  []store.SessionEvent `json:"events"`
+	}
+	if err := decodeStrictJSON(resp.Body, &payload); err != nil {
+		return store.Session{}, nil, fmt.Errorf("DAEMON_ERROR: %w", err)
+	}
+	if payload.Session.ID <= 0 {
+		return store.Session{}, nil, fmt.Errorf("DAEMON_ERROR: session response without an id")
+	}
+	if payload.Events == nil {
+		payload.Events = []store.SessionEvent{}
+	}
+	return payload.Session, payload.Events, nil
+}
+
 func (c *apiClient) ListInbox(ctx context.Context, limit int) ([]store.InboxMessage, error) {
 	if limit <= 0 {
 		limit = 100
