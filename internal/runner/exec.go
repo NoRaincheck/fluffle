@@ -93,6 +93,12 @@ func (execRunner) Run(ctx context.Context, req Request) (Result, error) {
 	close(watchDone)
 	wg.Wait()
 
+	for _, stream := range []string{"stdout", "stderr"} {
+		if out := limits[stream].Seal(); len(out) > 0 && req.OnChunk != nil {
+			req.OnChunk(stream, out)
+		}
+	}
+
 	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		return Result{}, ErrTimeout
 	}

@@ -125,22 +125,84 @@ func TestTimeoutKillsGrandchildren(t *testing.T) {
 	}
 }
 
-func TestOutputIsBoundedAndMiddleElided(t *testing.T) {
+func TestOversizeOutputKeepsHeadAndTailWithMarker(t *testing.T) {
 	c := &collector{}
+	script := `printf 'FLUFFLE_HEAD_SENTINEL\n'; yes 0123456789abcdef | head -c 2000000; printf '\nFLUFFLE_TAIL_SENTINEL\n'`
 	if _, err := run(t, Request{
 		Command: "sh",
-		Args:    []string{"-c", "yes 0123456789abcdef | head -c 2000000"},
+		Args:    []string{"-c", script},
 		Timeout: 30 * time.Second,
 		OnChunk: c.fn,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	got := c.out()
-	if len(got) > MaxStreamBytes+len(ElisionMarker)+4096 {
-		t.Fatalf("stdout len = %d, want <= %d", len(got), MaxStreamBytes+len(ElisionMarker)+4096)
+	if len(got) != MaxStreamBytes {
+		t.Fatalf("stdout len = %d, want exactly %d", len(got), MaxStreamBytes)
+	}
+	if !strings.HasPrefix(got, "FLUFFLE_HEAD_SENTINEL\n") {
+		t.Fatalf("head was not kept; head = %q", got[:min(120, len(got))])
 	}
 	if !strings.Contains(got, ElisionMarker) {
-		t.Fatalf("oversize output was not middle-elided; tail = %q", got[len(got)-120:])
+		t.Fatalf("oversize output was not middle-elided; tail = %q", got[max(0, len(got)-120):])
+	}
+	if !strings.HasSuffix(got, "\nFLUFFLE_TAIL_SENTINEL\n") {
+		t.Fatalf("tail was dropped; tail = %q", got[max(0, len(got)-120):])
+	}
+}
+
+func TestSmallOutputIsStreamedBeforeExit(t *testing.T) {
+	dir := t.TempDir()
+	release := filepath.Join(dir, "release")
+	body := strings.Repeat("small-chunk;", 40)
+	script := "printf '" + body + "'; while [ ! -f \"" + release + "\" ]; do sleep 0.05; done"
+	c := &collector{}
+	var runErr error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, runErr = NewExec().Run(context.Background(), Request{
+			Command: "sh",
+			Args:    []string{"-c", script},
+			Timeout: 30 * time.Second,
+			OnChunk: c.fn,
+		})
+	}()
+	arrived := waitForString(c.out, body, 10*time.Second)
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	if !arrived {
+		t.Fatalf("small output was not delivered while the process was still running; got %d bytes", len(c.out()))
+	}
+	if c.out() != body {
+		t.Fatalf("stdout = %q, want %q", c.out(), body)
+	}
+	if strings.Contains(c.out(), ElisionMarker) {
+		t.Fatal("marker appended to output that never overflowed")
+	}
+}
+
+func TestUnderBudgetOutputArrivesOnceInOrderWithNoMarker(t *testing.T) {
+	c := &collector{}
+	if _, err := run(t, Request{
+		Command: "sh",
+		Args:    []string{"-c", "yes 0123456789 | head -n 10000"},
+		Timeout: 30 * time.Second,
+		OnChunk: c.fn,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Repeat("0123456789\n", 10000)
+	if c.out() != want {
+		t.Fatalf("stdout len = %d, want %d (exact bytes, once, in order)", len(c.out()), len(want))
+	}
+	if strings.Contains(c.out(), ElisionMarker) {
+		t.Fatal("marker appended to under-budget output")
 	}
 }
 
@@ -244,6 +306,17 @@ func waitForGone(t *testing.T, pid int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if err := syscall.Kill(pid, 0); err != nil {
+			return true
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return false
+}
+
+func waitForString(get func() string, want string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if strings.Contains(get(), want) {
 			return true
 		}
 		time.Sleep(20 * time.Millisecond)
