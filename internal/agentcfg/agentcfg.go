@@ -2,9 +2,11 @@ package agentcfg
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -161,6 +163,8 @@ func (l *Loader) Resolve(repoAbsPath string) (*Set, error) {
 			return nil, err
 		}
 		for _, e := range entries {
+			e.Args = slices.Clone(e.Args)
+			e.Env = maps.Clone(e.Env)
 			merged[e.Name] = e
 		}
 	}

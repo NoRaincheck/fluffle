@@ -239,6 +239,10 @@ func TestResolveDropsCacheWhenFileRemoved(t *testing.T) {
 	dir := t.TempDir()
 	global := filepath.Join(dir, "config.toml")
 	writeFile(t, global, "[[agents]]\nname=\"a\"\ncommand=\"g\"\n")
+	stamp, err := os.Stat(global)
+	if err != nil {
+		t.Fatal(err)
+	}
 	l := NewLoader(global)
 	if set, err := l.Resolve(""); err != nil {
 		t.Fatal(err)
@@ -254,5 +258,72 @@ func TestResolveDropsCacheWhenFileRemoved(t *testing.T) {
 	}
 	if len(set.Entries()) != 0 {
 		t.Fatalf("stale cache after removal: %+v", set.Entries())
+	}
+	writeFile(t, global, "[[agents]]\nname=\"a\"\ncommand=\"recreated\"\n")
+	if err := os.Chtimes(global, stamp.ModTime(), stamp.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	set, err = l.Resolve("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := set.Lookup("a")
+	if a.Command != "recreated" {
+		t.Fatalf("stale cache after recreation: %+v", a)
+	}
+}
+
+func TestResolveServesCachedParseWhenModTimeUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	global := filepath.Join(dir, "config.toml")
+	writeFile(t, global, "[[agents]]\nname=\"a\"\ncommand=\"first\"\n")
+	stamp, err := os.Stat(global)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := NewLoader(global)
+	if _, err := l.Resolve(""); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, global, "[[agents]]\nname=\"a\"\ncommand=\"second\"\n")
+	if err := os.Chtimes(global, stamp.ModTime(), stamp.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	set, err := l.Resolve("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := set.Lookup("a")
+	if a.Command != "first" {
+		t.Fatalf("cache did not serve: %+v", a)
+	}
+}
+
+func TestResolveClonesMutableFieldsPerSet(t *testing.T) {
+	dir := t.TempDir()
+	global := filepath.Join(dir, "config.toml")
+	writeFile(t, global, "[[agents]]\nname=\"a\"\ncommand=\"c\"\nargs=[\"one\"]\nenv={ K = \"v\" }\n")
+	l := NewLoader(global)
+	first, err := l.Resolve("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, ok := first.Lookup("a")
+	if !ok {
+		t.Fatal("a missing")
+	}
+	e.Args[0] = "mutated"
+	e.Env["K"] = "mutated"
+
+	second, err := l.Resolve("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := second.Lookup("a")
+	if got.Args[0] != "one" {
+		t.Fatalf("Args aliased across Resolve calls: %#v", got.Args)
+	}
+	if got.Env["K"] != "v" {
+		t.Fatalf("Env aliased across Resolve calls: %#v", got.Env)
 	}
 }
