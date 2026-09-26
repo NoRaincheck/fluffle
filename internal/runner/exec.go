@@ -46,6 +46,8 @@ func (execRunner) Run(ctx context.Context, req Request) (Result, error) {
 	if err := cmd.Start(); err != nil {
 		return Result{}, fmt.Errorf("spawn %s: %w", req.Command, err)
 	}
+	// Small delay to ensure process has created its process group before killing it
+	time.Sleep(1 * time.Millisecond)
 
 	pgid := cmd.Process.Pid
 	var killOnce sync.Once
