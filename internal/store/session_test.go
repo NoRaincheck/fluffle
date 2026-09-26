@@ -281,6 +281,77 @@ func TestListSessionsIsOldestFirstAndNeverNil(t *testing.T) {
 	}
 }
 
+func TestListSessionsIsScopedToItsThread(t *testing.T) {
+	s, thID := newSessionFixture(t)
+	chID, err := s.ListChannels("", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := s.CreateThread(chID[0].ID, "other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	empty, err := s.CreateThread(chID[0].ID, "empty")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The same agent name and status in both threads, so the only thing that
+	// separates the rows is thread_id: a list that merely contains a thread's own
+	// session passes against a query with no filter at all.
+	create := func(threadID int64, names ...string) []int64 {
+		t.Helper()
+		msgID := triggerMessage(t, s, threadID, "@probe hi")
+		ids := make([]int64, 0, len(names))
+		for _, name := range names {
+			id, err := s.CreateSession(threadID, msgID, name, SessionQueued, "auto", "c", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ids = append(ids, id)
+		}
+		return ids
+	}
+	wantOwn := create(thID, "a1", "a2")
+	wantOther := create(other, "a1", "a2")
+
+	assertScoped := func(threadID int64, want []int64) {
+		t.Helper()
+		list, err := s.ListSessions(threadID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := make([]int64, 0, len(list))
+		for i, sess := range list {
+			if sess.ThreadID != threadID {
+				t.Fatalf("ListSessions(%d)[%d] = session %d on thread %d", threadID, i, sess.ID, sess.ThreadID)
+			}
+			got = append(got, sess.ID)
+		}
+		if len(got) != len(want) {
+			t.Fatalf("ListSessions(%d) = %v, want %v: sessions from other threads leaked in", threadID, got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("ListSessions(%d) = %v, want %v", threadID, got, want)
+			}
+		}
+	}
+	assertScoped(thID, wantOwn)
+	assertScoped(other, wantOther)
+
+	none, err := s.ListSessions(empty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if none == nil {
+		t.Fatal("empty result must be an empty slice, not nil")
+	}
+	if len(none) != 0 {
+		t.Fatalf("ListSessions(%d) = %+v, want no sessions", empty, none)
+	}
+}
+
 func TestCountAgentMessagesAfter(t *testing.T) {
 	s, thID := newSessionFixture(t)
 	humanSeq, _ := s.AppendMessage(thID, "alice", "human", "user", "human words")
