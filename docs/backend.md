@@ -287,6 +287,51 @@ Export and import preserve message content, timestamps, attribution, reply relat
 
 Agents create messages and reactions only. Never create channels, threads, or delete data. Thread history is the context — no summarization, no hidden memory, no embeddings.
 
+## Design rationale
+
+### Scope decision
+
+The agent contract hardening is driven by a single goal: a small, reliable, repo-scoped agent loop.
+
+1. A human creates or selects a thread in a repo-anchored channel.
+2. An external agent reads the thread through the CLI.
+3. The agent appends a reply and reaction using references from the read result.
+4. The thread can be exported and imported as a complete, portable context stream.
+5. The agent can resume from a monotonic cursor and discover new work through the inbox.
+
+This replaces the original six-feature roadmap. The goal is not feature parity with Buzz.
+
+### What was rejected
+
+These are product expansions, not prerequisites for a useful local agent loop. They are explicitly out of scope:
+
+- Nostr protocol adapters, DMs, profiles, presence, moderation, media, GIFs, notes.
+- Agent memory, embeddings, summaries, or opaque per-agent state.
+- Canvas revisions, channel documents, or any second source of project context.
+- YAML workflows, schedules, webhooks, inotify reloads, plugins, daemon-owned agent execution.
+- First-class Git patches, issues, PRs, repository hosting, or branch tracking.
+- Multi-repo project administration.
+- TUI redesign or new TUI-only state.
+- Compact output projections, server-side search, or reaction browsing beyond agent needs.
+
+### Implementation order
+
+1. **Baseline repair:** fix the tagged e2e compile failure and correct error-to-exit-code mapping.
+2. **JSONL contract:** add event typing, portable references, reaction events, and import mapping.
+3. **Agent read loop:** add `after_seq`, expose `flf inbox`, verify no duplicate or skipped messages.
+4. **Agent write loop:** add stdin, atomic batch append, reaction-by-sequence, response-loss handling.
+5. **Transport hardening:** centralize finite HTTP clients, contexts, structured CLI errors.
+6. **Measured enhancements:** consider compact output, search, reaction browsing, and human-triggered invocation only after observing real usage.
+
+### Key design choices
+
+- **Thread-local `seq` as the portable reference.** Database `id` is internal only. On import, source sequences are remapped to destination sequences and `parent_seq`/`message_seq` are resolved through that map.
+- **Parse-before-write atomicity.** A multi-line append must commit all events or none. A response lost after dispatch is `DELIVERY_UNKNOWN` — no automatic retry.
+- **No `retryable` field.** The error envelope remains exactly `{"code","message"}`. Changing this requires an explicit contract amendment.
+- **Reactions have no independent cursor.** Every JSONL read emits the complete reaction snapshot. Filtering reactions out would silently drop context the cursor cannot represent.
+- **`after_seq` and `last` are mutually exclusive.** An explicit `--last 0` counts as present, so `--after-seq 0 --last 0` is a client error rather than a silent precedence choice.
+- **Live `seq` values are ignored on appends.** The daemon assigns destination sequences. Only import preserves source sequences for remapping.
+
 ## Implementation notes
 
 - `store.Open(":memory:")` for tests — always `SetMaxOpenConns(1)` to avoid SQLite locking.
