@@ -352,7 +352,7 @@ func appendThreadEvents(s *store.Store, deps Deps, threadID int64, w http.Respon
 		writeThreadMutationError(w, err)
 		return
 	}
-	if !agentRequest {
+	if !agentRequest && !body.Import {
 		deps.startSessionsForBatch(s, threadID, events, results)
 	}
 	writeJSON(w, http.StatusOK, results)
