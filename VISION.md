@@ -15,9 +15,10 @@ Fluffle is a lightweight, Golang-based communication platform designed for devel
 3. **Strict Agent Boundaries**:
    - Agents **cannot** create channels or threads.
    - Agents are **append-only**. They may only add messages or emoji reactions to existing threads.
+   - Agents **cannot** start or cancel agent sessions. A local agent run is started by a human `@mention` in a message, and only a human can cancel one. An agent therefore cannot cause a subprocess to launch or to be killed.
    - Only humans possess destructive permissions (e.g., deleting sessions, archiving threads, modifying metadata).
 4. **Portable Agent State (JSONL)**: Agent threads are treated as structured, append-only JSONL streams. This makes agent sessions trivial to export, share, and resume by another human in their own ACP (Agent Client Protocol) compatible environment.
-5. **No Hidden Agent Memory**: Fluffle does not implement vector databases, embedding stores, or opaque long-term agent memory. The thread history *is* the context. What is in the JSONL is what the agent receives.
+5. **No Hidden Agent Memory**: Fluffle does not implement vector databases, embedding stores, or opaque long-term agent memory. The thread history *is* the context. What is in the JSONL is what the agent receives. A local agent run is recorded as an auditable transcript that a human can inspect, but that record is never fed back to an agent as context: the thread history remains the context, and the transcript is a window onto a process, not a memory the agent draws on.
 6. **SQLite-First & Local Daemon**: The system operates on a local client-server architecture backed by a single SQLite database. The `flf` CLI manages the local daemon, and clients (TUI or Web) connect to it.
 
 ---
@@ -43,7 +44,7 @@ Fluffle deliberately avoids building heavy, specialized workflows. It defers to 
 ## 🤝 Key Workflows
 
 1. **Human-to-Human Sync**: A developer opens the TUI, navigates to a repo-anchored channel, and discusses a refactor with a colleague in a clean, distraction-free thread layout.
-2. **Human-to-Agent Pairing**: A developer invokes an agent within a thread (`flf agent invoke`). The agent reads the thread's JSONL history, processes it via a local model, and appends its response and/or emoji reactions via the CLI.
+2. **Human-to-Agent Pairing**: A developer mentions an agent in a thread (`@reviewer what changed in the auth refactor?`). The daemon runs that local agent once, hands it the thread's JSONL history, and the agent appends its response and/or emoji reactions via the CLI. There is no invoke command: the human message is the trigger, and it stays in the thread as the record of why the agent ran.
 3. **Seamless Session Handoff**: Developer A exports an active agent thread (`flf thread export --format jsonl`). Developer B imports this file into their local Fluffle instance, instantly resuming the agent session using their own local ACP setup and models, with zero loss of context.
 
 ---
@@ -71,6 +72,8 @@ $ flf react add --message 105 --emoji "👀"  # Available to both humans and age
 # External agent frameworks call this to read context and append responses
 $ flf agent read --thread 42 --last 5       # Outputs last 5 messages as JSONL
 $ flf agent append --thread 42 --file response.jsonl 
+$ flf agent list --repo ./my-project        # Resolved agent definitions and their source config
+$ flf agent session --id 7                  # One run: prompt, output, exit status
 
 # Session Handoff (ACP Compatibility)
 $ flf thread export --thread 42 --format jsonl > session.jsonl

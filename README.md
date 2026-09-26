@@ -2,7 +2,7 @@
 
 A local-first, TUI-first communication hub for developer teams and local AI agents.
 
-**Glossary:** Channel = repo-anchored or `--orphaned` room · Thread = titled conversation in a channel · Message = chat line in a thread (reply via `--reply-to` or `--reply-to-seq`) · Reaction = emoji attached to a message · Inbox = unified view of recent messages across all channels.
+**Glossary:** Channel = repo-anchored or `--orphaned` room · Thread = titled conversation in a channel · Message = chat line in a thread (reply via `--reply-to` or `--reply-to-seq`) · Reaction = emoji attached to a message · Inbox = unified view of recent messages across all channels · Session = one local agent run started by an `@mention`, with its prompt, output, and result.
 
 ```bash
 go build ./cmd/flf
@@ -25,6 +25,13 @@ go build ./cmd/flf
 ./flf channel create --name refactor --repo . --json
 ./flf thread new --channel refactor --repo . --title "review" --json
 ./flf thread list --channel refactor --repo . --json
+
+# agent sessions — a human @mention starts one; config in .flf.toml or ~/.fluffle/config.toml
+# (agent configs are re-read on mtime change, so no daemon restart is needed)
+printf '[[agents]]\nname="reviewer"\ncommand="claude"\nargs=["-p","{prompt}"]\n' > ~/.fluffle/config.toml
+./flf agent list --json
+./flf message send --thread 1 --text "@reviewer what changed in the auth refactor?" --as alice
+./flf agent session --id 1 --json      # the full run: prompt, stdout, exit
 
 # thread export / import — portable JSONL session handoff
 ./flf thread export --thread 1 --format jsonl > session.jsonl

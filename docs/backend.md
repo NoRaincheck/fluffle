@@ -4,9 +4,11 @@ Single Go module. One SQLite file at `~/.fluffle/fluffle.db` accessed exclusivel
 
 ```
 flf CLI  ──HTTP/JSON──▶  flf daemon (127.0.0.1)  ──▶  fluffle.db (SQLite)
-   ▲                            ▲
-   │ auto-spawn if pid dead     │ future: TUI / webapp reuse same HTTP API
-human / external agent          + WebSocket later (not in slice)
+   ▲                            ▲   │
+   │ auto-spawn if pid dead     │   └──▶ local agent subprocess (one per @mention)
+human / external agent          │        spawned and reaped by the daemon
+                               + future: TUI / webapp reuse same HTTP API
+                                 + WebSocket later (not in slice)
 ```
 
 ## Module layout
@@ -16,7 +18,11 @@ human / external agent          + WebSocket later (not in slice)
 | `store` | `internal/store/` | SQLite schema, CRUD, `SetMaxOpenConns(1)` |
 | `jsonl` | `internal/jsonl/` | ACP-compatible line codec (marshal/parse/encode) |
 | `repo` | `internal/repo/` | Path canonicalization, git inspection |
-| `apiserver` | `internal/apiserver/` | HTTP handler, agent guards, error envelope |
+| `mentions` | `internal/mentions/` | Leading `@name` mention grammar |
+| `agentcfg` | `internal/agentcfg/` | TOML agent config: parse, validate, repo-over-global resolution, mtime cache |
+| `runner` | `internal/runner/` | Bounded subprocess execution: process group, finite timeout, capped output streams |
+| `session` | `internal/session/` | Session manager: concurrency cap, prompt assembly, output streaming, reply resolution |
+| `apiserver` | `internal/apiserver/` | HTTP handler, agent guards, error envelope, mention trigger |
 | `client` | `internal/client/` | Daemon location, auto-spawn, health probe |
 | `flf` | `cmd/flf/` | CLI dispatch, daemon lifecycle, all subcommands |
 
@@ -70,9 +76,42 @@ CREATE TABLE reactions(
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   UNIQUE(message_id, emoji, name)
 );
+
+CREATE TABLE agent_sessions(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  thread_id INTEGER NOT NULL REFERENCES threads(id),
+  trigger_message_id INTEGER NOT NULL REFERENCES messages(id),
+  agent_name TEXT NOT NULL CHECK(length(trim(agent_name)) > 0),
+  status TEXT NOT NULL CHECK(status IN ('queued','running','succeeded','failed','canceled')),
+  reply_mode TEXT NOT NULL CHECK(reply_mode IN ('stdout','cli','auto')),
+  command TEXT NOT NULL CHECK(length(trim(command)) > 0),
+  cwd TEXT,
+  exit_code INTEGER,
+  error TEXT,
+  reply_message_id INTEGER REFERENCES messages(id),
+  started_at TEXT,
+  finished_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX uniq_session_trigger ON agent_sessions(trigger_message_id, agent_name);
+CREATE INDEX idx_sessions_thread ON agent_sessions(thread_id, id);
+CREATE INDEX idx_sessions_status ON agent_sessions(status);
+
+CREATE TABLE agent_session_events(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id INTEGER NOT NULL REFERENCES agent_sessions(id),
+  seq INTEGER NOT NULL,
+  type TEXT NOT NULL CHECK(type IN ('prompt','stdout','stderr','exit','error')),
+  content TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  UNIQUE(session_id, seq)
+);
+CREATE INDEX idx_session_events ON agent_session_events(session_id, seq);
 ```
 
-Integer IDs (`--thread 42`). Live write identity is derived by the daemon from a non-empty `X-Fluffle-Agent` header; the CLI `--agent-id` flag supplies that header. Client-supplied `author_type` is never trusted. `seq` is daemon-assigned (`max(seq)+1` per thread in transaction).
+The whole schema is applied with `CREATE TABLE IF NOT EXISTS` on every `store.Open`, so the two session tables appear in an existing database without a version bump.
+
+Integer IDs (`--thread 42`). Live write identity is derived by the daemon from a non-empty `X-Fluffle-Agent` header; the CLI `--agent-id` flag supplies that header. Client-supplied `author_type` is never trusted. `seq` is daemon-assigned (`max(seq)+1` per thread in transaction). `agent_sessions` and `agent_session_events` are an audit trail for local agent runs, not part of the append-only message/reaction contract: nothing in them is portable JSONL and nothing in them is ever sent back to an agent.
 
 ### Channels
 
@@ -81,6 +120,66 @@ Every channel is either repo-anchored or orphaned. Anchored channels require a g
 ### Orphaned channels
 
 Orphaned channels are first-class. `channel create --orphaned --name ANYTHING` requires no `--repo`, no git check, any non-empty name. Persistent, no TTL. Listed only with `--include-orphaned`.
+
+## Agent sessions
+
+A human message whose content opens with one or more `@name` mentions starts one session per resolvable name. The daemon owns the subprocess; there is no daemon-side agent loop and no agent framework SDK.
+
+### Configuration
+
+Agent definitions are TOML, not JSON. Two files are read: `~/.fluffle/config.toml` and, for a repo-anchored thread, `<repo>/.flf.toml`. Each file is a list of `[[agents]]` tables:
+
+```toml
+[[agents]]
+name = "reviewer"           # required, ^[a-z0-9][a-z0-9_-]*$
+description = "reviews diffs"
+command = "claude"          # required
+args = ["-p", "{prompt}"]  # optional
+reply = "auto"             # stdout | cli | auto, default auto
+timeout_secs = 300         # positive, default 300
+env = { ANTHROPIC_API_KEY = "…" }
+system_prompt = "You are a meticulous reviewer."
+```
+
+`name` and `command` are required — a name must match `^[a-z0-9][a-z0-9_-]*$` and a command must be non-blank. `reply` defaults to `auto` and must be one of the three values when set; `timeout_secs` defaults to 300 and must be positive. An unknown key anywhere in the file is a hard error naming every unrecognized key, not a warning — a typo in `timeouts_secs` must not silently fall back to the default. Parsed files are cached by path and re-read when the file's mtime changes.
+
+`~/.fluffle/daemon.json` stays JSON; only agent definitions are TOML.
+
+### Resolution order
+
+Resolution is repo-first by agent name: the global file is loaded, then `<repo>/.flf.toml` is merged over it, and a same-named entry in the repo file replaces the global entry wholesale rather than merging field by field. A repo file may therefore redefine `reply` and lose the global `env`. A thread with no repo path (an orphaned channel) resolves against the global file only. `GET /v1/agents` refuses a `repo` whose `.flf.toml` is a symlink, and `flf agent list --repo` refuses a path that does not exist.
+
+A mention of a name that does not resolve is inert: no session row, no subprocess, no error. The message is stored as written.
+
+### Trigger
+
+Sessions are created only from a **human** message append — `POST /v1/threads/:id/messages` or `POST /v1/threads/:id/events` without `X-Fluffle-Agent`. A request carrying that header is a human-only gate: an agent cannot start a session, and therefore an agent cannot start an agent. Scanning happens after the message is committed, so a session's prompt always includes its own trigger message. A mention that is not leading (`text @reviewer`) does not trigger.
+
+`mentions.Parse` accepts a run of `@name` tokens at the very start of the content, allowing whitespace between them, and returns each distinct name once. A name is `[A-Za-z0-9]` plus `_`/`-` after the first byte. The text after the mention run is the request; the whole message content is what the agent sees.
+
+`UNIQUE(trigger_message_id, agent_name)` makes a repeated trigger on the same message a no-op rather than a second run.
+
+### Execution
+
+At most 4 sessions run concurrently; further sessions stay `queued` and are admitted as slots free. A queued session is visible in the API before it starts, so the TUI can show it.
+
+The prompt is assembled as: the agent's `system_prompt` (if any), a `## Thread` header carrying channel, thread title, and repo path, a `## History` section of the thread's JSONL message and reaction lines, a `## Request` section quoting the trigger message by sequence, and — when the reply mode is not `stdout` — a `## Replying` section with the exact `flf message send --reply-to-seq` command to run. The subprocess runs with the thread's repo as its working directory, `env` layered over the daemon's environment, in its own process group so cancellation kills the whole tree, with a finite `timeout_secs` and at most 1 MiB of retained output per stream (head and tail kept, the middle elided).
+
+On startup the daemon reconciles: any session still `queued` or `running` from a previous process is marked `canceled` with `daemon restarted while <status>`. On shutdown, still-queued sessions are marked `canceled` and running subprocesses are killed, without waiting for their goroutines to unwind.
+
+### Reply modes
+
+| `reply` | Behavior |
+|---------|----------|
+| `stdout` | The daemon posts the captured stdout as a new agent-authored message parented to the trigger. |
+| `cli` | The agent posts its own reply with `flf message send --reply-to-seq`. If it does not, the session fails: `agent did not reply (reply=cli)`. |
+| `auto` | Both. After the subprocess exits, the daemon waits up to 2 s for an agent message with this agent's name at a sequence after the trigger; if one appears it is used as-is, otherwise stdout is posted for the agent. |
+
+A reply is posted as `author_type=agent` with the agent's name and the trigger as its parent, so it is an ordinary thread message and an agent's `flf agent read` sees it. A run whose captured output is empty finishes `succeeded` with no message rather than posting a blank one.
+
+### A session transcript is never agent context
+
+`agent_session_events` records what an agent was asked and what it printed. It is **never** included in any prompt, and no run's history is fed to the next run. The thread's JSONL history remains the only context an agent receives. The transcript exists so a human can audit a run, not so an agent can remember one.
 
 ## Daemon lifecycle
 
@@ -125,7 +224,7 @@ Returns `{"ok":true}` with status 200.
 
 **`GET /v1/threads/:id/messages?after_seq=N`** — Return only messages whose thread-local `seq` is strictly greater than `N`, in ascending order. `after_seq` and `last` are mutually exclusive; `after_seq=0` is a valid cursor at the beginning of the thread.
 
-**`POST /v1/threads/:id/messages`** — Append one message. The body accepts `name` (or the legacy `author` alias), `role`, `content`, optional `parent_seq` or legacy `parent_id`, `agent_id`, and optional RFC3339 `created_at`. The daemon derives `author_type` from `X-Fluffle-Agent` and reassigns `seq`. Returns `{"seq":N}`.
+**`POST /v1/threads/:id/messages`** — Append one message. The body accepts `name` (or the legacy `author` alias), `role`, `content`, optional `parent_seq` or legacy `parent_id`, `agent_id`, and optional RFC3339 `created_at`. The daemon derives `author_type` from `X-Fluffle-Agent` and reassigns `seq`. Returns `{"seq":N}`. A human append whose content opens with `@name` starts an agent session after the commit; an agent append never does.
 
 ### Reactions
 
@@ -137,7 +236,21 @@ Returns `{"ok":true}` with status 200.
 
 ### Events
 
-**`POST /v1/threads/:id/events`** — Append a complete JSONL event batch. Body: `{"events":[...],"import":false}`. Each element is normalized by the same JSONL codec the CLI uses: a missing `type` defaults to `message`, the legacy `author` key is accepted as a name alias, and per-type required fields (`name` plus `role`/`content` for messages, `name` plus `message_seq`/`emoji` for reactions) are enforced before any write. Bounded decoding is unchanged: a 1 MiB body cap, a 1000-event cap, and rejection of trailing JSON. The daemon then validates and commits the batch in one transaction. `import=true` is reserved for a human-controlled import and preserves serialized attribution as provenance; it does not grant permissions. Live agent requests derive every event's `author_type` from `X-Fluffle-Agent`.
+**`POST /v1/threads/:id/events`** — Append a complete JSONL event batch. Body: `{"events":[...],"import":false}`. Each element is normalized by the same JSONL codec the CLI uses: a missing `type` defaults to `message`, the legacy `author` key is accepted as a name alias, and per-type required fields (`name` plus `role`/`content` for messages, `name` plus `message_seq`/`emoji` for reactions) are enforced before any write. Bounded decoding is unchanged: a 1 MiB body cap, a 1000-event cap, and rejection of trailing JSON. The daemon then validates and commits the batch in one transaction. `import=true` is reserved for a human-controlled import and preserves serialized attribution as provenance; it does not grant permissions. Live agent requests derive every event's `author_type` from `X-Fluffle-Agent`. A human batch whose committed messages carry a leading mention starts agent sessions after the commit.
+
+### Sessions
+
+**Wire format.** The `store.Session` and `store.SessionEvent` structs carry no JSON tags, so `encoding/json` emits the **Go field names verbatim** — `ID`, `ThreadID`, `TriggerMessageID`, `AgentName`, `Status`, `ReplyMode`, `Command`, `Cwd`, `ExitCode`, `Error`, `ReplyMessageID`, `StartedAt`, `FinishedAt`, `CreatedAt`, and for events `ID`, `SessionID`, `Seq`, `Type`, `Content`, `CreatedAt`. This is not snake_case, and a client that assumes it is will silently read zero values. Nullable columns (`Cwd`, `ExitCode`, `Error`, `ReplyMessageID`, `StartedAt`, `FinishedAt`) are `null` until set. The one exception is `GET /v1/agents`, whose items are a tagged struct and therefore snake_case.
+
+**`GET /v1/threads/:id/sessions`** — Sessions in a thread, oldest first (`ORDER BY id ASC`), metadata only: no events. An empty thread returns `[]`, never `null`. A non-positive id is `400 BAD_JSONL`, an unknown thread is `404 THREAD_NOT_FOUND`, and a non-`GET` method is `405 METHOD_NOT_ALLOWED`. Readable by agents.
+
+**`GET /v1/sessions/:id`** — One session plus its events in `seq` order. Returns `{"session":{...},"events":[...]}`, with `events` `[]` rather than `null` for a session that has not run. A missing session is `404 SESSION_NOT_FOUND`; a non-positive id is `400 BAD_JSONL`; any other path under `/v1/sessions/` is `404 SESSION_NOT_FOUND`. Readable by agents.
+
+**`POST /v1/sessions/:id/cancel`** — Cancel a non-terminal session: a running subprocess is killed, a queued one is finished `canceled` without running. Humans only — a request carrying `X-Fluffle-Agent` is `403 AGENT_FORBIDDEN`. A missing session is `404 SESSION_NOT_FOUND`, a session already `succeeded`/`failed`/`canceled` is `409 SESSION_FINISHED`, and a daemon with no execution wired is `503 DAEMON_ERROR`. Returns `{"ok":true}`.
+
+**`GET /v1/agents?repo=<abs path>`** — Resolved agent names for a repo scope, each with `description`, `command`, `reply`, and the config `source` file it came from. Returns `{"agents":[{"name","description","command","reply","source"}]}`, sorted by name, `[]` when the daemon has no agent config loaded. An absent or empty `repo` resolves the global file only. A config that fails to parse, or a `.flf.toml` that is a symlink, is `500 DAEMON_ERROR` with the reason logged, never returned. Readable by agents. The symlink refusal lives on this route only — a session started from a thread whose repo has a symlinked `.flf.toml` still resolves through it, so the two paths do not currently agree.
+
+There is no `POST /v1/sessions` and no `flf agent invoke`: a session can only be started by a human mention.
 
 ### Daemon control
 
@@ -166,6 +279,9 @@ flf react add (--message ID | --thread ID --message-seq N) --emoji E [--as NAME]
 
 flf agent read --thread ID [--last N | --after-seq N] [--json] [--agent-id ID]
 flf agent append --thread ID (--file F | --file -) [--agent-id ID]
+
+flf agent list [--repo PATH] [--json]
+flf agent session --id N [--json]
 
 flf tui  # Bubble Tea TUI; exits 2 with DAEMON_DOWN when the daemon cannot be discovered, 1 on a local TUI error
 ```
@@ -209,6 +325,16 @@ Cursor and reaction rules:
 
 Reads the complete file or stdin before daemon startup, parses every JSONL line, and sends one atomic event batch. Incoming live `seq` values are ignored and the daemon assigns destination sequences. A response lost after dispatch is reported as `DELIVERY_UNKNOWN`; the command does not retry the write.
 
+### `agent list`
+
+Resolves the agent set for a scope and prints one tab-separated line per agent: `name`, `command`, `reply`, `source`, `description` (`-` when the agent has no description). `--repo` must name an existing path and is canonicalized to an absolute path before it is sent; it is not required to be a git repository. Without `--repo`, the global `~/.fluffle/config.toml` alone is resolved. `--json` emits `{"agents":[{"name","description","command","reply","source"}]}` instead.
+
+### `agent session`
+
+Fetches one session and its full event list by database id. `--id` is required and must be a positive integer; anything else is `BAD_ARGS`. The text form prints a header line (`session N  agent=…  thread=…  trigger=…  status=…  reply=…`, with the start/finish timestamps appended once both exist), then `command:`, `exit:` (when the run produced one), `cwd:` (`none` when the thread had no repo), `reply: message N` (when the daemon posted the reply itself), `error:` (when the session failed), and finally one `seq  type  content` line per event in order. `--json` emits the raw `{"session":…,"events":[…]}` payload with Go field names, so the output is directly comparable to `GET /v1/sessions/:id`.
+
+There is deliberately no `flf agent invoke`: the human `@mention` in a message is the only trigger, which keeps the reason a session exists visible in the thread.
+
 ### `message send`
 
 With `--text -`, reads the complete stdin value before contacting the daemon. `--reply-to-seq N` targets the parent by thread-local sequence; it is mutually exclusive with legacy `--reply-to ID`. `--created-at RFC3339` preserves an explicitly supplied message timestamp. `--json` returns the sequence and target metadata as JSON; without it, the command prints `seq <n>`.
@@ -228,8 +354,10 @@ With `--text -`, reads the complete stdin value before contacting the daemon. `-
 | `BAD_JSONL` | JSONL parse/validation failure, invalid API body, or duplicate reaction | 1 |
 | `FILE_READ` | local file or stdin cannot be read | 1 |
 | `NOT_A_GIT_REPO` | a repo-scoped CLI command was given a path without `.git` (client-side check) | 1 |
-| `AGENT_FORBIDDEN` | an agent attempts a human-only channel or thread creation, or daemon shutdown | 1 |
+| `AGENT_FORBIDDEN` | an agent attempts a human-only channel or thread creation, daemon shutdown, or session cancellation | 1 |
 | `THREAD_NOT_FOUND` | thread or referenced event target is missing | 1 |
+| `SESSION_NOT_FOUND` | the requested session does not exist, or the path is not a known session route | 1 |
+| `SESSION_FINISHED` | a cancel was requested for a session that already reached a terminal status | 1 |
 | `MESSAGE_NOT_FOUND` | legacy `POST /v1/messages/:id/reactions` target message does not exist | 1 |
 | `CHANNEL_NOT_FOUND` / `CHANNEL_EXISTS` | channel lookup or uniqueness failure | 1 |
 | `METHOD_NOT_ALLOWED` | HTTP method is not valid for a known route | 1 |
@@ -256,10 +384,15 @@ Agents are identified by a non-empty `X-Fluffle-Agent` header. The CLI `--agent-
 | Read messages | yes | yes |
 | Append messages | yes | yes |
 | Add reactions | yes | yes |
+| Read agent sessions and list configured agents | yes | yes |
 | Create channels | yes | **no** (403) |
 | Create threads | yes | **no** (403) |
+| Start an agent session | yes | **no** — only a human mention does, and an append carrying `X-Fluffle-Agent` is never scanned |
+| Cancel an agent session | yes | **no** (403) |
 | Export threads | yes | yes |
 | Import threads | yes | yes |
+
+The two session rows are the load-bearing part of the append-only rule. If an agent could start a session it could run arbitrary local commands chosen by another agent's output, and if it could cancel one it could kill a human's work; neither is an append, so neither is permitted.
 
 ### JSONL line schema
 
@@ -285,7 +418,7 @@ Export and import preserve message content, timestamps, attribution, reply relat
 
 ### Append-only
 
-Agents create messages and reactions only. Never create channels, threads, or delete data. Thread history is the context — no summarization, no hidden memory, no embeddings.
+Agents create messages and reactions only. Never create channels, threads, or delete data. They cannot start or cancel agent sessions, so an agent can never cause a subprocess to launch or die. Thread history is the context — no summarization, no hidden memory, no embeddings. The session tables are an audit trail for a human to read, and are never replayed into a prompt.
 
 ## Design rationale
 
@@ -306,9 +439,9 @@ This replaces the original six-feature roadmap. The goal is not feature parity w
 These are product expansions, not prerequisites for a useful local agent loop. They are explicitly out of scope:
 
 - Nostr protocol adapters, DMs, profiles, presence, moderation, media, GIFs, notes.
-- Agent memory, embeddings, summaries, or opaque per-agent state.
+- Agent memory, embeddings, summaries, or opaque per-agent state. A session transcript is an audit record, not memory: it is never read back as context.
 - Canvas revisions, channel documents, or any second source of project context.
-- YAML workflows, schedules, webhooks, inotify reloads, plugins, daemon-owned agent execution.
+- Schedules, webhooks, inotify reloads, and plugins. A session runs because a human mentioned an agent, not on a timer or a file event.
 - First-class Git patches, issues, PRs, repository hosting, or branch tracking.
 - Multi-repo project administration.
 - TUI redesign or new TUI-only state.
@@ -331,6 +464,8 @@ These are product expansions, not prerequisites for a useful local agent loop. T
 - **Reactions have no independent cursor.** Every JSONL read emits the complete reaction snapshot. Filtering reactions out would silently drop context the cursor cannot represent.
 - **`after_seq` and `last` are mutually exclusive.** An explicit `--last 0` counts as present, so `--after-seq 0 --last 0` is a client error rather than a silent precedence choice.
 - **Live `seq` values are ignored on appends.** The daemon assigns destination sequences. Only import preserves source sequences for remapping.
+- **A session is a transcript, not memory.** `agent_session_events` records what an agent was asked and what it printed. It is never included in any prompt, and one run's transcript is never carried into the next. The thread's JSONL remains the only agent context, which is what lets VISION tenet 5 hold while a run is still auditable after the fact.
+- **A human mention is the only trigger.** There is no invoke command and no agent-reachable start route, so every session has a committed human message in the thread to point at and the append-only rule cannot be laundered into process execution.
 
 ## Implementation notes
 

@@ -13,6 +13,7 @@ All key bindings for the Fluffle TUI (`flf tui`). Context-sensitive: some keys o
 | `n` | New thread: open compose | — |
 | `l` / `L` | Toggle inbox layout: compact ↔ full | — |
 | `p` | Toggle preview panel | — |
+| `s` | Preview the agent session for the selected message (preview pane must be visible) | — |
 | `q` | Quit | — |
 | `Ctrl+C` | Quit | Quit |
 | `Esc` | No-op | Cancel |
@@ -55,6 +56,7 @@ Grouped table: one row per channel/thread, showing that group's most recent mess
 | `f` | Open filter (substring match on channel, then channel/thread) |
 | `l` / `L` | Toggle layout: compact ↔ full (switching to full turns the preview off) |
 | `p` | Toggle preview panel (turning it on also switches to compact) |
+| `s` | Switch the preview pane between the thread and the agent session for the message under the cursor |
 | `q` | Quit |
 | `Ctrl+C` | Quit |
 | `Esc` | No-op (reserved for future filter clear) |
@@ -90,7 +92,7 @@ Each group renders as a block: one head line for the original post, then one lin
 - Loading state: `(loading replies…)` under the head line until that thread's messages arrive
 - Narrow panes drop columns (NAME, then CHANNEL, then THREAD, then TIME) until the content column has room; replies stay aligned to the CONTENT column at every width
 
-**Navigation in full layout:** `↑↓/j/k` still step group-to-group, and the entire block for the selected group is highlighted. Scrolling is line-based internally; `clampCursor` keeps the whole selected block on screen. `r`, `Enter`, `n`, `v`, and `f` behave exactly as in compact.
+**Navigation in full layout:** `↑↓/j/k` still step group-to-group, and the entire block for the selected group is highlighted. Scrolling is line-based internally; `clampCursor` keeps the whole selected block on screen. `r`, `Enter`, `n`, `v`, and `f` behave exactly as in compact. `s` does nothing here, because the preview pane it drives is never drawn in this layout.
 
 **Data source:** full layout fetches `GET /v1/threads/:id/messages` for the groups intersecting the viewport (`GET /v1/inbox` alone may not contain a thread's original post). Results are cached per thread and invalidated on inbox refetch.
 
@@ -110,6 +112,7 @@ Toggled by `p`. Shows a right-side panel with preview content for the cursor-hig
 - Full original post, word-wrapped with no truncation (via `wrapText`)
 - Replies fill remaining pane height; newest-tail truncation when space runs out
 - No truncation marker on root post — always fully visible
+- `s` replaces this content with the agent session triggered by the message under the cursor — see [Session Preview](#session-preview-s)
 
 **Not shown in full layout.** The preview panel is suppressed while the full layout is active, the same way it is suppressed in the detail view — the rows already carry the original post and every reply, and a split pane leaves too little room for the content column.
 
@@ -126,6 +129,30 @@ Toggled by `p`. Shows a right-side panel with preview content for the cursor-hig
 - Resizing to ≥100 cols auto-enables the preview only in compact; it is never auto-enabled in full.
 
 In other words `preview == true` implies `layout == compact`, always.
+
+## Session Preview (`s`)
+
+`s` switches the right-hand pane between the thread and the agent session triggered by the message under the cursor. It is a pane mode, not a separate view, and it is only live in the inbox view.
+
+| Condition | Behavior |
+|-----------|----------|
+| Preview pane not drawn (`p` off, < 80 cols, full layout, detail view) | `s` does nothing |
+| Cursor message has no session | Pane unchanged; status bar reads `no session on this message` |
+| Cursor message has a session (first press) | Pane switches to the session and fetches its events |
+| Already in session mode (second press) | Pane switches back to the thread and drops the loaded session |
+
+**Pane contents** (top to bottom):
+
+- Header: `SESSION  <agent> · <status> · <reply mode> · #<id>`, with the elapsed duration appended once the run is terminal, `replied #<seq>` when the daemon posted the reply itself, and the failure reason when there is one.
+- One line per session event, `<type> <first line of content>`, truncated to the pane width, in `seq` order. Only the first line of each event's content is shown, so a multi-line stdout chunk is elided to its first line rather than reflowed.
+- When the run has more events than the pane has rows, the pane shows the **oldest** events and a `… N hidden …` line counts what is below the fold. The tail of a verbose run is not reachable from the pane.
+- Placeholders: `no session on this message`, `(no events loaded)` before the first fetch lands, `(running…)` for a live session with no events yet, `(no events)` for a finished session with none.
+
+**Live updates:** while the pane is visible and at least one session in the thread is `queued` or `running`, the TUI re-fetches the thread's sessions every 500 ms. Polling stops as soon as nothing is live, when the pane is hidden, or when the cursor moves to a different thread. Moving the cursor while in session mode re-resolves the session from the polled list, so switching rows updates the pane without another keypress.
+
+**Two agents on one message:** a message may start one session per mentioned name, but the pane indexes sessions by the message that triggered them. With more than one session on the same message, the pane shows the most recently created one; `flf agent session --id N` is how you read the others.
+
+**Not bound:** there is no TUI key to cancel a session. Cancellation is `POST /v1/sessions/:id/cancel` and is human-only.
 
 ## Compose Modal
 
@@ -161,5 +188,6 @@ Always visible at the bottom. Shows:
 - **Preview toggle**: `preview on — p to hide` (or `preview on — p to hide · layout:compact` when `p` also switched layout)
 - **Layout toggle**: `layout: full — l to switch` (or `layout: full — preview off · l to switch` when `l` also turned the preview off)
 - **Error**: `error: DAEMON_DOWN: ...` (unreachable daemon), `error: DAEMON_ERROR: ...` (undecodable response), or `error: DELIVERY_UNKNOWN: ...` (a write that may have committed)
+- **Session pane**: `no session on this message` when `s` is pressed on a row with no session
 - **Empty state**: `no messages — press n for new thread`
 - **Action feedback**: `sent`, `thread "name" created`

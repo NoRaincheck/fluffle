@@ -9,7 +9,9 @@
 - **Error envelope:** `{"code","message"}` at every layer boundary.
 - **Agent identity:** `X-Fluffle-Agent` header. The daemon re-derives `author_type` from it for anti-spoofing. Never trust `author_type` from client request bodies.
 - **Agents are append-only:** messages + reactions. Never create channels, threads, or delete data.
+- **Agents cannot start or cancel agent sessions.** Only a human message append carrying a leading `@mention` creates a session, and only a human can cancel one.
 - **No hidden agent memory:** the JSONL thread history is the only context.
+- **Session transcripts are never agent context:** `agent_session_events` is an audit record for humans and is never read back into a prompt.
 
 ## Domain Rules (Immutable)
 

@@ -1,6 +1,6 @@
 # TUI Architecture
 
-Bubble Tea v2 terminal UI for Fluffle. Flat inbox table with right-side preview panel (wide terminals), centered compose modal overlay.
+Bubble Tea v1.3.10 terminal UI for Fluffle. Flat inbox table with right-side preview panel (wide terminals), centered compose modal overlay. The preview pane has two modes — the thread, and the agent session triggered by the message under the cursor — switched with `s`.
 
 ## Overview
 
@@ -22,7 +22,7 @@ Bubble Tea v2 terminal UI for Fluffle. Flat inbox table with right-side preview 
 │                                        │  10:00    bob      ship it           │
 │                                        │  11:00    ci-bot   ✅ build passed    │
 ├────────────────────────────────────────────────────────────────────────────────┤
-│ ↑↓/j/k nav  Enter view  r reply  v sort  f filter  l layout  p hide preview  q  │
+│ ↑↓/j/k nav  Enter view  r reply  v sort  f filter  l layout  s session  p hide  q  │
 └────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -36,7 +36,7 @@ Press `l` for the full layout, where each group expands to its original post plu
 │                                         > one more thing                       │
 ```
 
-Single flat **Global Inbox** table showing all channels/threads, one row per channel/thread group. `l` toggles between two layouts: **compact** (default — one line per group, most recent message) and **full** (original post plus every reply, inline). `p` toggles a right-side preview panel showing the word-wrapped original post + replies. Preview auto-enables at ≥100 cols, respects toggle at ≥80 cols, forced off below 80, and is suppressed in the detail view and in the full layout.
+Single flat **Global Inbox** table showing all channels/threads, one row per channel/thread group. `l` toggles between two layouts: **compact** (default — one line per group, most recent message) and **full** (original post plus every reply, inline). `p` toggles a right-side preview panel showing the word-wrapped original post + replies; `s` swaps that pane's content for the agent session triggered by the message under the cursor. Preview auto-enables at ≥100 cols, respects toggle at ≥80 cols, forced off below 80, and is suppressed in the detail view and in the full layout.
 
 ## Package Structure
 
@@ -45,6 +45,7 @@ internal/tui/
 ├── tui.go          - Entry point: Run() → tea.Program(model)
 ├── model.go        - Bubble Tea model: state, Init, Update, View, rendering
 ├── api.go          - Thin HTTP wrapper over daemon REST API
+├── session.go      - Agent session pane: preview-mode state, 500 ms poll, session rendering
 ├── compose.go      - Centered compose modal: text input, send/cancel
 └── styles.go       - Lipgloss styles: colors, borders, typography
 ```
@@ -56,6 +57,7 @@ internal/tui/
 | `tui.go` | `Run()` entry point, daemon ensure, `tea.Model` initialization, exit codes (0=success, 1=client/local error, 2=daemon or transport error) |
 | `model.go` | Full `model` struct, state transitions via `Update()`, rendering via `View()`, key handling, data fetching, time formatting, preview logic |
 | `api.go` | HTTP calls to daemon endpoints, strict response decoding, error classification (`readAPIError`), channel filtering, `jsonBody` helper |
+| `session.go` | Agent session state (`sessions`, `sessionsByMsg`, the resolved session and its events), the gated 500 ms poll, the `s` key, `renderSessionPreview()` |
 | `compose.go` | Compose modal state machine, text input handling, send/cancel, error display, context header rendering |
 | `styles.go` | All lipgloss style definitions: tree panel, chat panel, modal, status bar, hints, colors |
 
@@ -64,9 +66,9 @@ internal/tui/
 ```
 internal/tui/
 ├── internal/client   (daemon location, auto-spawn, health probe)
-├── internal/store    (data types: Channel, Thread, Message, Reaction)
-└── charm.land/bubbletea/v2
-    ├── charm.land/lipgloss/v2
+├── internal/store    (data types: Channel, Thread, Message, Reaction, Session, SessionEvent)
+└── github.com/charmbracelet/bubbletea v1
+    ├── github.com/charmbracelet/lipgloss v1
     └── github.com/mattn/go-runewidth
 ```
 
@@ -106,10 +108,18 @@ Single view: **Inbox Table** (tracked as `viewInbox`). Navigation is cursor-base
 | `channels` | Channel cache (for new-thread picker) |
 | `status` | Status bar text (errors, counts, hints) |
 | `width, height` | Current terminal dimensions (from `WindowSizeMsg`) |
+| `previewMode` | `previewThread` or `previewSession` — which content the right pane shows |
+| `sessions` | Sessions for `previewThreadID`, as returned by the last poll |
+| `sessionsByMsg` | `triggerMessageID → Session` index built from `sessions`; the pane's lookup key |
+| `session` | The session whose events are loaded (`nil` until `s` fetches them) |
+| `sessionEvents` | Events for `session`, in `seq` order |
+| `sessionPollThreadID` | Thread the current poll is armed for; `0` means no poll is armed |
+| `sessionTickThread` | Thread a tick is in flight for, so arming stays idempotent |
+| `sessionTickGen` | Monotonic tick generation; a `sessionTickMsg` with a stale gen is dropped |
 
 ### Data Fetching
 
-Data is fetched on demand, never polled:
+Message data is fetched on demand. Agent session data is **polled**: while a session is live, the thread's session list is re-fetched every 500 ms.
 
 | Event | Fetch |
 |-------|-------|
@@ -119,10 +129,18 @@ Data is fetched on demand, never polled:
 | Cursor moves while the preview is visible | `GET /v1/threads/:id/messages` (debounced by thread ID) |
 | After send/create | `fetchInbox()` — refetch entire inbox, clears `fullThreads` |
 | Preview panel active + cursor moves | Preview data for highlighted item (deduped) |
+| Preview messages land for a new thread | `GET /v1/threads/:id/sessions` — one fetch per thread, deduped by `sessionPollThreadID` |
+| `s` pressed on a message with a session | `GET /v1/sessions/:id` — events for that session, once per press |
+| A session is `queued`/`running` and the pane is visible | `GET /v1/threads/:id/sessions` again, on a 500 ms `tea.Tick` |
+| The last session in the thread reaches a terminal status | Nothing further is scheduled for that thread — see the note below |
 
-Preview fetching is idempotent and gated on `previewVisible()`: skips if the cursor hasn't changed, if width < 80, if the same thread is already cached, or if the pane is not actually drawn (detail view, or full inbox layout).
+Preview message fetching is idempotent and gated on `previewVisible()`: skips if the cursor hasn't changed, if width < 80, if the same thread is already cached, or if the pane is not actually drawn (detail view, or full inbox layout).
 
-`syncVisibleData()` is the single entry point for cursor-move-driven fetches. It returns `tea.Batch(maybeFetchPreview(), maybeFetchFullRows())`; `tea.Batch` returns the sole non-nil command directly, so it degrades to a single fetch when only one layout needs data.
+The session fetch is gated on `previewVisible()` too, plus three more conditions: the view must be the inbox, the preview thread must be non-zero, and no poll may already be armed for that thread (`sessionPollThreadID`). The tick handler re-checks the generation, the armed thread, `previewVisible()`, and "is anything still live" before it re-fetches, and releases the poll (setting `sessionPollThreadID` back to `0`) when the pane is hidden or a fetch fails. A `sessionTickMsg` whose generation is stale is dropped without touching state, so an in-flight tick from a previous thread or a superseded arming cannot resurrect a poll.
+
+The poll covers the *lifetime of a live session*, not the thread: once every session in the thread is terminal, `syncSessionTick()` arms no further tick. Because the per-thread dedupe key is only cleared when the pane is hidden, a fetch fails, or the cursor moves to a different thread, a session started in that thread afterwards arrives on the next fetch — moving to another thread and back, or toggling the pane — not on its own.
+
+`syncVisibleData()` is the single entry point for cursor-move-driven fetches. It returns `tea.Batch(maybeFetchPreview(), maybeFetchFullRows(), fetchSessionsForPreview())`; `tea.Batch` returns the sole non-nil command directly, so the three fetches collapse to however many actually need to run.
 
 ## Inbox Layouts
 
@@ -150,7 +168,7 @@ Preview fetching is idempotent and gated on `previewVisible()`: skips if the cur
 
 ### Preview Visibility
 
-`previewVisible()` is the single predicate for "is the right-side pane drawn". It is false when the preference is off, below 80 cols, in the detail view, and in the full inbox layout. `baseView()`, `inboxListWidth()`, `listHeight()`, and `maybeFetchPreview()` all consult it, so the pane cannot be drawn at one width while fetch decisions assume another.
+`previewVisible()` is the single predicate for "is the right-side pane drawn". It is false when the preference is off, below 80 cols, in the detail view, and in the full inbox layout. `baseView()`, `inboxListWidth()`, `listHeight()`, `maybeFetchPreview()`, and `fetchSessionsForPreview()`/`syncSessionTick()` all consult it, so neither message data nor session data can be fetched for a pane that is not on screen.
 
 ### Layout / Preview Invariant
 
@@ -172,11 +190,16 @@ Preview fetching is idempotent and gated on `previewVisible()`: skips if the cur
 |----------|---------|----------|
 | `inboxFetchedMsg` | `[]InboxMessage`, `error` | `fetchInbox()` completes |
 | `previewMessagesFetchedMsg` | `threadID`, `[]Message`, `error` | `fetchPreviewMessages()` completes |
+| `sessionsFetchedMsg` | `threadID`, `[]Session`, `error` | `fetchSessions()` completes — the initial fetch and every poll tick |
+| `sessionEventsFetchedMsg` | `Session`, `[]SessionEvent`, `error` | `fetchSessionEvents()` completes after `s` |
+| `sessionTickMsg` | `threadID`, `gen` | A `tea.Tick` fires; re-arms the next poll or releases it |
 | `fullRowsFetchedMsg` | `map[threadID][]Message`, `error` | `fetchFullRows()` completes |
 | `composeSendMsg` | `text`, `composeMode`, `context` | User presses Enter in compose |
 | `threadCreatedMsg` | `channelID`, `threadID`, `title`, `error` | Thread creation response |
 | `tea.WindowSizeMsg` | `Width`, `Height` | Terminal resize |
 | `tea.KeyMsg` | key code/text | Any key press |
+
+`sessionsFetchedMsg` is discarded when its `threadID` is no longer the preview thread, and a failed session fetch releases the poll instead of retrying. `sessionEventsFetchedMsg` also sets `previewMode = previewSession`, so the pane cannot show a session the user did not ask for.
 
 ## Rendering Pipeline
 
@@ -207,16 +230,28 @@ Renders the inbox in the active layout (`inboxLayoutFull` dispatches to `renderI
 
 ### `renderPreview(w int)`
 
-Renders the preview panel for the cursor-highlighted inbox group:
+Renders the preview panel for the cursor-highlighted inbox group. In the inbox view it first checks `previewMode`: if it is `previewSession`, it delegates to `renderSessionPreview(w, h)` and never draws thread content.
+
+The thread branch:
 
 - Title: `#channel › thread · last <time> · N replies`
 - Root post: word-wrapped fully with `wrapText`, no truncation
 - Replies: fill remaining height, newest-tail truncation when space runs out
 - Empty state: `(no message)` or `(no replies)`
 
+### `renderSessionPreview(w, h)` (`session.go`)
+
+Renders the agent session triggered by the message under the cursor. It re-resolves the session from `sessionForCursor()` on every render, so moving the cursor updates the pane without another fetch, and it falls back to the loaded `m.session` when the polled list has no entry for the row.
+
+- Header: `SESSION  <agent> · <status> · <reply mode> · #<id>`, plus elapsed duration once terminal, `replied #<seq>` when the daemon posted the reply, and the failure reason when there is one. Stripped of ANSI and newlines, then truncated to the pane width.
+- Events: one line per event, `<type>` in a fixed 8-column field, then the **first line** of the event content with tabs expanded, truncated to the pane width. Events whose session differs from the loaded `m.session` are not shown — the pane will not display one session's events under another's header.
+- Overflow: the oldest events that fit are shown and a `… N hidden …` line counts the rest. The tail of a verbose run is not reachable from the pane.
+- Placeholders: `no session on this message`, `(no events loaded)`, `(running…)`, `(no events)`.
+- Returns `""` when the pane is under 3 rows tall, and clamps its width up to `minContentWidth` otherwise, so a narrow terminal cannot panic the renderer.
+
 ### `helpView()`
 
-Context-sensitive help bar at bottom of list. Shows available key bindings for current view.
+Context-sensitive help bar at bottom of list. Shows available key bindings for current view. The inbox hint row carries a session hint that reflects the pane's current mode — `s session` normally, `s thread` while the session pane is showing — so the key always advertises where it will take you back to.
 
 ### `center(s string, width int)`
 
@@ -228,6 +263,8 @@ Centers a multi-line string horizontally within `width` columns. Used for compos
 |-------|-------------|
 | Daemon down (startup or read transport) | `tui.Run()` returns exit code 2 for startup; a read failure shows `error: DAEMON_DOWN: ...` |
 | Read response cannot be decoded | Status bar or compose modal shows `error: DAEMON_ERROR: ...`; prior data is retained |
+| Session list fetch fails | Status bar shows `error: ...`; the poll is released rather than retried, and the previously rendered sessions stay on screen |
+| Session events fetch fails | Status bar shows `error: ...`; the pane stays in session mode showing `(no events loaded)` |
 | Mutation connection failure before dispatch | `error: DAEMON_DOWN: ...`; no acknowledgement is possible |
 | Dispatched mutation timeout, response loss, or acknowledgement failure | `error: DELIVERY_UNKNOWN: ...`; the modal stays open and the user re-reads the thread before retrying |
 | Daemon error response | Rendered as `error: <CODE>: <message>` from the daemon error envelope |
@@ -272,13 +309,21 @@ model.Update(tea.KeyMsg)
               ├─ n ──▶ handleNewThread() ──▶ compose.Open(composeModeNewThread)
               ├─ l/L ──▶ toggle inbox layout ──▶ syncVisibleData()
               ├─ p ──▶ toggle preview ──▶ syncVisibleData()
+              ├─ s ──▶ handleSessionKey() ──▶ toggle previewMode
+              │         └─ thread → session ──▶ fetchSessionEvents()
               ├─ Esc ──▶ no-op (inbox) / return to inbox (detail)
               └─ q ──▶ quitting = true ──▶ tea.Quit
+  │
+  ▼
+fetch cmd resolves ──▶ *FetchedMsg ──▶ Update() applies it ──▶ re-arms the next cmd
+  │
+  └─ sessionTickMsg ──▶ drop if gen is stale, else release or re-fetch
   │
   ▼
 tea.View() called by Bubble Tea runtime
   │
   └─ renders based on current model state
+      └─ preview pane = renderSessionPreview() when previewMode == previewSession
 ```
 
 ## Testing
@@ -358,6 +403,8 @@ Y := clamp(3, 20, hAvail - replyReserve - 2)
 15. **Inbox cursor preserved on Esc**: Entering detail saves `cursor`/`scroll`; returning via `Esc` restores them.
 16. **Preview panel hidden in detail**: `View()` early-returns for `viewInboxDetail` with single-pane rendering; the preview split condition guards `&& m.view != viewInboxDetail`.
 17. **Preview and full layout are mutually exclusive**: full layout already inlines the original post and every reply, and a split pane is too narrow for the content column, so the rows take the full width. Rather than leave `p` and `l` fighting over one pane, the two keys are defined so `preview == true` always implies `compact`: `p`-on forces compact, and switching to full turns the preview off.
+18. **Session preview reuses the preview pane instead of adding a view**: a session belongs to a message, so showing it anywhere but next to the message that triggered it would hide the trigger. `s` flips the pane's content rather than pushing a view, which keeps `previewVisible()` the one gate for both content modes and keeps the detail view, the full layout, and every width rule unchanged.
+19. **Session data is polled, message data is not**: messages arrive when the human acts, so on-demand fetching is enough. A session is a subprocess the human is not typing into, and the daemon exposes no push channel, so the pane re-reads the thread's session list every 500 ms — but only while something is actually `queued` or `running`, and only while the pane is drawn. An idle TUI issues no session requests at all.
 
 ## wrapText Helper
 
