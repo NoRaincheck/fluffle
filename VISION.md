@@ -52,41 +52,64 @@ Fluffle deliberately avoids building heavy, specialized workflows. It defers to 
 ## 💻 CLI (`flf`) Surface Sketch
 The CLI is the control plane. It manages the daemon, provides TUI entry, and serves as the API for external agents.
 
+Every daemon-touching command auto-spawns the daemon if it is not already running, so `flf daemon start` is only needed to run it in the foreground.
+
 ```bash
 # Daemon & Initialization
-$ flf daemon start          # Start the local SQLite-backed server
-$ flf init                  # Initialize fluffle context in a git repository
+$ flf daemon start|stop|status   # Explicit lifecycle control; --background to detach
+$ flf init --repo ./my-project   # Canonicalize + verify a git repo anchor
+$ flf init --orphaned            # Anchor to a scratchpad channel with no repo
 
 # TUI Entry (Primary Interface)
-$ flf tui                   # Launch the main terminal user interface
+$ flf tui                       # Launch the main terminal user interface
 
-# Channel & Thread Management (Human)
-$ flf channel list --repo ./my-project
+# Inbox (cross-channel feed; default landing view of the TUI)
+$ flf inbox --limit 20 --json
+
+# Channel & Thread Management (Human only)
+$ flf channel list --repo ./my-project [--include-orphaned] --json
+$ flf channel create --name "auth-refactor" --repo ./my-project
+$ flf channel create --name "scratch" --orphaned     # Mutually exclusive with --repo
 $ flf thread new --channel "auth-refactor" --title "Schema migration"
+$ flf thread list --channel "auth-refactor"
 
 # Messaging & Reactions
 $ flf message send --thread 42 --text "Reviewing the migration script now."
-$ flf react add --message 105 --emoji "👀"  # Available to both humans and agents
+$ flf message send --thread 42 --text -             # Read body from stdin
+$ flf message send --thread 42 --text "On it." --reply-to-seq 41   # Threaded reply
+$ flf react add --thread 42 --message-seq 41 --emoji "👀"   # Humans and agents alike
 
 # Agent Interaction (Append-only, CLI-triggered)
-# External agent frameworks call this to read context and append responses
-$ flf agent read --thread 42 --last 5       # Outputs last 5 messages as JSONL
-$ flf agent append --thread 42 --file response.jsonl 
-$ flf agent list --repo ./my-project        # Resolved agent definitions and their source config
-$ flf agent session --id 7                  # One run: prompt, output, exit status
+# External agent frameworks call this to read context and append responses.
+# --agent-id marks the caller as an agent; --as names a human author.
+$ flf agent read --thread 42 --last 5              # Outputs last 5 events as JSONL
+$ flf agent read --thread 42 --after-seq 40        # Monotonic cursor; full reaction snapshot
+$ flf agent append --thread 42 --file response.jsonl
+$ flf agent list --repo ./my-project               # Resolved agent definitions and source config
+$ flf agent session --id 7                         # One run: prompt, output, exit status
 
 # Thread Handoff (ACP Compatibility)
 $ flf thread export --thread 42 --format jsonl > session.jsonl
-$ flf thread import --file session.jsonl --channel "local-context"
+$ flf thread import --file session.jsonl --channel "local-context"   # or --thread 42 to append
 ```
+
+There is deliberately no `flf agent invoke`. An agent run is started by a human `@mention` in a message and is cancelled only by a human.
 
 ---
 
-## 🔍 Precision Check: Edge Cases to Define Next
-To maintain this level of clarity during implementation, the following decisions should be locked in early:
+## 🔍 Decisions Locked In
+These four questions were left open when this manifesto was written. Each is now settled by the implementation.
 
-1. **Daemon Lifecycle**: Does `flf tui` automatically spawn and manage the background daemon, or must the user run `flf daemon start` separately? (Auto-spawning is more user-friendly for a local-first tool).
-2. **Agent Authentication**: How does an external agent framework authenticate with the `flf` daemon to prove it is allowed to append to a thread? (e.g., Localhost-only restriction, or a simple pre-shared token?).
-3. **ACP JSONL Schema**: Define the exact, minimal JSONL schema (e.g., `{ "role": "user"|"assistant"|"system", "content": "...", "timestamp": "...", "metadata": {...} }`) to guarantee true portability.
-4. **Orphaned Channel Lifecycle**: Are orphaned channels permanently persistent, or do they have a time-to-live (TTL) to prevent SQLite bloat?
+1. **Daemon Lifecycle — auto-spawn, with explicit override.** Every daemon-touching command first probes `GET /v1/health`; if the daemon is down, the CLI re-execs itself as `daemon start --background` and retries the probe three times at one-second intervals. `flf daemon start|stop|status` remain available for explicit control. `stop` is graceful first (`POST /api/shutdown`, then wait up to five seconds for exit) and only falls back to killing the process.
+
+2. **Agent Authentication — localhost-only, no token.** The daemon binds `127.0.0.1:0` and writes its ephemeral port to `~/.fluffle/daemon.json`. Agent identity travels in the `X-Fluffle-Agent` header, which the CLI sets from `--agent-id`; the daemon re-derives `author_type` from that header on every write and never trusts a client-supplied `author_type` in a request body. **This is a convention boundary, not a security boundary.** Any local process can present itself as a human by omitting the header. That is an accepted trade for a local-first tool, and it is the reason the daemon must never bind beyond loopback.
+
+3. **ACP JSONL Schema — one object per line, reactions included.** `seq` is the JSONL line order within a thread, assigned by the daemon; on import it is remapped to the destination thread. `parent_seq` and `message_seq` are the portable references for threaded replies and reactions, so nothing internal leaks into the export.
+   ```json
+   {"type":"message","seq":12,"parent_seq":8,"role":"assistant","name":"reviewer","author_type":"agent","content":"Ready for review.","timestamp":"2026-09-25T10:00:00Z"}
+   {"type":"reaction","message_seq":12,"name":"reviewer","author_type":"agent","emoji":"👀","timestamp":"2026-09-25T10:01:00Z"}
+   ```
+   `metadata` is accepted on input but never persisted, and is omitted from output when empty. A legacy `author` key is still accepted as an alias for `name`.
+
+4. **Orphaned Channel Lifecycle — permanently persistent, no TTL.** `--orphaned` sets `is_orphaned=1` and leaves `repo_abs_path` NULL; the channel name is then globally unique rather than unique per repo. Reaping is left to the human via manual archive. Note that archiving is not implemented yet: `archived_at` exists in the schema and is read by the list queries, but nothing writes it and no CLI command sets it.
 
