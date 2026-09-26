@@ -109,7 +109,12 @@ CREATE TABLE agent_session_events(
 CREATE INDEX idx_session_events ON agent_session_events(session_id, seq);
 ```
 
-The whole schema is applied with `CREATE TABLE IF NOT EXISTS` on every `store.Open`, so the two session tables appear in an existing database without a version bump.
+On every `store.Open`, `migrate` probes `PRAGMA table_info(messages)` for a `parent_id` column:
+
+- **Column present** — the schema is applied with `CREATE TABLE IF NOT EXISTS` and nothing is modified. This is how the two session tables appeared in an existing database without a version bump.
+- **Column absent** — the database predates the threaded-reply change, and `migrate` **drops and rebuilds** `reactions`, `messages`, `threads`, and `channels` against the current schema. This is destructive by design: a pre-`parent_id` database loses all channels, threads, messages, and reactions. `store_test.go` asserts that data does not survive the rebuild.
+
+There is no schema version table, and the probe keys on one specific column, so drift that does not involve `messages.parent_id` takes the additive path — where `CREATE TABLE IF NOT EXISTS` silently skips a table that already exists, and a missing column on that table is never added.
 
 Integer IDs (`--thread 42`). Live write identity is derived by the daemon from a non-empty `X-Fluffle-Agent` header; the CLI `--agent-id` flag supplies that header. Client-supplied `author_type` is never trusted. `seq` is daemon-assigned (`max(seq)+1` per thread in transaction). `agent_sessions` and `agent_session_events` are an audit trail for local agent runs, not part of the append-only message/reaction contract: nothing in them is portable JSONL and nothing in them is ever sent back to an agent.
 
