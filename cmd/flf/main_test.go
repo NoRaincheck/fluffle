@@ -17,7 +17,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/NoRaincheck/fluffle/internal/agentcfg"
 	"github.com/NoRaincheck/fluffle/internal/jsonl"
+	"github.com/NoRaincheck/fluffle/internal/runner"
+	"github.com/NoRaincheck/fluffle/internal/session"
+	"github.com/NoRaincheck/fluffle/internal/store"
 )
 
 type recordedCLIRequest struct {
@@ -1783,4 +1787,59 @@ func TestAwaitDaemonPortReportsChildExitAndTimeout(t *testing.T) {
 			t.Fatalf("port = %d, want 1234", port)
 		}
 	})
+}
+
+func TestDaemonStartReconcilesStaleSessions(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("FLUFFLE_HOME", home)
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(home, "fluffle.db")
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chID, _ := s.CreateChannel("c", "/repo", "", "", "", false)
+	thID, _ := s.CreateThread(chID, "t")
+	seq, _ := s.AppendMessage(thID, "alice", "human", "user", "@probe hi")
+	msgID, _ := s.MessageIDBySeq(thID, seq)
+	running, _ := s.CreateSession(thID, msgID, "probe", store.SessionRunning, "stdout", "c", nil)
+	queued, _ := s.CreateSession(thID, msgID, "other", store.SessionQueued, "stdout", "c", nil)
+	done, _ := s.CreateSession(thID, msgID, "done", store.SessionSucceeded, "stdout", "c", nil)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	agents := agentcfg.NewLoader(filepath.Join(home, "config.toml"))
+	m := session.NewManager(reopened, agents, runner.NewExec())
+	defer m.Shutdown()
+	if err := m.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, id := range []int64{running, queued} {
+		got, err := reopened.GetSession(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != store.SessionCanceled {
+			t.Fatalf("session %d status = %q, want canceled", id, got.Status)
+		}
+		if got.FinishedAt == nil {
+			t.Fatalf("session %d has no finished_at", id)
+		}
+		if got.Error == nil || !strings.Contains(*got.Error, "daemon restarted") {
+			t.Fatalf("session %d error = %v", id, got.Error)
+		}
+	}
+	untouched, _ := reopened.GetSession(done)
+	if untouched.Status != store.SessionSucceeded {
+		t.Fatalf("terminal session was modified: %q", untouched.Status)
+	}
 }

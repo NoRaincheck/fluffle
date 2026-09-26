@@ -19,10 +19,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/NoRaincheck/fluffle/internal/agentcfg"
 	"github.com/NoRaincheck/fluffle/internal/apiserver"
 	"github.com/NoRaincheck/fluffle/internal/client"
 	"github.com/NoRaincheck/fluffle/internal/jsonl"
 	"github.com/NoRaincheck/fluffle/internal/repo"
+	"github.com/NoRaincheck/fluffle/internal/runner"
+	"github.com/NoRaincheck/fluffle/internal/session"
 	"github.com/NoRaincheck/fluffle/internal/store"
 	"github.com/NoRaincheck/fluffle/internal/tui"
 )
@@ -1204,6 +1207,11 @@ func daemonStart(background bool) int {
 	if err != nil {
 		return fail("DAEMON_ERROR", err.Error())
 	}
+	agents := agentcfg.NewLoader(filepath.Join(home, "config.toml"))
+	sessions := session.NewManager(s, agents, runner.NewExec())
+	if err := sessions.Reconcile(); err != nil {
+		return fail("DAEMON_ERROR", err.Error())
+	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return fail("DAEMON_ERROR", err.Error())
@@ -1217,8 +1225,13 @@ func daemonStart(background bool) int {
 		return fail("DAEMON_ERROR", err.Error())
 	}
 	fmt.Println("fluffle daemon on 127.0.0.1:" + strconv.Itoa(port))
-	srv := &http.Server{Handler: apiserver.NewHandler(s)}
+	srv := &http.Server{Handler: apiserver.NewHandlerWithDeps(s, apiserver.Deps{
+		Starter:  sessions,
+		Agents:   agents,
+		Canceler: sessions,
+	})}
 	apiserver.SetShutdown(func() {
+		sessions.ShutdownAndWait()
 		srv.Close()
 	})
 	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
