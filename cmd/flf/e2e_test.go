@@ -365,10 +365,8 @@ func TestE2E_DaemonLifecycleEndToEnd(t *testing.T) {
 	}
 
 	// Verify process is gone
-	if proc, _ := os.FindProcess(pid); proc != nil {
-		if err := proc.Signal(os.Signal(nil)); err == nil {
-			t.Fatalf("process %d still exists after shutdown", pid)
-		}
+	if processAlive(pid) {
+		t.Fatalf("process %d still exists after shutdown", pid)
 	}
 }
 
@@ -1880,6 +1878,8 @@ func TestE2E_AgentSessionCmdRequiresID(t *testing.T) {
 	}
 }
 
+const e2eHTTPTimeout = 5 * time.Second
+
 // jsonIDField reads one id out of a --json response. flf channel create --json
 // emits "id" from the anonymous struct it falls back to and "ID" from a
 // store.Channel with no json tag, so either key is a real answer. runCLI only
@@ -1902,16 +1902,21 @@ func jsonIDField(t *testing.T, out, field string) string {
 	return ""
 }
 
-// e2eProcessGroupAlive reports whether any process remains in pgid.
-// os.FindProcess always succeeds on Unix and never sees a grandchild, so the
-// only usable probe for a reaped-but-orphaned agent is the group itself.
+// e2eProcessGroupAlive reports whether any process remains in pgid, and only for
+// a pgid that is a real group leader: kill(-pgid, 0) answers ESRCH for a live pid
+// that leads no group, so it says nothing about liveness on its own. A pid entry
+// that still exists counts as alive, the rule processAlive (main.go:1250) follows
+// for unreaped zombies; darwin answers EPERM rather than ESRCH for a group left
+// holding only zombies, and linux answers 0, so both count as alive here.
 func e2eProcessGroupAlive(pgid int) bool {
-	return syscall.Kill(-pgid, syscall.Signal(0)) == nil
+	err := syscall.Kill(-pgid, syscall.Signal(0))
+	return err == nil || err == syscall.EPERM
 }
 
 func e2eGetJSON(t *testing.T, url string, into any) {
 	t.Helper()
-	resp, err := http.Get(url)
+	client := &http.Client{Timeout: e2eHTTPTimeout}
+	resp, err := client.Get(url)
 	if err != nil {
 		t.Fatalf("GET %s: %v", url, err)
 	}
@@ -1934,7 +1939,11 @@ func TestE2E_AgentMentionRunsAgentAndStoresSession(t *testing.T) {
 	env := []string{"FLUFFLE_HOME=" + home}
 
 	probe := filepath.Join(tmpDir, "probe-agent")
-	if err := os.WriteFile(probe, []byte("#!/bin/sh\ncat > /dev/null\nprintf 'the answer'\n"), 0o755); err != nil {
+	// pwd goes to stdout because sess.Cwd is copied from the thread's repo path
+	// when the row is created, so it would stay correct with the run-time cwd
+	// left unwired; the agent's own stdout is the only evidence of where it ran.
+	script := "#!/bin/sh\ncat > /dev/null\npwd\nprintf 'the answer'\n"
+	if err := os.WriteFile(probe, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	config := "[[agents]]\nname=\"probe\"\ncommand=\"" + probe + "\"\nreply=\"stdout\"\ntimeout_secs=20\n"
@@ -1944,8 +1953,8 @@ func TestE2E_AgentMentionRunsAgentAndStoresSession(t *testing.T) {
 
 	repo := t.TempDir()
 	gitInit(t, repo)
-	// The daemon persists the canonicalized repo path while t.TempDir hands
-	// back the symlinked one on macOS, so the assertion compares canonical forms.
+	// The daemon canonicalizes the repo path and t.TempDir hands back a symlinked
+	// one on macOS, so both sides of the cwd comparison use the canonical form.
 	canonicalRepo, err := filepath.EvalSymlinks(repo)
 	if err != nil {
 		t.Fatal(err)
@@ -1970,6 +1979,7 @@ func TestE2E_AgentMentionRunsAgentAndStoresSession(t *testing.T) {
 	}
 
 	var replySeq int64
+	wantReply := canonicalRepo + "\nthe answer"
 	if !waitFor(t, 40*time.Second, func() bool {
 		out := runCLI(t, env, bin, "agent", "read", "--thread", threadArg, "--json")
 		for _, line := range strings.Split(out, "\n") {
@@ -1988,8 +1998,8 @@ func TestE2E_AgentMentionRunsAgentAndStoresSession(t *testing.T) {
 				t.Fatalf("bad agent read line %q: %v", line, err)
 			}
 			if entry.Type == "message" && entry.AuthorType == "agent" && entry.Name == "probe" {
-				if entry.Content != "the answer" {
-					t.Fatalf("agent reply content = %q", entry.Content)
+				if entry.Content != wantReply {
+					t.Fatalf("agent reply content = %q, want %q", entry.Content, wantReply)
 				}
 				replySeq = entry.Seq
 				return true
@@ -2039,13 +2049,22 @@ func TestE2E_AgentMentionRunsAgentAndStoresSession(t *testing.T) {
 		t.Fatalf("session cwd = %v, want %q", sess.Cwd, canonicalRepo)
 	}
 	types := map[string]bool{}
+	stdoutEvent := ""
 	for _, event := range payload.Events {
 		types[event.Type] = true
+		if event.Type == store.SessionEventStdout {
+			stdoutEvent += event.Content
+		}
 	}
 	for _, want := range []string{store.SessionEventPrompt, store.SessionEventStdout, store.SessionEventExit} {
 		if !types[want] {
 			t.Fatalf("missing %q event; got %v", want, types)
 		}
+	}
+	// The agent reports the directory it was run in, which is what repo-anchoring
+	// promises; sess.Cwd above only proves the column was filled from the thread.
+	if strings.TrimSpace(stdoutEvent) != canonicalRepo+"\nthe answer" {
+		t.Fatalf("agent stdout = %q, want the agent to have run in %q", stdoutEvent, canonicalRepo)
 	}
 
 	human := runCLI(t, env, bin, "agent", "session", "--id", "1")
@@ -2055,21 +2074,51 @@ func TestE2E_AgentMentionRunsAgentAndStoresSession(t *testing.T) {
 
 	// The pane the TUI renders is driven by the thread-scoped list, which
 	// carries no events: the TUI fetches the detail for a session it keys on.
+	// A second thread with its own session is what makes the scoping falsifiable;
+	// selecting only by id would pass against an unfiltered list.
+	otherArg := jsonIDField(t, runCLI(t, env, bin, "thread", "new", "--channel", "eng", "--repo", repo, "--title", "other", "--json"), "id")
+	otherThread, err := strconv.ParseInt(otherArg, 10, 64)
+	if err != nil || otherThread <= 0 || otherThread == threadID {
+		t.Fatalf("second thread = %q, want a distinct thread: %v", otherArg, err)
+	}
+	runCLI(t, env, bin, "message", "send", "--thread", otherArg, "--text", "@probe over here", "--as", "alice", "--json")
+	var otherSession store.Session
+	if !waitFor(t, 40*time.Second, func() bool {
+		result := runCLIResult(t, env, bin, "", "agent", "session", "--id", "2", "--json")
+		if result.exitCode != 0 {
+			return false
+		}
+		var other sessionPayload
+		if err := json.Unmarshal([]byte(result.stdout), &other); err != nil {
+			return false
+		}
+		otherSession = other.Session
+		return otherSession.Status == store.SessionSucceeded
+	}) {
+		t.Fatalf("second thread session never succeeded")
+	}
+
 	base := "http://127.0.0.1:" + strconv.Itoa(port)
 	var listed []store.Session
 	e2eGetJSON(t, base+"/v1/threads/"+strconv.FormatInt(threadID, 10)+"/sessions", &listed)
-	var found *store.Session
-	for i := range listed {
-		if listed[i].ID == sess.ID {
-			found = &listed[i]
-		}
+	if len(listed) != 1 {
+		t.Fatalf("thread %d sessions = %+v, want only its own session %d", threadID, listed, sess.ID)
 	}
-	if found == nil {
-		t.Fatalf("thread %d sessions = %+v, want session %d", threadID, listed, sess.ID)
+	found := listed[0]
+	if found.ID != sess.ID {
+		t.Fatalf("thread %d session = %d, want %d", threadID, found.ID, sess.ID)
 	}
 	if found.AgentName != "probe" || found.Status != store.SessionSucceeded ||
 		found.TriggerMessageID != sess.TriggerMessageID || found.ThreadID != threadID {
-		t.Fatalf("listed session = %+v", *found)
+		t.Fatalf("listed session = %+v", found)
+	}
+	if otherSession.ThreadID != otherThread || otherSession.ID == sess.ID {
+		t.Fatalf("second session = %+v, want a distinct session on thread %d", otherSession, otherThread)
+	}
+	var otherListed []store.Session
+	e2eGetJSON(t, base+"/v1/threads/"+strconv.FormatInt(otherThread, 10)+"/sessions", &otherListed)
+	if len(otherListed) != 1 || otherListed[0].ID != otherSession.ID {
+		t.Fatalf("thread %d sessions = %+v, want only session %d", otherThread, otherListed, otherSession.ID)
 	}
 	var detail sessionPayload
 	e2eGetJSON(t, base+"/v1/sessions/"+strconv.FormatInt(sess.ID, 10), &detail)
@@ -2204,7 +2253,7 @@ func TestE2E_AgentDaemonStopReapsRunningAgent(t *testing.T) {
 	if stopResult.exitCode != 0 {
 		t.Fatalf("daemon stop: exit=%d stdout=%q stderr=%q", stopResult.exitCode, stopResult.stdout, stopResult.stderr)
 	}
-	if !waitFor(t, 10*time.Second, func() bool { return !e2eProcessGroupAlive(daemonPID) }) {
+	if !waitForProcessExit(daemonPID, 10*time.Second) {
 		t.Fatalf("daemon %d survived flf daemon stop", daemonPID)
 	}
 	if !waitFor(t, 10*time.Second, func() bool { return !e2eProcessGroupAlive(probePID) }) {
@@ -2225,7 +2274,16 @@ func TestE2E_AgentDaemonStopReapsRunningAgent(t *testing.T) {
 		t.Fatalf("session after restart = %+v, want session %d", payload.Session, sess.ID)
 	}
 	if payload.Session.Status != store.SessionCanceled {
-		t.Fatalf("session status after restart = %q, want %q: a session left in %q means daemon stop skipped the session barrier",
-			payload.Session.Status, store.SessionCanceled, store.SessionRunning)
+		t.Fatalf("session status after restart = %q, want %q", payload.Session.Status, store.SessionCanceled)
+	}
+	// Status alone cannot tell the two apart, because every daemon start runs
+	// Reconcile, which rewrites running to canceled. Only the error text can:
+	// "daemon restarted while ..." is written by that reconcile, so its presence
+	// means the barrier never finished the row and startup covered for it.
+	if payload.Session.Error == nil {
+		t.Fatalf("session error = nil, want the reason the barrier recorded: %+v", payload.Session)
+	}
+	if strings.Contains(*payload.Session.Error, "daemon restarted while") {
+		t.Fatalf("session error = %q: the row was left unfinished by daemon stop and startup reconcile masked it, so the shutdown barrier did not run", *payload.Session.Error)
 	}
 }
