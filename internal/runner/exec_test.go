@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -286,6 +287,25 @@ func TestStdoutAndStderrBothDrain(t *testing.T) {
 	}
 	if !strings.Contains(c.out(), "out") || !strings.Contains(c.errOut(), "err") {
 		t.Fatalf("stdout = %q stderr = %q", c.out(), c.errOut())
+	}
+}
+
+func TestKillGroupFallsBackToProcessWhenGroupIsMissing(t *testing.T) {
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	killGroupProcess(cmd.Process, cmd.Process.Pid)
+	waited := make(chan error, 1)
+	go func() { waited <- cmd.Wait() }()
+	select {
+	case err := <-waited:
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("wait err = %v, want a signal exit", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("pid %d survived: no process group existed to signal", cmd.Process.Pid)
 	}
 }
 

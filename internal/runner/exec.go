@@ -46,17 +46,11 @@ func (execRunner) Run(ctx context.Context, req Request) (Result, error) {
 	if err := cmd.Start(); err != nil {
 		return Result{}, fmt.Errorf("spawn %s: %w", req.Command, err)
 	}
-	// Small delay to ensure process has created its process group before killing it
-	time.Sleep(1 * time.Millisecond)
 
 	pgid := cmd.Process.Pid
 	var killOnce sync.Once
 	killGroup := func() {
-		killOnce.Do(func() {
-			if pgid > 0 {
-				_ = syscall.Kill(-pgid, syscall.SIGKILL)
-			}
-		})
+		killOnce.Do(func() { killGroupProcess(cmd.Process, pgid) })
 	}
 
 	watchDone := make(chan struct{})
@@ -115,6 +109,12 @@ func (execRunner) Run(ctx context.Context, req Request) (Result, error) {
 		return Result{}, waitErr
 	}
 	return Result{ExitCode: 0}, nil
+}
+
+func killGroupProcess(proc *os.Process, pgid int) {
+	if err := syscall.Kill(-pgid, syscall.SIGKILL); errors.Is(err, syscall.ESRCH) {
+		_ = proc.Kill()
+	}
 }
 
 func mergeEnv(base, extra []string) []string {
