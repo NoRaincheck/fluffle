@@ -109,6 +109,7 @@ type model struct {
 	session             *store.Session
 	sessionEvents       []store.SessionEvent
 	sessionPollThreadID int64
+	sessionTickPending  bool
 }
 
 func New(base string) tea.Model {
@@ -340,6 +341,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case sessionsFetchedMsg:
 		if msg.err != nil {
 			m.status = fmt.Sprintf("error: %v", msg.err)
+			m.releaseSessionPoll()
 			return m, nil
 		}
 		if msg.threadID != m.previewThreadID {
@@ -359,10 +361,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case sessionTickMsg:
-		if !m.anySessionActive() {
+		m.sessionTickPending = false
+		if m.sessionPollThreadID == 0 || msg.threadID != m.sessionPollThreadID {
 			return m, nil
 		}
-		return m, m.fetchSessions(m.sessionPollThreadID)
+		if !m.previewVisible() || !m.anySessionActive() {
+			m.releaseSessionPoll()
+			return m, nil
+		}
+		return m, m.fetchSessions(msg.threadID)
 
 	case fullRowsFetchedMsg:
 		if msg.err != nil && len(msg.rows) == 0 {

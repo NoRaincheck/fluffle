@@ -36,10 +36,16 @@ type sessionEventsFetchedMsg struct {
 	err     error
 }
 
-type sessionTickMsg time.Time
+type sessionTickMsg struct {
+	threadID int64
+}
 
-func sessionTickCmd(d time.Duration) tea.Cmd {
-	return tea.Tick(d, func(t time.Time) tea.Msg { return sessionTickMsg(t) })
+func sessionTickCmd(threadID int64, d time.Duration) tea.Cmd {
+	return tea.Tick(d, func(time.Time) tea.Msg { return sessionTickMsg{threadID: threadID} })
+}
+
+func (m *model) releaseSessionPoll() {
+	m.sessionPollThreadID = 0
 }
 
 func (m *model) fetchSessions(threadID int64) tea.Cmd {
@@ -57,10 +63,10 @@ func (m *model) fetchSessionEvents(sessionID int64) tea.Cmd {
 }
 
 func (m *model) fetchSessionsForPreview() tea.Cmd {
-	if m.view != viewInbox || m.previewThreadID == 0 {
+	if m.view != viewInbox || !m.previewVisible() {
 		return nil
 	}
-	if m.sessionPollThreadID == m.previewThreadID {
+	if m.previewThreadID == 0 || m.sessionPollThreadID == m.previewThreadID {
 		return nil
 	}
 	return m.fetchSessions(m.previewThreadID)
@@ -95,14 +101,15 @@ func (m *model) anySessionActive() bool {
 }
 
 func (m *model) syncSessionTick() tea.Cmd {
-	if !m.anySessionActive() {
-		return nil
-	}
 	if !m.previewVisible() {
-		m.sessionPollThreadID = 0
+		m.releaseSessionPoll()
 		return nil
 	}
-	return sessionTickCmd(sessionTickInterval)
+	if m.sessionTickPending || !m.anySessionActive() {
+		return nil
+	}
+	m.sessionTickPending = true
+	return sessionTickCmd(m.sessionPollThreadID, sessionTickInterval)
 }
 
 func (m *model) sessionForCursor() (store.Session, bool) {
