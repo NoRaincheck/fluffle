@@ -136,6 +136,8 @@ Pure function, no dependencies. Everything downstream depends on its exact outpu
 - Consumes: nothing.
 - Produces: `func Parse(content string) (names []string, request string)`. `names` is deduplicated and order-preserving; an empty result is `nil`. `request` is the content after the last mention, trimmed, and is `""` when there is none.
 
+  When there is no leading mention the whole content is **not** returned as `request` — both results are empty. A message that merely mentions an agent in prose has no request text, and `request` means "the instruction extracted from a mention", not "the message body".
+
 - [ ] **Step 1: Write the failing test**
 
 Create `internal/mentions/mentions_test.go`:
@@ -217,9 +219,8 @@ package mentions
 
 import "strings"
 
-func Parse(content string) ([]string, string) {
+func Parse(content string) (names []string, request string) {
 	rest := content
-	var names []string
 	seen := map[string]bool{}
 	for {
 		trimmed := strings.TrimLeft(rest, " \t\n\r")
@@ -240,6 +241,9 @@ func Parse(content string) ([]string, string) {
 			names = append(names, name)
 		}
 		rest = body[end:]
+	}
+	if len(names) == 0 {
+		return nil, ""
 	}
 	return names, strings.TrimSpace(rest)
 }
