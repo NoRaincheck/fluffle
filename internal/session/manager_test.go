@@ -27,6 +27,7 @@ type fakeRunner struct {
 	exit        int
 	err         error
 	delay       time.Duration
+	unwindDelay time.Duration
 	onStart     func()
 }
 
@@ -65,6 +66,9 @@ func (f *fakeRunner) Run(ctx context.Context, req runner.Request) (runner.Result
 		select {
 		case <-time.After(f.delay):
 		case <-ctx.Done():
+			if f.unwindDelay > 0 {
+				time.Sleep(f.unwindDelay)
+			}
 			return runner.Result{}, ctx.Err()
 		}
 	}
@@ -625,6 +629,18 @@ func splitRunningAndQueued(t *testing.T, s *store.Store, thID int64) (running, q
 	return nil, nil
 }
 
+func waitForCalls(t *testing.T, fr *fakeRunner, want int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if fr.callCount() >= want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("runner calls = %d, want at least %d", fr.callCount(), want)
+}
+
 func TestCancelQueuedSessionNeverRunsIt(t *testing.T) {
 	fr := &fakeRunner{delay: 30 * time.Second}
 	s, m, thID, _ := harness(t, probeCfg, fr)
@@ -634,6 +650,7 @@ func TestCancelQueuedSessionNeverRunsIt(t *testing.T) {
 		m.Start(thID, id, []string{"probe"})
 	}
 	running, queued := splitRunningAndQueued(t, s, thID)
+	waitForCalls(t, fr, MaxConcurrentSessions)
 	callsBefore := fr.callCount()
 
 	if err := m.Cancel(queued[0]); err != nil {
@@ -658,6 +675,70 @@ func TestCancelQueuedSessionNeverRunsIt(t *testing.T) {
 	if got.StartedAt != nil {
 		t.Fatalf("started_at = %q, want NULL for a session that never ran", *got.StartedAt)
 	}
+}
+
+func TestConcurrentShutdownIsABarrierForEveryCaller(t *testing.T) {
+	started := make(chan struct{})
+	var startedOnce sync.Once
+	fr := &fakeRunner{
+		delay:       30 * time.Second,
+		unwindDelay: 150 * time.Millisecond,
+		onStart:     func() { startedOnce.Do(func() { close(started) }) },
+	}
+	s, m, thID, _ := harness(t, probeCfg, fr)
+	const sessions = 3
+	for i := 0; i < sessions; i++ {
+		seq, _ := s.AppendMessage(thID, "alice", "human", "user", "@probe hi")
+		id, _ := s.MessageIDBySeq(thID, seq)
+		m.Start(thID, id, []string{"probe"})
+	}
+	<-started
+	waitForRunning(t, s, thID, sessions)
+
+	const callers = 4
+	observed := make(chan []store.Session, callers)
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			m.Shutdown()
+			var nonTerminal []store.Session
+			list, _ := s.ListSessions(thID)
+			for _, sess := range list {
+				if sess.Status != store.SessionCanceled {
+					nonTerminal = append(nonTerminal, sess)
+				}
+			}
+			observed <- nonTerminal
+		}()
+	}
+	wg.Wait()
+	close(observed)
+	for nonTerminal := range observed {
+		if len(nonTerminal) > 0 {
+			t.Fatalf("a Shutdown caller observed non-terminal sessions after it returned: %+v", nonTerminal)
+		}
+	}
+}
+
+func waitForRunning(t *testing.T, s *store.Store, thID int64, want int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		running := 0
+		list, _ := s.ListSessions(thID)
+		for _, sess := range list {
+			if sess.Status == store.SessionRunning {
+				running++
+			}
+		}
+		if running == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("running sessions never reached %d", want)
 }
 
 func TestCancelUnknownIsNotFound(t *testing.T) {

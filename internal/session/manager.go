@@ -34,10 +34,11 @@ type Manager struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	mu      sync.Mutex
-	running map[int64]context.CancelFunc
-	queued  map[int64]bool
-	closed  bool
+	mu           sync.Mutex
+	running      map[int64]context.CancelFunc
+	queued       map[int64]bool
+	closed       bool
+	shutdownOnce sync.Once
 }
 
 func NewManager(s *store.Store, agents *agentcfg.Loader, r runner.Runner) *Manager {
@@ -246,25 +247,26 @@ func (m *Manager) Reconcile() error {
 	return err
 }
 
+// Shutdown refuses new work, cancels every session, and blocks until every
+// session row is terminal. It must not be called from a session goroutine:
+// the join would then be waiting on the caller's own dispatch.
 func (m *Manager) Shutdown() {
-	m.mu.Lock()
-	if m.closed {
+	m.shutdownOnce.Do(func() {
+		m.mu.Lock()
+		m.closed = true
+		queued := make([]int64, 0, len(m.queued))
+		for id := range m.queued {
+			queued = append(queued, id)
+		}
+		m.queued = map[int64]bool{}
 		m.mu.Unlock()
-		return
-	}
-	m.closed = true
-	queued := make([]int64, 0, len(m.queued))
-	for id := range m.queued {
-		queued = append(queued, id)
-	}
-	m.queued = map[int64]bool{}
-	m.mu.Unlock()
 
-	m.cancel()
-	m.wg.Wait()
-	for _, id := range queued {
-		m.store.FinishSession(id, store.SessionCanceled, nil, stringPtr("daemon shut down before start"), nowRFC3339())
-	}
+		m.cancel()
+		m.wg.Wait()
+		for _, id := range queued {
+			m.store.FinishSession(id, store.SessionCanceled, nil, stringPtr("daemon shut down before start"), nowRFC3339())
+		}
+	})
 }
 
 func (m *Manager) Cancel(id int64) error {
