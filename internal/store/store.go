@@ -28,7 +28,6 @@ CREATE TABLE IF NOT EXISTS channels(
   repo_head_branch TEXT,
   is_orphaned INTEGER NOT NULL DEFAULT 0 CHECK(is_orphaned IN (0,1)),
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-  archived_at TEXT,
   CHECK ((is_orphaned = 1 AND repo_abs_path IS NULL)
       OR (is_orphaned = 0 AND repo_abs_path IS NOT NULL)),
   UNIQUE(name, repo_abs_path)
@@ -38,8 +37,7 @@ CREATE TABLE IF NOT EXISTS threads(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   channel_id INTEGER NOT NULL REFERENCES channels(id),
   title TEXT NOT NULL CHECK(length(trim(title)) > 0),
-  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-  archived_at TEXT
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_threads_channel ON threads(channel_id, id);
 CREATE TABLE IF NOT EXISTS messages(
@@ -102,7 +100,6 @@ type Channel struct {
 	ID                                                                    int64
 	Name, RepoAbsPath, RepoRemote, RepoHeadSHA, RepoHeadBranch, CreatedAt string
 	IsOrphaned                                                            bool
-	ArchivedAt                                                            *string
 }
 
 func Open(path string) (*Store, error) {
@@ -118,11 +115,54 @@ func Open(path string) (*Store, error) {
 	return &Store{db: db}, nil
 }
 
+func hasColumn(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var dfltValue sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dfltValue, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
+func dropArchivedAtColumns(db *sql.DB) error {
+	for _, table := range []string{"channels", "threads"} {
+		present, err := hasColumn(db, table, "archived_at")
+		if err != nil {
+			return err
+		}
+		if !present {
+			continue
+		}
+		if _, err := db.Exec("ALTER TABLE " + table + " DROP COLUMN archived_at"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applySchema(db *sql.DB, schema string) error {
+	if _, err := db.Exec(schema); err != nil {
+		return err
+	}
+	return dropArchivedAtColumns(db)
+}
+
 func migrate(db *sql.DB, schema string) error {
 	rows, err := db.Query(`PRAGMA table_info(messages)`)
 	if err != nil {
-		_, err := db.Exec(schema)
-		return err
+		return applySchema(db, schema)
 	}
 	found := false
 	for rows.Next() {
@@ -141,14 +181,12 @@ func migrate(db *sql.DB, schema string) error {
 	}
 	rows.Close()
 	if found {
-		_, err := db.Exec(schema)
-		return err
+		return applySchema(db, schema)
 	}
 	for _, tbl := range []string{"reactions", "messages", "threads", "channels"} {
 		db.Exec("DROP TABLE IF EXISTS " + tbl)
 	}
-	_, err = db.Exec(schema)
-	return err
+	return applySchema(db, schema)
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -182,14 +220,18 @@ func (s *Store) CreateChannel(name, repoAbsPath, repoRemote, repoHeadSHA, repoHe
 }
 
 func (s *Store) ListChannels(repoAbsPath string, includeOrphaned bool) ([]Channel, error) {
-	q := `SELECT id, name, COALESCE(repo_abs_path,''), COALESCE(repo_remote,''), COALESCE(repo_head_sha,''), COALESCE(repo_head_branch,''), is_orphaned, COALESCE(created_at,''), archived_at FROM channels WHERE archived_at IS NULL`
-	args := []any{}
+	q := `SELECT id, name, COALESCE(repo_abs_path,''), COALESCE(repo_remote,''), COALESCE(repo_head_sha,''), COALESCE(repo_head_branch,''), is_orphaned, COALESCE(created_at,'') FROM channels`
+	var conds []string
+	var args []any
 	if repoAbsPath != "" {
-		q += ` AND repo_abs_path = ?`
+		conds = append(conds, `repo_abs_path = ?`)
 		args = append(args, repoAbsPath)
 	}
 	if !includeOrphaned {
-		q += ` AND is_orphaned = 0`
+		conds = append(conds, `is_orphaned = 0`)
+	}
+	if len(conds) > 0 {
+		q += ` WHERE ` + strings.Join(conds, ` AND `)
 	}
 	q += ` ORDER BY id`
 	rows, err := s.db.Query(q, args...)
@@ -201,7 +243,7 @@ func (s *Store) ListChannels(repoAbsPath string, includeOrphaned bool) ([]Channe
 	for rows.Next() {
 		var c Channel
 		var isOrphan int
-		if err := rows.Scan(&c.ID, &c.Name, &c.RepoAbsPath, &c.RepoRemote, &c.RepoHeadSHA, &c.RepoHeadBranch, &isOrphan, &c.CreatedAt, &c.ArchivedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.Name, &c.RepoAbsPath, &c.RepoRemote, &c.RepoHeadSHA, &c.RepoHeadBranch, &isOrphan, &c.CreatedAt); err != nil {
 			return nil, err
 		}
 		c.IsOrphaned = isOrphan == 1
@@ -220,7 +262,6 @@ func nullIfEmpty(v string) any {
 type Thread struct {
 	ID, ChannelID    int64
 	Title, CreatedAt string
-	ArchivedAt       *string
 }
 
 type Message struct {
@@ -272,7 +313,7 @@ func (s *Store) CreateThread(channelID int64, title string) (int64, error) {
 		return 0, invalid("title required")
 	}
 	var n int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM channels WHERE id = ? AND archived_at IS NULL`, channelID).Scan(&n); err != nil {
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM channels WHERE id = ?`, channelID).Scan(&n); err != nil {
 		return 0, err
 	}
 	if n == 0 {
@@ -286,7 +327,7 @@ func (s *Store) CreateThread(channelID int64, title string) (int64, error) {
 }
 
 func (s *Store) ListThreads(channelID int64) ([]Thread, error) {
-	rows, err := s.db.Query(`SELECT id, channel_id, title, COALESCE(created_at,''), archived_at FROM threads WHERE channel_id = ? AND archived_at IS NULL ORDER BY id`, channelID)
+	rows, err := s.db.Query(`SELECT id, channel_id, title, COALESCE(created_at,'') FROM threads WHERE channel_id = ? ORDER BY id`, channelID)
 	if err != nil {
 		return nil, err
 	}
@@ -294,7 +335,7 @@ func (s *Store) ListThreads(channelID int64) ([]Thread, error) {
 	var out []Thread
 	for rows.Next() {
 		var th Thread
-		if err := rows.Scan(&th.ID, &th.ChannelID, &th.Title, &th.CreatedAt, &th.ArchivedAt); err != nil {
+		if err := rows.Scan(&th.ID, &th.ChannelID, &th.Title, &th.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, th)
@@ -366,7 +407,7 @@ func appendMessageTx(tx *sql.Tx, threadID int64, name, authorType, role, content
 		return 0, 0, err
 	}
 	var n int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM threads WHERE id = ? AND archived_at IS NULL`, threadID).Scan(&n); err != nil {
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM threads WHERE id = ?`, threadID).Scan(&n); err != nil {
 		return 0, 0, err
 	}
 	if n == 0 {
@@ -526,7 +567,6 @@ func (s *Store) ListInbox(limit int) ([]InboxMessage, error) {
           FROM messages m
           JOIN threads t ON t.id = m.thread_id
           JOIN channels c ON c.id = t.channel_id
-          WHERE c.archived_at IS NULL AND t.archived_at IS NULL
           ORDER BY m.created_at DESC, m.id DESC LIMIT ?`
 	rows, err := s.db.Query(q, limit)
 	if err != nil {
@@ -755,7 +795,7 @@ func validateAppendEvent(event AppendEvent) error {
 
 func nextThreadSeqTx(tx *sql.Tx, threadID int64) (int64, error) {
 	var n int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM threads WHERE id = ? AND archived_at IS NULL`, threadID).Scan(&n); err != nil {
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM threads WHERE id = ?`, threadID).Scan(&n); err != nil {
 		return 0, err
 	}
 	if n == 0 {

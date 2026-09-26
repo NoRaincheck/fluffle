@@ -237,7 +237,7 @@ func (s *Store) ThreadContext(threadID int64) (ThreadContext, error) {
 	var tc ThreadContext
 	err := s.db.QueryRow(`SELECT t.id, t.title, c.id, c.name, c.repo_abs_path
 		FROM threads t JOIN channels c ON c.id = t.channel_id
-		WHERE t.id = ? AND t.archived_at IS NULL AND c.archived_at IS NULL`, threadID).
+		WHERE t.id = ?`, threadID).
 		Scan(&tc.ThreadID, &tc.ThreadTitle, &tc.ChannelID, &tc.ChannelName, &tc.RepoAbsPath)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ThreadContext{}, ErrNotFound
