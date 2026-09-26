@@ -133,7 +133,7 @@ func harness(t *testing.T, cfg string, r runner.Runner) (*store.Store, *Manager,
 	seq, _ := s.AppendMessage(thID, "alice", "human", "user", "@probe do xyz")
 	msgID, _ := s.MessageIDBySeq(thID, seq)
 	m := NewManager(s, agentcfg.NewLoader(global), r)
-	t.Cleanup(m.Shutdown)
+	t.Cleanup(m.ShutdownAndWait)
 	return s, m, thID, msgID
 }
 
@@ -332,7 +332,7 @@ func TestOrphanChannelSessionHasNullCwd(t *testing.T) {
 	seq, _ := s.AppendMessage(thID, "alice", "human", "user", "@probe hi")
 	msgID, _ := s.MessageIDBySeq(thID, seq)
 	m := NewManager(s, agentcfg.NewLoader(global), &fakeRunner{stdout: "x"})
-	t.Cleanup(m.Shutdown)
+	t.Cleanup(m.ShutdownAndWait)
 	m.Start(thID, msgID, []string{"probe"})
 	got := waitSession(t, s, onlySession(t, s, thID).ID, 10*time.Second)
 	if got.Cwd != nil {
@@ -569,8 +569,8 @@ func TestShutdownCancelsRunningAndQueuedSessions(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("agent never started")
 	}
-	m.Shutdown()
-	m.Shutdown()
+	m.ShutdownAndWait()
+	m.ShutdownAndWait()
 	list, _ := s.ListSessions(thID)
 	if len(list) != MaxConcurrentSessions+2 {
 		t.Fatalf("sessions = %d, want %d", len(list), MaxConcurrentSessions+2)
@@ -677,7 +677,7 @@ func TestCancelQueuedSessionNeverRunsIt(t *testing.T) {
 	}
 }
 
-func TestConcurrentShutdownIsABarrierForEveryCaller(t *testing.T) {
+func TestConcurrentShutdownAndWaitIsABarrierForEveryCaller(t *testing.T) {
 	started := make(chan struct{})
 	var startedOnce sync.Once
 	fr := &fakeRunner{
@@ -702,7 +702,7 @@ func TestConcurrentShutdownIsABarrierForEveryCaller(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			m.Shutdown()
+			m.ShutdownAndWait()
 			var nonTerminal []store.Session
 			list, _ := s.ListSessions(thID)
 			for _, sess := range list {
@@ -739,6 +739,65 @@ func waitForRunning(t *testing.T, s *store.Store, thID int64, want int) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("running sessions never reached %d", want)
+}
+
+func TestShutdownFromSessionGoroutineDoesNotHang(t *testing.T) {
+	fr := &fakeRunner{delay: 30 * time.Second}
+	s, m, thID, msgID := harness(t, probeCfg, fr)
+	innerDone := make(chan struct{})
+	fr.mu.Lock()
+	fr.onStart = func() {
+		defer close(innerDone)
+		m.Shutdown()
+	}
+	fr.mu.Unlock()
+
+	m.Start(thID, msgID, []string{"probe"})
+	select {
+	case <-innerDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Shutdown from a session goroutine did not return")
+	}
+	got := waitSession(t, s, onlySession(t, s, thID).ID, 10*time.Second)
+	if got.Status != store.SessionCanceled {
+		t.Fatalf("status = %q, want canceled", got.Status)
+	}
+}
+
+func TestShutdownAndWaitAfterShutdownStillBarriers(t *testing.T) {
+	started := make(chan struct{})
+	var startedOnce sync.Once
+	fr := &fakeRunner{
+		delay:       30 * time.Second,
+		unwindDelay: 150 * time.Millisecond,
+		onStart:     func() { startedOnce.Do(func() { close(started) }) },
+	}
+	s, m, thID, _ := harness(t, probeCfg, fr)
+	seq, _ := s.AppendMessage(thID, "alice", "human", "user", "@probe hi")
+	msgID, _ := s.MessageIDBySeq(thID, seq)
+	m.Start(thID, msgID, []string{"probe"})
+	<-started
+	waitForRunning(t, s, thID, 1)
+
+	m.Shutdown()
+	m.ShutdownAndWait()
+	assertAllCanceled(t, s, thID)
+	m.ShutdownAndWait()
+	m.Shutdown()
+	assertAllCanceled(t, s, thID)
+}
+
+func assertAllCanceled(t *testing.T, s *store.Store, thID int64) {
+	t.Helper()
+	list, _ := s.ListSessions(thID)
+	if len(list) == 0 {
+		t.Fatal("no sessions")
+	}
+	for _, sess := range list {
+		if sess.Status != store.SessionCanceled {
+			t.Fatalf("session %d status = %q, want canceled the moment the barrier returns", sess.ID, sess.Status)
+		}
+	}
 }
 
 func TestCancelUnknownIsNotFound(t *testing.T) {

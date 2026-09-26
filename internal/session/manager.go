@@ -247,9 +247,9 @@ func (m *Manager) Reconcile() error {
 	return err
 }
 
-// Shutdown refuses new work, cancels every session, and blocks until every
-// session row is terminal. It must not be called from a session goroutine:
-// the join would then be waiting on the caller's own dispatch.
+// Shutdown refuses new work, cancels running sessions, and marks still-queued
+// sessions canceled without waiting for them to unwind. It never waits on a
+// session goroutine, so it is safe to call from any goroutine.
 func (m *Manager) Shutdown() {
 	m.shutdownOnce.Do(func() {
 		m.mu.Lock()
@@ -262,11 +262,18 @@ func (m *Manager) Shutdown() {
 		m.mu.Unlock()
 
 		m.cancel()
-		m.wg.Wait()
 		for _, id := range queued {
 			m.store.FinishSession(id, store.SessionCanceled, nil, stringPtr("daemon shut down before start"), nowRFC3339())
 		}
 	})
+}
+
+// ShutdownAndWait is Shutdown followed by a barrier: it does not return until
+// every session row is terminal, for this caller and for any concurrent one.
+// It must not be called from a session goroutine, which would wait on itself.
+func (m *Manager) ShutdownAndWait() {
+	m.Shutdown()
+	m.wg.Wait()
 }
 
 func (m *Manager) Cancel(id int64) error {
