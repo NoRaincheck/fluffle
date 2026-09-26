@@ -35,3 +35,5 @@ go.work.sum
 
 # binary
 /flf
+# superpowers sdd scratch
+.superpowers/

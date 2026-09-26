@@ -4445,13 +4445,7 @@ func TestE2E_AgentSessionCmdMissingIsExitOne(t *testing.T) {
 	t.Cleanup(func() { runCLI(t, env, bin, "daemon", "stop") })
 	waitForDaemonReady(t, home, 10*time.Second)
 
-	res := runCLIResult(t, env, bin, "", "agent", "session", "--id", "9999")
-	if res.code != 1 {
-		t.Fatalf("exit = %d, want 1; stderr = %s", res.code, res.stderr)
-	}
-	if !strings.Contains(res.stderr, "SESSION_NOT_FOUND") {
-		t.Fatalf("stderr = %q, want the SESSION_NOT_FOUND envelope", res.stderr)
-	}
+	assertE2ECLIErrorResult(t, runCLIResult(t, env, bin, "", "agent", "session", "--id", "9999"), "SESSION_NOT_FOUND")
 }
 
 func TestE2E_AgentSessionCmdRequiresID(t *testing.T) {
@@ -4461,91 +4455,13 @@ func TestE2E_AgentSessionCmdRequiresID(t *testing.T) {
 	}
 	bin := buildTestBinary(t, t.TempDir())
 	env := []string{"FLUFFLE_HOME=" + home}
-	res := runCLIResult(t, env, bin, "", "agent", "session")
-	if res.code != 1 {
-		t.Fatalf("exit = %d, want 1; stderr = %s", res.code, res.stderr)
-	}
-	if !strings.Contains(res.stderr, "BAD_ARGS") {
-		t.Fatalf("stderr = %q, want BAD_ARGS", res.stderr)
-	}
+	assertE2ECLIErrorResult(t, runCLIResult(t, env, bin, "", "agent", "session"), "BAD_ARGS")
 }
 ```
 
-Add these helpers to `cmd/flf/e2e_test.go`. `runCLI`, `runCLIResult`, `buildTestBinary`, `gitInit`, and `waitForDaemonReady` already exist there. `waitForDaemonReady` already returns the port, so use its return value rather than a separate `daemonPort`:
+Use only the helpers that already exist in `cmd/flf/e2e_test.go` — `runCLI(t, env, bin, args...) string`, `runCLIResult`, `assertE2ECLIErrorResult`, `buildTestBinary`, `gitInit`, `waitForDaemonReady`, and `waitFor`. Do not add `runFlf`, `mustJSONField`, or any HTTP-client helper; none are needed.
 
-```go
-func jsonID(t *testing.T, out string) string {
-	t.Helper()
-	var payload map[string]any
-	if err := json.Unmarshal([]byte(out), &payload); err != nil {
-		t.Fatalf("unmarshal %q: %v", out, err)
-	}
-	v, ok := payload["id"]
-	if !ok {
-		t.Fatalf("no id in %q", out)
-	}
-	return fmt.Sprintf("%v", v)
-}
-
-func daemonClient(t *testing.T, base string) *http.Client {
-	t.Helper()
-	return &http.Client{Timeout: 10 * time.Second}
-}
-
-func postMessageOverHTTP(t *testing.T, base string, threadID int64, name, role, content string) int64 {
-	t.Helper()
-	body := fmt.Sprintf(`{"name":%q,"role":%q,"content":%q}`, name, role, content)
-	resp, err := daemonClient(t, base).Post(fmt.Sprintf("%s/v1/threads/%d/messages", base, threadID), "application/json", strings.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("append status = %d", resp.StatusCode)
-	}
-	var ack struct {
-		Seq int64 `json:"seq"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&ack); err != nil {
-		t.Fatal(err)
-	}
-	return ack.Seq
-}
-
-func messageIDOverHTTP(t *testing.T, base string, threadID, seq int64) int64 {
-	t.Helper()
-	resp, err := daemonClient(t, base).Get(fmt.Sprintf("%s/v1/threads/%d/messages", base, threadID))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	var messages []store.Message
-	if err := json.NewDecoder(resp.Body).Decode(&messages); err != nil {
-		t.Fatal(err)
-	}
-	for _, m := range messages {
-		if m.Seq == seq {
-			return m.ID
-		}
-	}
-	t.Fatalf("no message with seq %d", seq)
-	return 0
-}
-
-func createSessionOverHTTP(t *testing.T, base string, threadID, msgID int64, agentName string) int64 {
-	t.Helper()
-	db, err := store.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	_ = db
-	t.Skip("session rows are created by the daemon; drive this case through a mention instead")
-	return 0
-}
-```
-
-`createSessionOverHTTP` cannot work: there is no HTTP endpoint that creates a session, because creation is a side effect of append. **Replace the `TestE2E_AgentSessionCmd` setup** with one that drives a real mention instead, using the fake agent script from Task 11:
+There is no HTTP endpoint that creates a session, because creation is a side effect of append. So this test must drive a real `@mention` with a fake agent script rather than seeding rows directly:
 
 ```go
 	binDir := filepath.Dir(bin)
@@ -4568,7 +4484,19 @@ func createSessionOverHTTP(t *testing.T, base string, threadID, msgID int64, age
 
 With that replacement, delete `postMessageOverHTTP`, `messageIDOverHTTP`, `createSessionOverHTTP`, `appendSessionEventOverHTTP`, `daemonClient`, and `jsonID` — none of them are needed, and `jsonID` is unused because `channelID` and `threadID` are only used as command arguments. This is the correct shape: a CLI test should exercise the CLI, and the session comes into existence the same way it does in production.
 
-Note that `runCLI`'s existing signature is `runCLI(t *testing.T, env []string, bin string, args ...string) string` and `runCLIResult` returns a struct with `.code` and `.stderr`. Confirm those field names against `cmd/flf/e2e_test.go:166-200` before relying on them; adjust the assertions if they differ.
+Verified helper signatures in `cmd/flf/e2e_test.go`:
+
+```go
+func runCLI(t *testing.T, env []string, bin string, args ...string) string                  // line 166; CombinedOutput, t.Logf on failure, never fails the test
+func runCLIResult(t *testing.T, env []string, bin, input string, args ...string) cliResult // line 183
+func assertE2ECLIErrorResult(t *testing.T, result cliResult, wantCode string)              // line 205; asserts exit 1, empty stdout, and the {"code","message"} envelope
+func buildTestBinary(t *testing.T, dir string) string                                     // line 53
+func gitInit(t *testing.T, dir string)                                                    // line 68
+func waitForDaemonReady(t *testing.T, home string, timeout time.Duration) int             // line 137; returns the port
+type cliResult struct{ stdout, stderr string; exitCode int }                             // line 177
+```
+
+Use `assertE2ECLIErrorResult` for every error-path assertion rather than hand-rolling the exit-code and envelope checks. It is the existing convention. Note `runCLI` merges stderr into its return value and only logs failures, so use it for success-path output parsing and `runCLIResult` whenever the exit code matters.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -5341,36 +5269,35 @@ func TestE2E_AgentMentionRunsAgentAndStoresSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	bin := buildTestBinary(t, t.TempDir())
-	binDir := filepath.Dir(bin)
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	env := []string{"FLUFFLE_HOME=" + home}
 
-	probe := filepath.Join(binDir, "probe-agent")
+	probe := filepath.Join(filepath.Dir(bin), "probe-agent")
 	script := "#!/bin/sh\ncat > /dev/null\nprintf 'the answer'\n"
 	if err := os.WriteFile(probe, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-
-	repo := t.TempDir()
-	gitInit(t, repo)
 	cfg := "[[agents]]\nname=\"probe\"\ncommand=\"" + probe + "\"\nreply=\"stdout\"\ntimeout_secs=20\n"
 	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	runFlf(t, home, bin, "daemon", "start", "--background")
-	t.Cleanup(func() { runFlf(t, home, bin, "daemon", "stop") })
+	repo := t.TempDir()
+	gitInit(t, repo)
 
-	channelID := mustJSONField(t, runFlf(t, home, bin, "channel", "create", "--name", "eng", "--repo", repo, "--json"), "id")
-	threadID := mustJSONField(t, runFlf(t, home, bin, "thread", "new", "--channel", "eng", "--repo", repo, "--title", "review", "--json"), "id")
+	runCLI(t, env, bin, "daemon", "start", "--background")
+	t.Cleanup(func() { runCLI(t, env, bin, "daemon", "stop") })
+	waitForDaemonReady(t, home, 10*time.Second)
 
-	runFlf(t, home, bin, "message", "send", "--thread", threadID, "--text", "@probe what is the status?", "--as", "alice", "--json")
+	threadID := jsonIDField(t, runCLI(t, env, bin, "channel", "create", "--name", "eng", "--repo", repo, "--json"), "id")
+	threadID = jsonIDField(t, runCLI(t, env, bin, "thread", "new", "--channel", "eng", "--repo", repo, "--title", "review", "--json"), "id")
 
-	replySeq := int64(0)
+	runCLI(t, env, bin, "message", "send", "--thread", threadID, "--text", "@probe what is the status?", "--as", "alice", "--json")
+
+	var replySeq int64
 	ok := waitFor(t, 40*time.Second, func() bool {
-		out := runFlf(t, home, bin, "agent", "read", "--thread", threadID, "--json")
-		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		out := runCLI(t, env, bin, "agent", "read", "--thread", threadID, "--json")
+		for _, line := range strings.Split(out, "\n") {
+			line = strings.TrimSpace(line)
 			if line == "" {
 				continue
 			}
@@ -5401,7 +5328,7 @@ func TestE2E_AgentMentionRunsAgentAndStoresSession(t *testing.T) {
 		t.Fatalf("reply seq = %d, want greater than the trigger seq", replySeq)
 	}
 
-	sessionOut := runFlf(t, home, bin, "agent", "session", "--id", "1", "--json")
+	sessionOut := runCLI(t, env, bin, "agent", "session", "--id", "1", "--json")
 	var payload struct {
 		Session store.Session         `json:"session"`
 		Events  []store.SessionEvent `json:"events"`
@@ -5434,65 +5361,56 @@ func TestE2E_AgentMentionRunsAgentAndStoresSession(t *testing.T) {
 		}
 	}
 
-	listOut := runFlf(t, home, bin, "agent", "session", "--id", "1")
-	if !strings.Contains(listOut, "probe") || !strings.Contains(listOut, "the answer") {
-		t.Fatalf("human session output = %q", listOut)
+	human := runCLI(t, env, bin, "agent", "session", "--id", "1")
+	if !strings.Contains(human, "probe") || !strings.Contains(human, "the answer") {
+		t.Fatalf("human session output = %q", human)
 	}
 }
 
-func TestE2E_AgentMentionRequiresTheAgentBinaryToExist(t *testing.T) {
+func TestE2E_AgentMentionWithMissingBinaryFailsVisibly(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("FLUFFLE_HOME", home)
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	bin := buildTestBinary(t, t.TempDir())
+	env := []string{"FLUFFLE_HOME=" + home}
+
 	repo := t.TempDir()
 	gitInit(t, repo)
 	cfg := "[[agents]]\nname=\"ghost\"\ncommand=\"/definitely/not/here\"\nreply=\"stdout\"\ntimeout_secs=5\n"
 	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	runFlf(t, home, bin, "daemon", "start", "--background")
-	t.Cleanup(func() { runFlf(t, home, bin, "daemon", "stop") })
 
-	channelID := mustJSONField(t, runFlf(t, home, bin, "channel", "create", "--name", "eng", "--repo", repo, "--json"), "id")
-	threadID := mustJSONField(t, runFlf(t, home, bin, "thread", "new", "--channel", "eng", "--repo", repo, "--title", "t", "--json"), "id")
-	runFlf(t, home, bin, "message", "send", "--thread", threadID, "--text", "@ghost hello", "--as", "alice", "--json")
+	runCLI(t, env, bin, "daemon", "start", "--background")
+	t.Cleanup(func() { runCLI(t, env, bin, "daemon", "stop") })
+	waitForDaemonReady(t, home, 10*time.Second)
+
+	runCLI(t, env, bin, "channel", "create", "--name", "eng", "--repo", repo, "--json")
+	threadID := jsonIDField(t, runCLI(t, env, bin, "thread", "new", "--channel", "eng", "--repo", repo, "--title", "t", "--json"), "id")
+	runCLI(t, env, bin, "message", "send", "--thread", threadID, "--text", "@ghost hello", "--as", "alice", "--json")
 
 	ok := waitFor(t, 30*time.Second, func() bool {
 		var payload struct {
 			Session store.Session `json:"session"`
 		}
-		out := runFlf(t, home, bin, "agent", "session", "--id", "1", "--json")
+		out := runCLI(t, env, bin, "agent", "session", "--id", "1", "--json")
 		if err := json.Unmarshal([]byte(out), &payload); err != nil {
 			return false
 		}
 		return payload.Session.Status == store.SessionFailed && payload.Session.Error != nil
 	})
 	if !ok {
-		t.Fatal("a missing agent binary must fail the session visibly, not silently")
+		t.Fatalf("a missing agent binary must fail the session visibly; got %s", runCLI(t, env, bin, "agent", "session", "--id", "1", "--json"))
 	}
 }
 ```
 
-The helpers `runFlf`, `mustJSONField`, and `waitFor` may already exist in `e2e_test.go` under those or similar names. `waitFor` does exist at line 25. Reuse what exists; add only what is missing:
+Add this one small helper to `cmd/flf/e2e_test.go` for reading an id out of a `--json` response. It is the only helper these tests need beyond what already exists:
 
 ```go
-func runFlf(t *testing.T, home, bin string, args ...string) string {
-	t.Helper()
-	full := append([]string{}, args...)
-	full = append(full, "--json")
-	cmd := exec.Command(bin, full...)
-	cmd.Env = append(os.Environ(), "FLUFFLE_HOME="+home)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("flf %v: %v\n%s", args, err, out)
-	}
-	return string(out)
-}
-
-func mustJSONField(t *testing.T, out, field string) string {
+func jsonIDField(t *testing.T, out, field string) string {
 	t.Helper()
 	var payload map[string]any
 	if err := json.Unmarshal([]byte(out), &payload); err != nil {
@@ -5506,7 +5424,7 @@ func mustJSONField(t *testing.T, out, field string) string {
 }
 ```
 
-Note that `--json` is appended unconditionally, which will break commands that do not accept it. If `runFlf` in this file already handles per-command flags, use that instead and pass `--json` explicitly at each call site.
+`runCLI` uses `CombinedOutput` and only `t.Logf`s a non-zero exit, so it never fails the test on a command error. Every `--json` call above is a success-path call whose output is parsed, which is exactly the case `runCLI` is shaped for. If any of them starts failing, the JSON unmarshal fails loudly rather than silently passing.
 
 - [ ] **Step 2: Run the e2e tests to verify they fail, then pass**
 
