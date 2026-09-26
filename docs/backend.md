@@ -125,6 +125,8 @@ Orphaned channels are first-class. `channel create --orphaned --name ANYTHING` r
 
 A human message whose content opens with one or more `@name` mentions starts one session per resolvable name. The daemon owns the subprocess; there is no daemon-side agent loop and no agent framework SDK.
 
+The sections below are the reference: what the config, the endpoints, and the prompt look like. Why the feature is shaped this way, what it borrows from roborev and buzz, and what is deliberately out of scope are in [agent-sessions.md](agent-sessions.md).
+
 ### Configuration
 
 Agent definitions are TOML, not JSON. Two files are read: `~/.fluffle/config.toml` and, for a repo-anchored thread, `<repo>/.flf.toml`. Each file is a list of `[[agents]]` tables:
