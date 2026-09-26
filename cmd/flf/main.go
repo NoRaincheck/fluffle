@@ -548,10 +548,6 @@ func resolveChannelID(base, abs, name string, orphaned bool) (int64, int) {
 	return 0, fail("CHANNEL_NOT_FOUND", name)
 }
 
-func resolveChannelIDLegacy(base, abs, name string) (int64, int) {
-	return resolveChannelID(base, abs, name, false)
-}
-
 func threadListCmd(args []string) int {
 	fs := newFlagSet("thread list")
 	channel := fs.String("channel", "", "channel name")

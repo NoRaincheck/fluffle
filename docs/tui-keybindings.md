@@ -11,7 +11,9 @@ All key bindings for the Fluffle TUI (`flf tui`). Context-sensitive: some keys o
 | `Enter` | View details: open fullscreen scrollable thread | Send message |
 | `r` | Reply: open compose | — |
 | `c` | **not bound** — listed from an earlier design, asserts nothing | — |
-| `n` | **not bound** — listed from an earlier design, asserts nothing | — |
+| `n` | New thread in the current channel | Send title, create thread |
+| `C` | New channel, anchored to the working directory | Send name, create channel |
+| `e` | React to the message under the cursor (thread detail only) | Send emoji, add reaction |
 | `l` / `L` | Toggle inbox layout: compact ↔ full | — |
 | `p` | Toggle preview panel | — |
 | `s` | Preview the agent session for the selected message (preview pane must be visible) | — |
@@ -32,6 +34,8 @@ Fullscreen scrollable thread view. Entered via `Enter` from inbox. `Esc` returns
 | `↑` / `k` | Scroll up / move cursor up one message |
 | `↓` / `j` | Scroll down / move cursor down one message |
 | `r` | Reply: open compose with `threadID` + `parentID` |
+| `e` | React to the message under the cursor |
+| `n` | New thread in this thread's channel |
 | `Esc` | Return to inbox (preserves cursor position) |
 | `q` | Quit |
 | `Ctrl+C` | Quit TUI entirely |
@@ -53,7 +57,8 @@ Grouped table: one row per channel/thread, showing that group's most recent mess
 | `r` | Reply: open compose with `threadID` + `parentID` set from cursor position |
 | `c` | **not bound** |
 | `Enter` | Open detail view: fullscreen scrollable thread |
-| `n` | **not bound** |
+| `n` | New thread in the selected row's channel |
+| `C` | New channel, anchored to the working directory |
 | `v` | Toggle sort: latest-desc ↔ channel/thread + time desc |
 | `f` | Open filter (substring match on channel, then channel/thread) |
 | `l` / `L` | Toggle layout: compact ↔ full (switching to full turns the preview off) |
@@ -170,7 +175,7 @@ The representative is a projection of the cached inbox, which is refetched on st
 
 ## Compose Modal
 
-Centered overlay. Activated by `r` (`c` and `n` are not bound).
+Centered overlay. Activated by `r` (reply), `e` (react), `n` (new thread), and `C` (new channel). `c` remains unbound.
 
 | Key | Action |
 |-----|--------|

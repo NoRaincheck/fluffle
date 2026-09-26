@@ -85,13 +85,20 @@ func TestSimpleFlow(t *testing.T) {
 	m.cursor = 0
 	nm, _ = m.Update(keyRunes("n"))
 	m = toModel(nm)
-	if m.compose.IsActive() {
-		t.Fatalf("n should not open compose — reply-only")
+	if !m.compose.IsActive() {
+		t.Fatalf("n should open compose for a new thread in the selected channel")
 	}
+	if m.compose.state.mode != composeModeNewThread {
+		t.Fatalf("n compose mode = %v, want composeModeNewThread", m.compose.state.mode)
+	}
+	if m.compose.state.channelID != 1 {
+		t.Fatalf("n compose channelID = %d, want 1 (the channel under the cursor)", m.compose.state.channelID)
+	}
+	m.compose.Close()
 	nm, _ = m.Update(keyRunes("c"))
 	m = toModel(nm)
 	if m.compose.IsActive() {
-		t.Fatalf("c should not open compose — reply-only")
+		t.Fatalf("c should not open compose")
 	}
 	nm, _ = m.Update(keyType(tea.KeyEnter))
 	m = toModel(nm)
@@ -220,13 +227,17 @@ func TestInboxKeybindings(t *testing.T) {
 	nm, _ = m.Update(keyRunes("c"))
 	m = toModel(nm)
 	if m.compose.IsActive() {
-		t.Fatalf("c should not open compose — only r")
+		t.Fatalf("c should not open compose")
 	}
 	nm, _ = m.Update(keyRunes("n"))
 	m = toModel(nm)
-	if m.compose.IsActive() {
-		t.Fatalf("n should not open compose — only r")
+	if !m.compose.IsActive() {
+		t.Fatalf("n should open compose for a new thread in the open thread's channel")
 	}
+	if m.compose.state.mode != composeModeNewThread {
+		t.Fatalf("n compose mode = %v, want composeModeNewThread", m.compose.state.mode)
+	}
+	m.compose.Close()
 	nm, _ = m.Update(keyRunes("r"))
 	m = toModel(nm)
 	if !m.compose.IsActive() {

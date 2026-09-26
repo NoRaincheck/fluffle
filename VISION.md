@@ -113,5 +113,5 @@ These four questions were left open when this manifesto was written. Each is now
    ```
    `metadata` is accepted on input but never persisted, and is omitted from output when empty. A legacy `author` key is still accepted as an alias for `name`.
 
-4. **Orphaned Channel Lifecycle — permanently persistent, no TTL.** `--orphaned` sets `is_orphaned=1` and leaves `repo_abs_path` NULL; the channel name is then globally unique rather than unique per repo. Reaping is left to the human via manual archive. Note that archiving is not implemented yet: `archived_at` exists in the schema and is read by the list queries, but nothing writes it and no CLI command sets it.
+4. **Orphaned Channel Lifecycle — permanently persistent, no TTL.** `--orphaned` sets `is_orphaned=1` and leaves `repo_abs_path` NULL; the channel name is then globally unique rather than unique per repo. Reaping is left to the human via manual archive. Note that archiving is not implemented: `channels.archived_at` and `threads.archived_at` were removed from the schema after being found to be read by seven queries and written by none, so today there is no reaping mechanism at all.
 

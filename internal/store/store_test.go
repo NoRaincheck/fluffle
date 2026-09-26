@@ -130,44 +130,6 @@ func TestListInbox(t *testing.T) {
 	if msgs2[0].Content != "third" {
 		t.Fatalf("limit should return newest last when reversed to ASC, got %q", msgs2[0].Content)
 	}
-	chArchived, _ := s.CreateChannel("archived", "", "", "", "", true)
-	thArchived, _ := s.CreateThread(chArchived, "archived-th")
-	_, _ = s.AppendMessageAt(thArchived, "alice", "human", "user", "archived-msg", "2026-09-23T13:00:00Z")
-	if _, err := s.db.Exec(`UPDATE channels SET archived_at = ? WHERE id = ?`, "2026-09-23T13:01:00Z", chArchived); err != nil {
-		t.Fatal(err)
-	}
-	msgs3, _ := s.ListInbox(10)
-	for _, m := range msgs3 {
-		if m.Content == "archived-msg" {
-			t.Fatalf("archived channel message should be excluded: %+v", msgs3)
-		}
-	}
-	if len(msgs3) != 3 {
-		t.Fatalf("archived channel: want 3 got %d %+v", len(msgs3), msgs3)
-	}
-	chOk, _ := s.CreateChannel("ok-arch-test", "", "", "", "", true)
-	thKeep, _ := s.CreateThread(chOk, "keep")
-	_, _ = s.AppendMessageAt(thKeep, "alice", "human", "user", "keep-msg", "2026-09-23T13:02:00Z")
-	thGone, _ := s.CreateThread(chOk, "gone")
-	_, _ = s.AppendMessageAt(thGone, "alice", "human", "user", "gone-msg", "2026-09-23T13:03:00Z")
-	if _, err := s.db.Exec(`UPDATE threads SET archived_at = ? WHERE id = ?`, "2026-09-23T13:04:00Z", thGone); err != nil {
-		t.Fatal(err)
-	}
-	msgs4, _ := s.ListInbox(10)
-	for _, m := range msgs4 {
-		if m.Content == "gone-msg" {
-			t.Fatalf("archived thread message should be excluded: %+v", msgs4)
-		}
-	}
-	found := false
-	for _, m := range msgs4 {
-		if m.Content == "keep-msg" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("keep-msg should remain: %+v", msgs4)
-	}
 }
 
 func TestListMessagesAfterUsesExclusiveCursor(t *testing.T) {
@@ -884,4 +846,82 @@ func newStoreWithThread(t *testing.T, path string) (*Store, int64, int64) {
 		t.Fatal(err)
 	}
 	return s, channelID, threadID
+}
+
+func TestFileStoreDropsArchivedAtColumnsAndKeepsRows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "archived.db")
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy.SetMaxOpenConns(1)
+	for _, statement := range []string{
+		`CREATE TABLE channels(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, repo_abs_path TEXT, repo_remote TEXT, repo_head_sha TEXT, repo_head_branch TEXT, is_orphaned INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), archived_at TEXT)`,
+		`CREATE TABLE threads(id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id INTEGER NOT NULL, title TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), archived_at TEXT)`,
+		`CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id INTEGER NOT NULL, seq INTEGER NOT NULL, parent_id INTEGER, name TEXT NOT NULL, author_type TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), UNIQUE(thread_id, seq))`,
+		`CREATE TABLE reactions(id INTEGER PRIMARY KEY AUTOINCREMENT, message_id INTEGER NOT NULL, emoji TEXT NOT NULL, name TEXT NOT NULL, author_type TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), UNIQUE(message_id, emoji, name))`,
+		`INSERT INTO channels(name, repo_abs_path) VALUES('keep-me','/repo')`,
+		`INSERT INTO threads(channel_id, title) VALUES(1,'keep-this')`,
+		`INSERT INTO messages(thread_id, seq, name, author_type, role, content) VALUES(1,1,'alice','human','user','keep this too')`,
+	} {
+		if _, err := legacy.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	for _, table := range []string{"channels", "threads"} {
+		rows, err := s.db.Query("PRAGMA table_info(" + table + ")")
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for rows.Next() {
+			var cid int
+			var name, typ string
+			var notNull, pk int
+			var dflt sql.NullString
+			if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
+				rows.Close()
+				t.Fatal(err)
+			}
+			if name == "archived_at" {
+				found = true
+			}
+		}
+		rows.Close()
+		if found {
+			t.Fatalf("%s still has an archived_at column", table)
+		}
+	}
+
+	channels, err := s.ListChannels("", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(channels) != 1 || channels[0].Name != "keep-me" {
+		t.Fatalf("channels = %+v, want the one legacy row preserved", channels)
+	}
+	threads, err := s.ListThreads(channels[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(threads) != 1 || threads[0].Title != "keep-this" {
+		t.Fatalf("threads = %+v, want the one legacy row preserved", threads)
+	}
+	msgs, err := s.ListMessages(threads[0].ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 || msgs[0].Content != "keep this too" {
+		t.Fatalf("messages = %+v, want the one legacy row preserved", msgs)
+	}
 }

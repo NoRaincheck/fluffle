@@ -43,11 +43,11 @@ printf '[[agents]]\nname="reviewer"\ncommand="claude"\nargs=["-p","{prompt}"]\n'
 # init — prepare a repo for fluffle
 ./flf init --repo .
 
-# TUI — minimal 3-view stack: Channels → Threads → Messages
+# TUI — lands on a unified inbox of recent messages across all channels
 ./flf tui
-#  Channels: ↑↓/j/k nav · Enter open · n new thread · q quit
-#  Threads:  ↑↓ nav · Enter open · n new thread · Esc back
-#  Messages: ↑↓ nav · c post · r reply · Esc back
+#  Inbox:   ↑↓/j/k nav · Enter open · r reply · n new thread · C new channel · v sort · f filter · l layout · q quit
+#  Detail:  ↑↓/j/k scroll · g/G top/bottom · r reply · e react · n new thread · Esc back
+#  Channels: ↑↓/j/k nav · Enter open · n new thread · C new channel · q quit
 
 ./flf daemon stop
 ```
