@@ -116,8 +116,8 @@ type model struct {
 
 func New(base string) tea.Model {
 	m := model{
-		view:    viewChannels,
-		api:     NewAPIClient(base),
+		view:      viewChannels,
+		api:       NewAPIClient(base),
 		sessionMu: &sync.RWMutex{},
 	}
 	m.compose = composeModel{width: 60, height: 4}
