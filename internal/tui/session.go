@@ -95,7 +95,11 @@ func (m *model) anySessionActive() bool {
 }
 
 func (m *model) syncSessionTick() tea.Cmd {
-	if !m.anySessionActive() || !m.previewVisible() {
+	if !m.anySessionActive() {
+		return nil
+	}
+	if !m.previewVisible() {
+		m.sessionPollThreadID = 0
 		return nil
 	}
 	return sessionTickCmd(sessionTickInterval)
@@ -163,22 +167,30 @@ func (m model) renderSessionPreview(w, h int) string {
 	}
 	head = strings.ReplaceAll(stripAnsi(head), "\n", " ")
 	lines := []string{truncRunes(head, w)}
-	if len(m.sessionEvents) == 0 {
-		if isSessionLive(s.Status) {
+	events := m.sessionEvents
+	loaded := m.session != nil && m.session.ID == s.ID
+	if !loaded {
+		events = nil
+	}
+	if len(events) == 0 {
+		switch {
+		case !loaded:
+			lines = append(lines, "  (no events loaded)")
+		case isSessionLive(s.Status):
 			lines = append(lines, "  (running…)")
-		} else {
+		default:
 			lines = append(lines, "  (no events)")
 		}
 		return lipgloss.NewStyle().Width(w).Render(strings.Join(lines, "\n"))
 	}
 
-	rows := len(m.sessionEvents)
+	rows := len(events)
 	end := min(h-3, rows)
 	if end < 1 {
 		end = 1
 	}
 	for i := 0; i < end; i++ {
-		e := m.sessionEvents[i]
+		e := events[i]
 		content := strings.ReplaceAll(firstLine(e.Content), "\t", "    ")
 		lines = append(lines, fmt.Sprintf("  %s %s", formatFixedName(e.Type, sessionTypeWidth), truncRunes(content, max(1, w-2-sessionTypeWidth-1))))
 	}

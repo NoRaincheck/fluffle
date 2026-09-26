@@ -872,7 +872,7 @@ func (m *model) handleThreadReply() (tea.Model, tea.Cmd) {
 }
 
 func (m *model) syncVisibleData() tea.Cmd {
-	return tea.Batch(m.maybeFetchPreview(), m.maybeFetchFullRows())
+	return tea.Batch(m.maybeFetchPreview(), m.maybeFetchFullRows(), m.fetchSessionsForPreview())
 }
 
 func (m *model) maybeFetchFullRows() tea.Cmd {

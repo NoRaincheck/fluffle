@@ -399,6 +399,186 @@ func TestPreviewPaneRoutesToTheSessionRenderer(t *testing.T) {
 	}
 }
 
+func TestSessionPaneNeverShowsAnotherSessionsEvents(t *testing.T) {
+	a := store.Session{ID: 1, AgentName: "alpha", Status: store.SessionSucceeded, ReplyMode: "auto", TriggerMessageID: 10}
+	b := store.Session{ID: 2, AgentName: "beta", Status: store.SessionSucceeded, ReplyMode: "auto", TriggerMessageID: 20}
+	m := sessionModel(t, []store.Session{a, b}, nil)
+	m.inbox = []store.InboxMessage{
+		{Message: store.Message{ID: 10, ThreadID: 7, CreatedAt: "2026-09-26T12:00:00Z"}, ChannelID: 1, ChannelName: "c", ThreadTitle: "t"},
+		{Message: store.Message{ID: 20, ThreadID: 8, CreatedAt: "2026-09-26T10:00:00Z"}, ChannelID: 1, ChannelName: "c", ThreadTitle: "u"},
+	}
+	m.sessionsByMsg = map[int64]store.Session{10: a, 20: b}
+	m.session = &a
+	m.sessionEvents = []store.SessionEvent{{Seq: 1, Type: store.SessionEventPrompt, Content: "PROMPT-FOR-ALPHA"}}
+	m.previewMode = previewSession
+
+	out := stripAnsi(m.renderSessionPreview(60, 20))
+	if !strings.Contains(out, "PROMPT-FOR-ALPHA") {
+		t.Fatalf("the cursor row's own events must be shown:\n%s", out)
+	}
+
+	m.cursor = 1
+	out = stripAnsi(m.renderSessionPreview(60, 20))
+	if !strings.Contains(out, "beta") {
+		t.Fatalf("the header must follow the cursor:\n%s", out)
+	}
+	if strings.Contains(out, "PROMPT-FOR-ALPHA") {
+		t.Fatalf("beta's header must not sit above alpha's events:\n%s", out)
+	}
+
+	m.cursor = 0
+	if out := stripAnsi(m.renderSessionPreview(60, 20)); !strings.Contains(out, "PROMPT-FOR-ALPHA") {
+		t.Fatalf("returning to the cursor row must restore its events:\n%s", out)
+	}
+}
+
+func sessionPollServer(t *testing.T, sessions []store.Session) (*httptest.Server, func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	var hits []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/threads/", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits = append(hits, r.URL.Path)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(sessions)
+	})
+	mux.HandleFunc("/v1/inbox", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]store.InboxMessage{})
+	})
+	mux.HandleFunc("/v1/channels", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]store.Channel{})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), hits...)
+	}
+}
+
+func pollModel(t *testing.T, sessions []store.Session) (model, func() []string) {
+	t.Helper()
+	srv, hits := sessionPollServer(t, sessions)
+	m := toModel(New(srv.URL))
+	m.view = viewInbox
+	m.width = 120
+	m.height = 40
+	m.preview = true
+	m.inboxLayout = inboxLayoutCompact
+	m.inbox = []store.InboxMessage{{
+		Message:   store.Message{ID: 42, ThreadID: 7, CreatedAt: "2026-09-26T12:00:00Z"},
+		ChannelID: 1, ChannelName: "c", ThreadTitle: "t",
+	}}
+	next, _ := m.Update(previewMessagesFetchedMsg{threadID: 7})
+	next, _ = toModel(next).Update(sessionsFetchedMsg{threadID: 7, sessions: sessions})
+	m = toModel(next)
+	if m.sessionPollThreadID != 7 {
+		t.Fatalf("precondition: the chain must be armed for thread 7, got %d", m.sessionPollThreadID)
+	}
+	return m, hits
+}
+
+func TestPollReArmsForTheSameThreadAfterThePaneIsHiddenAndShown(t *testing.T) {
+	running := store.Session{ID: 3, TriggerMessageID: 42, ThreadID: 7, Status: store.SessionRunning}
+	m, hits := pollModel(t, []store.Session{running})
+	before := len(hits())
+
+	next, _ := m.Update(keyRunes("p"))
+	m = toModel(next)
+	if m.preview {
+		t.Fatal("precondition: p must hide the pane")
+	}
+	next, _ = m.Update(sessionsFetchedMsg{threadID: 7, sessions: []store.Session{running}})
+	m = toModel(next)
+	if m.sessionPollThreadID != 0 {
+		t.Fatalf("a chain that stopped must release its arming, got %d", m.sessionPollThreadID)
+	}
+
+	next, cmd := m.Update(keyRunes("p"))
+	m = toModel(next)
+	if !m.preview {
+		t.Fatal("precondition: p must show the pane again")
+	}
+	if cmd == nil {
+		t.Fatal("showing the pane must re-sync visible data")
+	}
+	flattenMsgs(cmd())
+	if len(hits()) <= before {
+		t.Fatalf("showing the pane must re-arm the poll for the same thread, hits = %v", hits())
+	}
+	if got := hits()[before]; got != "/v1/threads/7/sessions" {
+		t.Fatalf("re-armed poll hit %q, want the same thread", got)
+	}
+}
+
+func TestPollReArmsAfterADetailRoundTrip(t *testing.T) {
+	running := store.Session{ID: 3, TriggerMessageID: 42, ThreadID: 7, Status: store.SessionRunning}
+	m, hits := pollModel(t, []store.Session{running})
+	before := len(hits())
+
+	next, _ := m.Update(keyType(tea.KeyEnter))
+	m = toModel(next)
+	if m.previewVisible() {
+		t.Fatal("precondition: the detail view suppresses the pane")
+	}
+	next, _ = m.Update(sessionsFetchedMsg{threadID: 7, sessions: []store.Session{running}})
+	m = toModel(next)
+	if m.sessionPollThreadID != 0 {
+		t.Fatalf("a chain that stopped must release its arming, got %d", m.sessionPollThreadID)
+	}
+
+	next, cmd := m.Update(keyType(tea.KeyEsc))
+	m = toModel(next)
+	if m.view != viewInbox {
+		t.Fatalf("precondition: Esc must return to the inbox, got %d", m.view)
+	}
+	if m.previewThreadID != 7 {
+		t.Fatalf("the round trip must not change the previewed thread, got %d", m.previewThreadID)
+	}
+	if cmd == nil {
+		t.Fatal("returning to the inbox must re-sync visible data")
+	}
+	flattenMsgs(cmd())
+	if len(hits()) <= before {
+		t.Fatalf("returning to the inbox must re-arm the poll, hits = %v", hits())
+	}
+}
+
+func TestPollReArmsAfterAResizeBackAboveThePaneMinimum(t *testing.T) {
+	running := store.Session{ID: 3, TriggerMessageID: 42, ThreadID: 7, Status: store.SessionRunning}
+	m, hits := pollModel(t, []store.Session{running})
+	before := len(hits())
+
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 70, Height: 40})
+	m = toModel(next)
+	if m.previewVisible() {
+		t.Fatal("precondition: a 70-column terminal hides the pane")
+	}
+	next, _ = m.Update(sessionsFetchedMsg{threadID: 7, sessions: []store.Session{running}})
+	m = toModel(next)
+	if m.sessionPollThreadID != 0 {
+		t.Fatalf("a chain that stopped must release its arming, got %d", m.sessionPollThreadID)
+	}
+
+	next, cmd := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = toModel(next)
+	if !m.previewVisible() {
+		t.Fatal("precondition: a 120-column terminal shows the pane")
+	}
+	if cmd == nil {
+		t.Fatal("widening back must re-sync visible data")
+	}
+	flattenMsgs(cmd())
+	if len(hits()) <= before {
+		t.Fatalf("widening back must re-arm the poll, hits = %v", hits())
+	}
+}
+
 func TestHelpMentionsTheSessionKey(t *testing.T) {
 	m := sessionModel(t, nil, nil)
 	if out := stripAnsi(m.helpView()); !strings.Contains(out, "s session") {
