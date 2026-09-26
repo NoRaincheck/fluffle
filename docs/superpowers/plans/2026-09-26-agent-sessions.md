@@ -106,7 +106,8 @@ type Manager struct{}
 func NewManager(s *store.Store, agents *agentcfg.Loader, r runner.Runner) *Manager
 func (m *Manager) Start(threadID, triggerMessageID int64, names []string)
 func (m *Manager) Reconcile() error
-func (m *Manager) Shutdown()
+func (m *Manager) Shutdown()          // non-blocking; safe from any goroutine
+func (m *Manager) ShutdownAndWait()    // Shutdown, then join every session goroutine
 func (m *Manager) Cancel(sessionID int64) error
 
 // internal/apiserver
@@ -4270,7 +4271,7 @@ then change the handler construction and shutdown callback to:
 		Canceler: sessions,
 	})}
 	apiserver.SetShutdown(func() {
-		sessions.Shutdown()
+		sessions.ShutdownAndWait()
 		srv.Close()
 	})
 ```
@@ -4285,7 +4286,9 @@ Add the three imports:
 
 `ReconcileSessions` is called directly on the store rather than through `Manager.Reconcile` so the daemon does not depend on a fresh manager for a pure database operation. Either is acceptable; if you prefer the manager, call `sessions.Reconcile()` instead and drop the store call.
 
-Shutdown order matters: `sessions.Shutdown()` must run **before** `srv.Close()` so that any in-flight agent is told to stop and killed while the store is still usable for its final `FinishSession` write.
+**Use `ShutdownAndWait()`, not `Shutdown()`.** The daemon stop path needs the barrier: every session must have reached a terminal status before the store goes away, otherwise rows are stranded in `running` and the TUI polls them forever. `Shutdown()` alone is non-blocking and does **not** wait for running sessions. Both are safe to call from any goroutine; the difference is only whether the caller blocks until the join completes.
+
+Shutdown order matters: `sessions.ShutdownAndWait()` must run **before** `srv.Close()` so that any in-flight agent is told to stop and killed while the store is still usable for its final `FinishSession` write.
 
 - [ ] **Step 4: Verify format, vet, and the whole build**
 
