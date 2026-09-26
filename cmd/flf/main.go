@@ -1176,7 +1176,9 @@ const (
 	daemonStopPollInterval   = 25 * time.Millisecond
 )
 
-func daemonStop() int {
+func daemonStop() int { return daemonStopWithin(daemonStopExitTimeout) }
+
+func daemonStopWithin(exitTimeout time.Duration) int {
 	home := client.FluffleHome()
 	runtimeFile := filepath.Join(home, "daemon.json")
 	b, err := os.ReadFile(runtimeFile)
@@ -1197,12 +1199,13 @@ func daemonStop() int {
 	if err != nil {
 		return fail("DAEMON_DOWN", err.Error())
 	}
-	if !requestDaemonShutdown(df.Port) || !waitForProcessExit(df.PID, daemonStopExitTimeout) {
-		fmt.Fprintf(os.Stderr, "flf: daemon %d did not shut down gracefully; killing it\n", df.PID)
+	if !requestDaemonShutdown(df.Port) || !waitForProcessExit(df.PID, exitTimeout) {
+		notice := fmt.Sprintf("daemon %d did not shut down gracefully; killing it", df.PID)
 		if err := proc.Kill(); err != nil {
 			os.Remove(runtimeFile)
-			return fail("DAEMON_DOWN", err.Error())
+			return fail("DAEMON_DOWN", notice+"; kill failed: "+err.Error())
 		}
+		fmt.Fprintln(os.Stderr, "flf: "+notice)
 	}
 	os.Remove(runtimeFile)
 	fmt.Println("daemon stopped")
@@ -1325,7 +1328,7 @@ func daemonStartBackground() int {
 	childExit := make(chan error, 1)
 	go func() { childExit <- cmd.Wait() }()
 
-	port, err := awaitDaemonPort(home, 50, 100*time.Millisecond, childExit)
+	port, err := awaitDaemonPort(home, 50, 100*time.Millisecond, childExit, cmd.Process.Pid)
 	if err != nil {
 		return fail("DAEMON_ERROR", err.Error())
 	}
@@ -1333,13 +1336,14 @@ func daemonStartBackground() int {
 	return 0
 }
 
-func awaitDaemonPort(home string, attempts int, delay time.Duration, childExit <-chan error) (int, error) {
+func awaitDaemonPort(home string, attempts int, delay time.Duration, childExit <-chan error, childPID int) (int, error) {
 	for i := 0; i < attempts; i++ {
 		if data, err := os.ReadFile(filepath.Join(home, "daemon.json")); err == nil {
 			var df struct {
 				Port int `json:"port"`
+				PID  int `json:"pid"`
 			}
-			if json.Unmarshal(data, &df) == nil && df.Port > 0 {
+			if json.Unmarshal(data, &df) == nil && df.Port > 0 && childPID == df.PID {
 				return df.Port, nil
 			}
 		}

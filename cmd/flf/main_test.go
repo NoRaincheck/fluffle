@@ -1727,13 +1727,18 @@ func TestAgentReadAllowsExplicitZeroLastWithoutCursor(t *testing.T) {
 	}
 }
 
+// awaitedChildPID stands in for the pid of the child daemon spawned by
+// daemonStartBackground, so the awaitDaemonPort tests can pin that only the
+// runtime file written by that child is accepted.
+const awaitedChildPID = 4242
+
 func TestAwaitDaemonPortReportsChildExitAndTimeout(t *testing.T) {
 	t.Run("child exit", func(t *testing.T) {
 		exited := make(chan error, 1)
 		exited <- errors.New("exit status 2")
 		home := t.TempDir()
 		code, output := captureStderr(t, func() int {
-			_, err := awaitDaemonPort(home, 20, time.Millisecond, exited)
+			_, err := awaitDaemonPort(home, 20, time.Millisecond, exited, awaitedChildPID)
 			if err == nil {
 				t.Fatal("expected readiness error")
 			}
@@ -1751,7 +1756,7 @@ func TestAwaitDaemonPortReportsChildExitAndTimeout(t *testing.T) {
 	t.Run("readiness timeout", func(t *testing.T) {
 		home := t.TempDir()
 		code, output := captureStderr(t, func() int {
-			_, err := awaitDaemonPort(home, 3, time.Millisecond, make(chan error))
+			_, err := awaitDaemonPort(home, 3, time.Millisecond, make(chan error), awaitedChildPID)
 			if err == nil {
 				t.Fatal("expected readiness timeout")
 			}
@@ -1768,21 +1773,32 @@ func TestAwaitDaemonPortReportsChildExitAndTimeout(t *testing.T) {
 
 	t.Run("invalid runtime file", func(t *testing.T) {
 		home := t.TempDir()
-		if err := os.WriteFile(filepath.Join(home, "daemon.json"), []byte(`{"port":0}`), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(home, "daemon.json"), []byte(`{"port":0,"pid":4242}`), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		_, err := awaitDaemonPort(home, 3, time.Millisecond, make(chan error))
+		_, err := awaitDaemonPort(home, 3, time.Millisecond, make(chan error), awaitedChildPID)
 		if err == nil {
 			t.Fatal("expected error for a runtime file without a usable port")
 		}
 	})
 
-	t.Run("ready port", func(t *testing.T) {
+	t.Run("runtime file from another process", func(t *testing.T) {
 		home := t.TempDir()
-		if err := os.WriteFile(filepath.Join(home, "daemon.json"), []byte(`{"port":1234}`), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(home, "daemon.json"), []byte(`{"port":1234,"pid":999999}`), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		port, err := awaitDaemonPort(home, 3, time.Millisecond, make(chan error))
+		_, err := awaitDaemonPort(home, 3, time.Millisecond, make(chan error), awaitedChildPID)
+		if err == nil {
+			t.Fatal("expected error for a runtime file this child did not write")
+		}
+	})
+
+	t.Run("ready port", func(t *testing.T) {
+		home := t.TempDir()
+		if err := os.WriteFile(filepath.Join(home, "daemon.json"), []byte(`{"port":1234,"pid":4242}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		port, err := awaitDaemonPort(home, 3, time.Millisecond, make(chan error), awaitedChildPID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1987,12 +2003,15 @@ func TestDaemonStopFallsBackToKillWhenGracefulShutdownFails(t *testing.T) {
 		}
 		writeDaemonRuntimeFile(t, home, closedPort, pid)
 
-		code, stdout, _ := captureOutput(t, daemonStop)
+		code, stdout, stderr := captureOutput(t, daemonStop)
 		if code != 0 {
 			t.Fatalf("exit = %d, want 0: an unreachable graceful path must still stop the daemon", code)
 		}
 		if !strings.Contains(stdout, "daemon stopped") {
 			t.Fatalf("stdout = %q, want the success message", stdout)
+		}
+		if !strings.Contains(stderr, "did not shut down gracefully") {
+			t.Fatalf("stderr = %q, want the forced-kill notice so the stop is not reported as clean", stderr)
 		}
 		if !waitDead() {
 			t.Fatal("fake daemon survived the kill fallback")
@@ -2067,5 +2086,139 @@ func TestDaemonStopReportsDaemonDownForUnusableRuntimeFile(t *testing.T) {
 			t.Fatalf("exit = %d, want 2: pid 0 would signal the caller's own process group", code)
 		}
 		assertCLIErrorEnvelope(t, stderr, "DAEMON_DOWN")
+	})
+
+	t.Run("stale daemon.json whose process is already gone", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("FLUFFLE_HOME", home)
+		pid, waitDead := startFakeDaemon(t)
+		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+			t.Fatal(err)
+		}
+		if !waitDead() {
+			t.Fatal("could not stage a dead pid")
+		}
+		dead, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		closedPort := dead.Addr().(*net.TCPAddr).Port
+		if err := dead.Close(); err != nil {
+			t.Fatal(err)
+		}
+		writeDaemonRuntimeFile(t, home, closedPort, pid)
+
+		code, stdout, stderr := captureOutput(t, daemonStop)
+		if code != 2 {
+			t.Fatalf("exit = %d, want 2", code)
+		}
+		if stdout != "" {
+			t.Fatalf("stdout = %q, want nothing on a failed stop", stdout)
+		}
+		// assertCLIErrorEnvelope decodes the whole stream, so it also proves
+		// stderr carries exactly one JSON document and no bare notice above it.
+		message := assertCLIErrorEnvelope(t, stderr, "DAEMON_DOWN")
+		if !strings.Contains(message, "did not shut down gracefully") {
+			t.Fatalf("message = %q, want the forced-kill reason inside the envelope", message)
+		}
+		if !strings.Contains(message, "kill failed") {
+			t.Fatalf("message = %q, want the kill failure folded into the envelope", message)
+		}
+	})
+}
+
+// TestDaemonStopWaitsForTheProcessBeforeForcingAKill covers the wait itself. The
+// other stop tests either reap the child inside the handler, so the wait
+// succeeds on its first probe, or never reach it because the graceful POST
+// failed. Only a daemon that answers 200 and then refuses to die exercises the
+// loop, and only a non-200 response distinguishes a real graceful stop from a
+// rejected one.
+func TestDaemonStopWaitsForTheProcessBeforeForcingAKill(t *testing.T) {
+	t.Run("graceful 200 but the process never exits", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("FLUFFLE_HOME", home)
+		pid, waitDead := startFakeDaemon(t)
+
+		var mu sync.Mutex
+		requests := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			mu.Lock()
+			requests++
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer server.Close()
+		writeDaemonRuntimeFile(t, home, serverPort(t, server), pid)
+
+		const exitWait = 400 * time.Millisecond
+		start := time.Now()
+		code, stdout, stderr := captureOutput(t, func() int {
+			return daemonStopWithin(exitWait)
+		})
+		elapsed := time.Since(start)
+
+		if code != 0 {
+			t.Fatalf("exit = %d, want 0", code)
+		}
+		if !strings.Contains(stdout, "daemon stopped") {
+			t.Fatalf("stdout = %q, want the success message", stdout)
+		}
+		if !strings.Contains(stderr, "did not shut down gracefully") {
+			t.Fatalf("stderr = %q, want the forced-kill notice after the wait ran out", stderr)
+		}
+		if elapsed < exitWait/2 {
+			t.Fatalf("elapsed = %v, want at least %v: the stop must wait for the daemon to exit", elapsed, exitWait/2)
+		}
+		if elapsed > 10*time.Second {
+			t.Fatalf("elapsed = %v, want the wait to stay bounded", elapsed)
+		}
+		if !waitDead() {
+			t.Fatal("fake daemon survived the forced kill")
+		}
+		mu.Lock()
+		got := requests
+		mu.Unlock()
+		if got != 1 {
+			t.Fatalf("daemon requests = %d, want exactly one graceful POST", got)
+		}
+	})
+
+	t.Run("non-200 response is not treated as a graceful stop", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("FLUFFLE_HOME", home)
+		pid, waitDead := startFakeDaemon(t)
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"code":"AGENT_FORBIDDEN","message":"agents cannot stop the daemon"}`))
+		}))
+		defer server.Close()
+		writeDaemonRuntimeFile(t, home, serverPort(t, server), pid)
+
+		// A long exit wait: a rejected request must not be waited out, because
+		// only a 200 means the daemon actually started shutting down.
+		const exitWait = 8 * time.Second
+		start := time.Now()
+		code, stdout, stderr := captureOutput(t, func() int {
+			return daemonStopWithin(exitWait)
+		})
+		elapsed := time.Since(start)
+
+		if code != 0 {
+			t.Fatalf("exit = %d, want 0", code)
+		}
+		if !strings.Contains(stdout, "daemon stopped") {
+			t.Fatalf("stdout = %q, want the success message", stdout)
+		}
+		if !strings.Contains(stderr, "did not shut down gracefully") {
+			t.Fatalf("stderr = %q, want the forced-kill notice for a rejected request", stderr)
+		}
+		if elapsed >= exitWait/2 {
+			t.Fatalf("elapsed = %v, want no wait after a 403: the daemon never began shutting down", elapsed)
+		}
+		if !waitDead() {
+			t.Fatal("fake daemon survived the forced kill")
+		}
 	})
 }
