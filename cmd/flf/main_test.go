@@ -2263,6 +2263,11 @@ func TestAgentListEncodesRepoAndNeverDefaultsToCwd(t *testing.T) {
 		t.Fatalf("agents = %+v, want the global config only", payload.Agents)
 	}
 
+	workDir := t.TempDir()
+	t.Chdir(workDir)
+	if err := os.MkdirAll(filepath.Join(workDir, "repo with space"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	relative := filepath.Join("nested repo", "..", "repo with space")
 	abs, err := filepath.Abs(relative)
 	if err != nil {
@@ -2287,6 +2292,72 @@ func TestAgentListEncodesRepoAndNeverDefaultsToCwd(t *testing.T) {
 	}
 	if got := recorded[3]; got.Method != http.MethodGet || got.Path != "/v1/agents" || got.RawQuery != "repo="+url.QueryEscape(abs) {
 		t.Fatalf("agent read = %s %s?%s, want repo=%s", got.Method, got.Path, got.RawQuery, url.QueryEscape(abs))
+	}
+
+	code, stdout, stderr = captureOutput(t, func() int {
+		return run([]string{"agent", "list", "--repo", relative})
+	})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0: %s", code, stderr)
+	}
+	human := "local\t/bin/local\tauto\t/repo/.flf.toml\trepo agent\n" +
+		"shared\t/bin/shared\tcli\t/home/test/config.toml\t-\n"
+	if stdout != human {
+		t.Fatalf("stdout = %q, want %q", stdout, human)
+	}
+}
+
+func TestAgentListRejectsMissingRepoPath(t *testing.T) {
+	var requests []recordedCLIRequest
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		recordCLIRequest(&requests, &mu, r)
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/health" {
+			_, _ = w.Write([]byte(`{"ok":true}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	useTestDaemon(t, server)
+
+	code, stdout, stderr := captureOutput(t, func() int {
+		return run([]string{"agent", "list", "--repo", filepath.Join(t.TempDir(), "no-such-repo")})
+	})
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1: %s", code, stderr)
+	}
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want empty", stdout)
+	}
+	assertCLIErrorEnvelope(t, stderr, "NOT_A_GIT_REPO")
+	recorded := snapshotCLIRequests(&requests, &mu)
+	if len(recorded) != 0 {
+		t.Fatalf("requests = %+v, want the path rejected before any daemon contact", recorded)
+	}
+}
+
+func TestAgentListAcceptsReplyModeThisCLIDoesNotKnow(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/health" {
+			_, _ = w.Write([]byte(`{"ok":true}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"agents":[{"name":"local","description":"","command":"/bin/local","reply":"future-mode","source":"/repo/.flf.toml"}]}`))
+	}))
+	defer server.Close()
+	useTestDaemon(t, server)
+
+	code, stdout, stderr := captureOutput(t, func() int {
+		return run([]string{"agent", "list", "--json"})
+	})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0: a reply mode newer than this CLI is not a broken response: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, `"reply": "future-mode"`) {
+		t.Fatalf("stdout = %q, want the unknown reply mode passed through", stdout)
 	}
 }
 
@@ -2351,4 +2422,66 @@ func TestAgentSessionRejectsUnverifiableResponse(t *testing.T) {
 		}
 		assertCLIErrorEnvelope(t, stderr, "DAEMON_ERROR")
 	})
+}
+
+func TestAgentSessionHumanOutputRendersNullFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/health":
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		case "/v1/sessions/7":
+			_, _ = w.Write([]byte(`{"session":{"ID":7,"ThreadID":2,"TriggerMessageID":3,"AgentName":"probe","Status":"running","ReplyMode":"stdout","Command":"/bin/probe","Cwd":null,"ExitCode":null,"Error":null,"ReplyMessageID":null,"StartedAt":null,"FinishedAt":null,"CreatedAt":"2026-09-26T05:14:28.529Z"},"events":[{"ID":1,"SessionID":7,"Seq":1,"Type":"prompt","Content":"prompt text","CreatedAt":""},{"ID":2,"SessionID":7,"Seq":2,"Type":"stdout","Content":"partial answer","CreatedAt":""}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	useTestDaemon(t, server)
+
+	code, stdout, stderr := captureOutput(t, func() int {
+		return run([]string{"agent", "session", "--id", "7"})
+	})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0: %s", code, stderr)
+	}
+	want := "session 7  agent=probe  thread=2  trigger=3  status=running  reply=stdout\n" +
+		"command: /bin/probe\n" +
+		"cwd: none\n" +
+		"1\tprompt\tprompt text\n" +
+		"2\tstdout\tpartial answer\n"
+	if stdout != want {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
+	}
+}
+
+func TestAgentSessionRejectsNonPositiveIDBeforeAnyDaemonContact(t *testing.T) {
+	for _, id := range []string{"-1", "0", "abc"} {
+		t.Run(id, func(t *testing.T) {
+			var requests []recordedCLIRequest
+			var mu sync.Mutex
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				recordCLIRequest(&requests, &mu, r)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"ok":true}`))
+			}))
+			defer server.Close()
+			useTestDaemon(t, server)
+
+			code, stdout, stderr := captureOutput(t, func() int {
+				return run([]string{"agent", "session", "--id", id})
+			})
+			if code != 1 {
+				t.Fatalf("exit = %d, want 1: %s", code, stderr)
+			}
+			if stdout != "" {
+				t.Fatalf("stdout = %q, want empty", stdout)
+			}
+			assertCLIErrorEnvelope(t, stderr, "BAD_ARGS")
+			recorded := snapshotCLIRequests(&requests, &mu)
+			if len(recorded) != 0 {
+				t.Fatalf("requests = %+v, want the id rejected before the daemon is contacted", recorded)
+			}
+		})
+	}
 }

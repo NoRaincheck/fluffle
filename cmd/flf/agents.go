@@ -30,25 +30,13 @@ type sessionPayload struct {
 	Events  []store.SessionEvent `json:"events"`
 }
 
-func encodeJSON(value any) int {
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(value); err != nil {
-		return fail("DAEMON_ERROR", err.Error())
-	}
-	return 0
-}
-
 func validateAgents(payload *agentListPayload) apiResponseCheck {
+	// The reply mode is not whitelisted: agentcfg already validates it, and a mode
+	// this CLI has not heard of is forward-compatible, not a broken response.
 	return func() error {
 		for i, item := range payload.Agents {
 			if item.Name == "" || item.Command == "" {
 				return fmt.Errorf("agent %d has no name or command", i)
-			}
-			switch item.Reply {
-			case "stdout", "cli", "auto":
-			default:
-				return fmt.Errorf("agent %q has unknown reply %q", item.Name, item.Reply)
 			}
 			if item.Source == "" {
 				return fmt.Errorf("agent %q has no source", item.Name)
@@ -100,6 +88,9 @@ func agentListCmd(args []string) int {
 		if err != nil {
 			return fail("BAD_ARGS", err.Error())
 		}
+		if _, err := os.Stat(abs); err != nil {
+			return fail("NOT_A_GIT_REPO", fmt.Sprintf("%s does not exist", *repoPath))
+		}
 		repo = abs
 	}
 	base, err := client.EnsureDaemon()
@@ -115,7 +106,10 @@ func agentListCmd(args []string) int {
 		payload.Agents = []agentListItem{}
 	}
 	if *jsonOut {
-		return encodeJSON(payload)
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		enc.Encode(payload)
+		return 0
 	}
 	for _, item := range payload.Agents {
 		description := item.Description
@@ -150,7 +144,10 @@ func agentSessionCmd(args []string) int {
 		payload.Events = []store.SessionEvent{}
 	}
 	if *jsonOut {
-		return encodeJSON(payload)
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		enc.Encode(payload)
+		return 0
 	}
 	sess := payload.Session
 	status := sess.Status

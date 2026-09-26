@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -184,8 +185,16 @@ type cliResult struct {
 
 func runCLIResult(t *testing.T, env []string, bin, input string, args ...string) cliResult {
 	t.Helper()
+	return runCLIResultInDir(t, env, bin, "", input, args...)
+}
+
+func runCLIResultInDir(t *testing.T, env []string, bin, dir, input string, args ...string) cliResult {
+	t.Helper()
 	cmd := exec.Command(bin, args...)
 	cmd.Env = append(os.Environ(), env...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
 	cmd.Stdin = strings.NewReader(input)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -1550,6 +1559,30 @@ type e2eAgentListItem struct {
 	Source      string `json:"source"`
 }
 
+var stdoutEventLine = regexp.MustCompile(`(?m)^\d+\tstdout\t.*the answer`)
+
+func e2eErrorMessage(t *testing.T, envelope string) string {
+	t.Helper()
+	var fields map[string]any
+	if err := json.Unmarshal([]byte(envelope), &fields); err != nil {
+		t.Fatalf("invalid error envelope: %v\n%s", err, envelope)
+	}
+	message, ok := fields["message"].(string)
+	if !ok || message == "" {
+		t.Fatalf("error envelope = %#v, want a message", fields)
+	}
+	return message
+}
+
+func e2eLines(t *testing.T, output string) []string {
+	t.Helper()
+	trimmed := strings.TrimSuffix(output, "\n")
+	if trimmed == "" {
+		t.Fatalf("output = %q, want at least one line", output)
+	}
+	return strings.Split(trimmed, "\n")
+}
+
 func decodeE2EAgentList(t *testing.T, raw string) map[string]e2eAgentListItem {
 	t.Helper()
 	var payload struct {
@@ -1630,24 +1663,34 @@ func TestE2E_AgentListCmd(t *testing.T) {
 		t.Fatalf("global entry source = %q, want %q", shared.Source, filepath.Join(home, "config.toml"))
 	}
 
-	agents = decodeE2EAgentList(t, runOK("agent", "list", "--json"))
-	if len(agents) != 1 || agents["shared"].Command != "/bin/shared" {
-		t.Fatalf("agents without --repo = %+v, want only the global entry", agents)
+	fromRepo := runCLIResultInDir(t, env, bin, repoDir, "", "agent", "list", "--json")
+	if fromRepo.exitCode != 0 || fromRepo.stderr != "" {
+		t.Fatalf("agent list from the repo dir: exit=%d stdout=%q stderr=%q", fromRepo.exitCode, fromRepo.stdout, fromRepo.stderr)
 	}
+	agents = decodeE2EAgentList(t, fromRepo.stdout)
+	if len(agents) != 1 || agents["shared"].Command != "/bin/shared" {
+		t.Fatalf("agents without --repo = %+v, want only the global entry even when the cwd is a repo", agents)
+	}
+
+	assertE2ECLIErrorResult(t, runCLIResult(t, env, bin, "", "agent", "list", "--repo", filepath.Join(tmpDir, "no-such-repo")), "NOT_A_GIT_REPO")
 
 	agents = decodeE2EAgentList(t, runOK("agent", "list", "--repo", spacedDir, "--json"))
 	if spaced, ok := agents["spaced"]; !ok || spaced.Source != filepath.Join(spacedDir, ".flf.toml") {
 		t.Fatalf("agents for a spaced repo path = %+v, want the spaced entry", agents)
 	}
 
-	human := runOK("agent", "list", "--repo", repoDir)
-	for _, want := range []string{"local", "/bin/local", "shared", "/bin/shared", "repo agent", filepath.Join(repoDir, ".flf.toml")} {
-		if !strings.Contains(human, want) {
-			t.Fatalf("human output missing %q:\n%s", want, human)
-		}
+	lines := e2eLines(t, runOK("agent", "list", "--repo", repoDir))
+	want := []string{
+		"local\t/bin/local\tauto\t" + filepath.Join(repoDir, ".flf.toml") + "\trepo agent",
+		"shared\t/bin/shared\tcli\t" + filepath.Join(home, "config.toml") + "\t-",
 	}
-	if strings.Contains(human, "spaced") {
-		t.Fatalf("human output listed an agent from another repo:\n%s", human)
+	if len(lines) != len(want) {
+		t.Fatalf("human lines = %d, want %d: %q", len(lines), len(want), lines)
+	}
+	for i, line := range want {
+		if lines[i] != line {
+			t.Fatalf("human line %d = %q, want %q", i, lines[i], line)
+		}
 	}
 
 	stop()
@@ -1706,20 +1749,22 @@ func TestE2E_AgentSessionCmd(t *testing.T) {
 
 	// A fresh home holds one session, the one this mention creates, so it is id 1.
 	// The poll covers the real race: the run finishing after the trigger returns.
-	var last cliResult
+	var (
+		last    cliResult
+		payload sessionPayload
+	)
 	if !waitFor(t, 40*time.Second, func() bool {
 		last = runCLIResult(t, env, bin, "", "agent", "session", "--id", "1", "--json")
-		return last.exitCode == 0 && strings.Contains(last.stdout, `"Status": "succeeded"`)
+		if last.exitCode != 0 || last.stderr != "" {
+			return false
+		}
+		payload = sessionPayload{}
+		if err := json.Unmarshal([]byte(last.stdout), &payload); err != nil {
+			return false
+		}
+		return payload.Session.Status == store.SessionSucceeded
 	}) {
 		t.Fatalf("session never succeeded: exit=%d stdout=%q stderr=%q", last.exitCode, last.stdout, last.stderr)
-	}
-
-	var payload struct {
-		Session store.Session        `json:"session"`
-		Events  []store.SessionEvent `json:"events"`
-	}
-	if err := json.Unmarshal([]byte(last.stdout), &payload); err != nil {
-		t.Fatalf("session JSON: %v\n%s", err, last.stdout)
 	}
 	sess := payload.Session
 	if sess.AgentName != "probe" || sess.Status != store.SessionSucceeded || sess.ReplyMode != "stdout" {
@@ -1765,14 +1810,35 @@ func TestE2E_AgentSessionCmd(t *testing.T) {
 		t.Fatalf("events = %+v, want the exit code", payload.Events)
 	}
 
-	human := runOK("agent", "session", "--id", "1")
-	for _, want := range []string{"session 1", "probe", "reply=stdout", "command: " + probe, "cwd: ", "reply: message " + strconv.FormatInt(*sess.ReplyMessageID, 10), "the answer"} {
-		if !strings.Contains(human, want) {
-			t.Fatalf("human output missing %q:\n%s", want, human)
-		}
+	lines := e2eLines(t, runOK("agent", "session", "--id", "1"))
+	if len(lines) < 5 {
+		t.Fatalf("human lines = %d, want the header, command, exit, cwd, and reply: %q", len(lines), lines)
 	}
-	if strings.Contains(human, "error:") {
-		t.Fatalf("human output reported an error for a succeeded session:\n%s", human)
+	if !strings.HasPrefix(lines[0], "session 1  agent=probe  thread=") || !strings.Contains(lines[0], "  status=succeeded ") || !strings.HasSuffix(lines[0], "  reply=stdout") {
+		t.Fatalf("session header = %q", lines[0])
+	}
+	if lines[1] != "command: "+probe {
+		t.Fatalf("command line = %q, want %q", lines[1], "command: "+probe)
+	}
+	if lines[2] != "exit: 0" {
+		t.Fatalf("exit line = %q, want %q", lines[2], "exit: 0")
+	}
+	if lines[3] != "cwd: "+canonicalRepo {
+		t.Fatalf("cwd line = %q, want %q", lines[3], "cwd: "+canonicalRepo)
+	}
+	if lines[4] != "reply: message "+strconv.FormatInt(*sess.ReplyMessageID, 10) {
+		t.Fatalf("reply line = %q", lines[4])
+	}
+	wantEvents := make([]string, 0, len(payload.Events))
+	for _, event := range payload.Events {
+		wantEvents = append(wantEvents, fmt.Sprintf("%d\t%s\t%s", event.Seq, event.Type, event.Content))
+	}
+	events := strings.Join(lines[5:], "\n")
+	if events != strings.Join(wantEvents, "\n") {
+		t.Fatalf("event lines = %q, want %q", events, strings.Join(wantEvents, "\n"))
+	}
+	if !stdoutEventLine.MatchString(events) {
+		t.Fatalf("event lines lack a stdout event carrying the answer: %q", events)
 	}
 
 	stop()
@@ -1798,14 +1864,18 @@ func TestE2E_AgentSessionCmdRequiresID(t *testing.T) {
 
 	assertE2ECLIErrorResult(t, runCLIResult(t, env, bin, "", "agent", "session"), "BAD_ARGS")
 	assertE2ECLIErrorResult(t, runCLIResult(t, env, bin, "", "agent", "session", "--id", "0"), "BAD_ARGS")
+	assertE2ECLIErrorResult(t, runCLIResult(t, env, bin, "", "agent", "session", "--id", "-1"), "BAD_ARGS")
 	assertE2ECLIErrorResult(t, runCLIResult(t, env, bin, "", "agent", "session", "--id", "abc"), "BAD_ARGS")
 
 	missing := runCLIResult(t, env, bin, "", "agent", "session")
-	var envelope map[string]any
-	if err := json.Unmarshal([]byte(missing.stderr), &envelope); err != nil {
-		t.Fatalf("invalid error envelope: %v\n%s", err, missing.stderr)
-	}
-	if message, _ := envelope["message"].(string); !strings.Contains(message, "--id") {
+	if message := e2eErrorMessage(t, missing.stderr); !strings.Contains(message, "--id") {
 		t.Fatalf("error message = %q, want it to name the missing flag", message)
+	}
+
+	usage := e2eErrorMessage(t, runCLIResult(t, env, bin, "", "agent", "bogus").stderr)
+	for _, want := range []string{"read", "append", "list", "session"} {
+		if !strings.Contains(usage, want) {
+			t.Fatalf("usage %q does not name %q", usage, want)
+		}
 	}
 }
