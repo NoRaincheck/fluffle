@@ -163,6 +163,32 @@ func TestBatchReactionDoesNotRetriggerMentionedMessage(t *testing.T) {
 	}
 }
 
+func TestImportedAgentLineNeverTriggers(t *testing.T) {
+	_, h, starter, _, thID := newSessionHandler(t, oneAgentCfg)
+	rec := postThread(t, h, thID, "events", `{"import":true,"events":[{"name":"probe","author_type":"agent","role":"assistant","content":"@reviewer second agent please"}]}`, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body %s", rec.Code, rec.Body.String())
+	}
+	if calls := starter.snapshot(); len(calls) != 0 {
+		t.Fatalf("imported agent line triggered a session: %v", calls)
+	}
+}
+
+func TestImportedBatchTriggersOnlyHumanLine(t *testing.T) {
+	_, h, starter, _, thID := newSessionHandler(t, oneAgentCfg)
+	rec := postThread(t, h, thID, "events", `{"import":true,"events":[{"name":"probe","author_type":"agent","role":"assistant","content":"@reviewer agent line"},{"name":"alice","author_type":"human","role":"user","content":"@reviewer human line"}]}`, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body %s", rec.Code, rec.Body.String())
+	}
+	calls := starter.snapshot()
+	if len(calls) != 1 {
+		t.Fatalf("calls = %v, want 1: only the human line may trigger", calls)
+	}
+	if want := fmt.Sprintf("%d:2:reviewer", thID); calls[0] != want {
+		t.Fatalf("call = %q, want %q", calls[0], want)
+	}
+}
+
 func TestAgentBatchNeverTriggers(t *testing.T) {
 	_, h, starter, _, thID := newSessionHandler(t, oneAgentCfg)
 	postThread(t, h, thID, "events", `{"events":[{"name":"probe","role":"assistant","content":"@reviewer go"}]}`, "probe")
@@ -178,6 +204,33 @@ func TestZeroDepsHandlerIsSafeOnMention(t *testing.T) {
 	rec := postThread(t, h, thID, "messages", `{"name":"alice","role":"user","content":"@reviewer go"}`, "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d body %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestTriggerUsesDatabaseIDNotThreadSeq(t *testing.T) {
+	s, h, starter, _, fillerThreadID := newSessionHandler(t, oneAgentCfg)
+	chans, err := s.ListChannels("", false)
+	if err != nil || len(chans) == 0 {
+		t.Fatalf("list channels: %v", err)
+	}
+	mentionThreadID, err := s.CreateThread(chans[0].ID, "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	filler := postThread(t, h, fillerThreadID, "messages", `{"name":"alice","role":"user","content":"filler"}`, "")
+	if filler.Code != http.StatusOK {
+		t.Fatalf("filler status = %d body %s", filler.Code, filler.Body.String())
+	}
+	rec := postThread(t, h, mentionThreadID, "messages", `{"name":"alice","role":"user","content":"@reviewer go"}`, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body %s", rec.Code, rec.Body.String())
+	}
+	calls := starter.snapshot()
+	if len(calls) != 1 {
+		t.Fatalf("calls = %v", calls)
+	}
+	if want := fmt.Sprintf("%d:2:reviewer", mentionThreadID); calls[0] != want {
+		t.Fatalf("call = %q, want %q: the trigger id is the database id, not the thread-local seq", calls[0], want)
 	}
 }
 
@@ -315,6 +368,81 @@ func TestListAgentsDoesNotEchoConfigError(t *testing.T) {
 	if strings.Contains(rec.Body.String(), repoPath) {
 		t.Fatalf("response leaks the repo path: %s", rec.Body.String())
 	}
+}
+
+func TestListAgentsRefusesSymlinkedRepoConfig(t *testing.T) {
+	dir := t.TempDir()
+	repoPath := filepath.Join(dir, "repo")
+	if err := os.MkdirAll(repoPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "elsewhere.toml")
+	secret := "PRIVATE_KEY"
+	if err := os.WriteFile(target, []byte("[[agents]]\nname=\"probe\"\ncommand=\"c\"\ndescription=\""+secret+"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(repoPath, repoConfigFile)); err != nil {
+		t.Fatal(err)
+	}
+	_, h, _, _, _ := newSessionHandler(t, oneAgentCfg)
+	rec := serveRequest(t, h, http.MethodGet, "/v1/agents?repo="+repoPath, "")
+	assertErrorEnvelope(t, rec, http.StatusInternalServerError, "DAEMON_ERROR")
+	if strings.Contains(rec.Body.String(), secret) {
+		t.Fatalf("response leaks the config key %s: %s", secret, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), target) || strings.Contains(rec.Body.String(), repoPath) {
+		t.Fatalf("response leaks a config path: %s", rec.Body.String())
+	}
+}
+
+func TestZeroDepsAgentListIsEmptyArray(t *testing.T) {
+	s, _, _ := newTestHandlerWithThread(t)
+	h := NewHandlerWithDeps(s, Deps{})
+	rec := serveRequest(t, h, http.MethodGet, "/v1/agents", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body %s", rec.Code, rec.Body.String())
+	}
+	assertJSONContentType(t, rec)
+	var out struct {
+		Agents []agentListItem `json:"agents"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Agents) != 0 {
+		t.Fatalf("agents = %+v", out.Agents)
+	}
+}
+
+func TestZeroDepsCancelIsUnavailable(t *testing.T) {
+	s, _, threadID := newTestHandlerWithThread(t)
+	h := NewHandlerWithDeps(s, Deps{})
+	seq, err := s.AppendMessage(threadID, "alice", "human", "user", "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgID, err := s.MessageIDBySeq(threadID, seq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.CreateSession(threadID, msgID, "probe", store.SessionRunning, "stdout", "c", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := serveRequest(t, h, http.MethodPost, fmt.Sprintf("/v1/sessions/%d/cancel", id), "")
+	assertErrorEnvelope(t, rec, http.StatusServiceUnavailable, "DAEMON_ERROR")
+}
+
+func TestGetSessionCancelIsMethodNotAllowed(t *testing.T) {
+	_, h, _, _, _ := newSessionHandler(t, "")
+	rec := serveRequest(t, h, http.MethodGet, "/v1/sessions/1/cancel", "")
+	assertErrorEnvelope(t, rec, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED")
+}
+
+func TestPostSessionIsMethodNotAllowed(t *testing.T) {
+	_, h, _, _, _ := newSessionHandler(t, "")
+	rec := serveRequest(t, h, http.MethodPost, "/v1/sessions/1", "")
+	assertErrorEnvelope(t, rec, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED")
 }
 
 func TestListAgentsRejectsPost(t *testing.T) {

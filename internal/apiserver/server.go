@@ -229,7 +229,7 @@ func appendThreadMessage(s *store.Store, deps Deps, threadID int64, w http.Respo
 		writeThreadMutationError(w, err)
 		return
 	}
-	if !isAgent(r) {
+	if !isAgent(r) && deps.Starter != nil {
 		if triggerMessageID, idErr := s.MessageIDBySeq(threadID, seq); idErr == nil {
 			deps.startSessionForMessage(threadID, triggerMessageID, body.Content)
 		}
@@ -353,7 +353,7 @@ func appendThreadEvents(s *store.Store, deps Deps, threadID int64, w http.Respon
 		return
 	}
 	if !agentRequest {
-		deps.startSessionsForBatch(s, threadID, results)
+		deps.startSessionsForBatch(s, threadID, events, results)
 	}
 	writeJSON(w, http.StatusOK, results)
 }

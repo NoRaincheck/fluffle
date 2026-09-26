@@ -20,12 +20,14 @@ type SessionStarter interface {
 	Start(threadID, triggerMessageID int64, names []string)
 }
 
+type SessionCanceler interface {
+	Cancel(id int64) error
+}
+
 type Deps struct {
 	Starter  SessionStarter
 	Agents   *agentcfg.Loader
-	Canceler interface {
-		Cancel(id int64) error
-	}
+	Canceler SessionCanceler
 }
 
 type agentListItem struct {
@@ -47,16 +49,19 @@ func (d Deps) startSessionForMessage(threadID, messageID int64, content string) 
 	d.Starter.Start(threadID, messageID, names)
 }
 
-func (d Deps) startSessionsForBatch(s *store.Store, threadID int64, results []store.AppendResult) {
+func (d Deps) startSessionsForBatch(s *store.Store, threadID int64, events []store.AppendEvent, results []store.AppendResult) {
 	if d.Starter == nil {
 		return
 	}
-	for _, r := range results {
-		if r.Seq <= 0 || r.MessageID == 0 {
+	for i, r := range results {
+		if r.Seq <= 0 || r.MessageID == 0 || i >= len(events) {
+			continue
+		}
+		if names, _ := mentions.Parse(events[i].Content); len(names) == 0 {
 			continue
 		}
 		msg, err := s.MessageByID(r.MessageID)
-		if err != nil {
+		if err != nil || msg.AuthorType == "agent" {
 			continue
 		}
 		d.startSessionForMessage(threadID, r.MessageID, msg.Content)
@@ -73,9 +78,17 @@ func registerSessionRoutes(mux *http.ServeMux, s *store.Store, d Deps) {
 			return
 		}
 		switch {
-		case len(parts) == 1 && r.Method == http.MethodGet:
+		case len(parts) == 1:
+			if r.Method != http.MethodGet {
+				writeErr(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
+				return
+			}
 			serveSession(s, id, w)
-		case len(parts) == 2 && parts[1] == "cancel" && r.Method == http.MethodPost:
+		case len(parts) == 2 && parts[1] == "cancel":
+			if r.Method != http.MethodPost {
+				writeErr(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
+				return
+			}
 			serveCancel(s, d, id, w, r)
 		default:
 			writeErr(w, http.StatusNotFound, "SESSION_NOT_FOUND", "unknown route")
@@ -166,8 +179,6 @@ func writeSessionError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeErr(w, http.StatusNotFound, "SESSION_NOT_FOUND", "no such session")
-	case errors.Is(err, store.ErrInvalid):
-		writeErr(w, http.StatusBadRequest, "BAD_JSONL", "invalid request")
 	default:
 		slog.Error("session request failed", "err", err)
 		writeErr(w, http.StatusInternalServerError, "DAEMON_ERROR", "session request failed")
