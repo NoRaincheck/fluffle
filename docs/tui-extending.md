@@ -43,7 +43,7 @@ Always update `helpView()` for relevant views.
 |---------|------|
 | Refresh after action | `return m, m.fetchInbox()` |
 | Error in status bar | `m.status = fmt.Sprintf("error: %v", msg.err)` |
-| Empty state | `items = []string{"  (nothing here — press n to create)"}` |
+| Empty state | `items = []string{"  (nothing here)"}` |
 | Guard empty list | `if len(items) == 0 || cursor < 0 || cursor >= len(items)` |
 
 ## Modifying the Preview Panel

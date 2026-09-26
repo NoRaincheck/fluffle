@@ -119,7 +119,9 @@ The character keys `handleKey` acts on are `q`, `k`/`↑`, `j`/`↓`, `r`, `v`, 
 | `sessionTickThread` | Thread a tick is in flight for, so arming stays idempotent |
 | `sessionTickGen` | Monotonic tick generation; a `sessionTickMsg` with a stale gen is dropped |
 
-`sessionForCursor()` resolves the pane's session by looking `sessionsByMsg` up with the **id of the message the cursor's inbox row represents**. A row is a channel/thread group whose representative is that group's newest message, so `s` only resolves while the `@mention` that started the run is still the group's most recent message. So when a newer message lands — normally the agent's own reply — that message becomes the representative, the row resolves to a message with no session, and `s` reports `no session on this message`. The finished run is still in the API; the inbox row just no longer points at it.
+`sessionForCursor()` resolves the pane's session by looking `sessionsByMsg` up with the **id of the message the cursor's inbox row represents**. A row is a channel/thread group whose representative is that group's newest message, and `inboxFilteredSorted()` groups *before* it filters, so a thread yields exactly one row whether or not a filter is active — a filter removes rows, it never splits a thread into per-message rows. `s` therefore resolves only while the `@mention` that started the run is still the group's most representative message.
+
+That representative is a projection of the **cached** `m.inbox`, which is refetched only on `Init`, on filter apply, on return from a pushed view, and after a send — the session poll refetches sessions, never the inbox. So a run that finishes does **not** immediately change the row: a user sitting in the inbox normally still has a working `s`, because the cached representative is still the `@mention`. The row goes inert at the next inbox refetch, which is when the agent's reply — newer, and posted by the daemon rather than by the TUI — becomes the representative. From then on `s` reports `no session on this message` on that row. The pane does not blank in the meantime: it falls back to the loaded `m.session`. What is lost is the ability to re-open a session on a row that no longer resolves to one, not the ability to keep reading the one already on screen.
 
 ### Data Fetching
 
@@ -279,7 +281,7 @@ Centers a multi-line string horizontally within `width` columns. Used for compos
 | Dispatched mutation timeout, response loss, or acknowledgement failure | `error: DELIVERY_UNKNOWN: ...`; the modal stays open and the user re-reads the thread before retrying |
 | Daemon error response | Rendered as `error: <CODE>: <message>` from the daemon error envelope |
 | Empty compose | Compose modal shows "cannot be empty" in red |
-| Empty inbox | Status bar shows "no messages — press n for new thread" |
+| Empty inbox | Status bar shows `inbox — no messages · q quit`, or `inbox — 0/N messages (filtered)` followed by the sort/filter suffix and `q quit` when a filter hides every row |
 
 Error strings are prefixed with a contract code: `DAEMON_DOWN` when the daemon cannot be reached or a connection cannot be established, `DAEMON_ERROR` when a response cannot be decoded or the daemon reports a server-side failure, and `DELIVERY_UNKNOWN` when a dispatched write may have committed without a verifiable acknowledgement. All errors go through the status bar or compose modal — never panic.
 
@@ -314,7 +316,7 @@ model.Update(tea.KeyMsg)
   └─ no ──▶ handleKey(key)
               │
               ├─ ↑↓/j/k ──▶ cursor++, cursor-- ──▶ syncVisibleData()
-              ├─ r ──▶ handleReply() ──▶ compose.Open(composeModeMessage)
+              ├─ r ──▶ handleThreadReply() ──▶ compose.Open(composeModeMessage)
               ├─ Enter ──▶ viewInboxDetail (fullscreen thread)
               ├─ v ──▶ toggle sort ──▶ syncVisibleData()
               ├─ l/L ──▶ toggle inbox layout ──▶ syncVisibleData()
