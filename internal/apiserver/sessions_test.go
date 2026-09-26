@@ -175,18 +175,21 @@ func TestImportedAgentLineNeverTriggers(t *testing.T) {
 	}
 }
 
-func TestImportedBatchTriggersOnlyHumanLine(t *testing.T) {
-	_, h, starter, _, thID := newSessionHandler(t, oneAgentCfg)
+func TestImportedBatchNeverTriggers(t *testing.T) {
+	s, h, starter, _, thID := newSessionHandler(t, oneAgentCfg)
 	rec := postThread(t, h, thID, "events", `{"import":true,"events":[{"name":"probe","author_type":"agent","role":"assistant","content":"@reviewer agent line"},{"name":"alice","author_type":"human","role":"user","content":"@reviewer human line"}]}`, "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d body %s", rec.Code, rec.Body.String())
 	}
-	calls := starter.snapshot()
-	if len(calls) != 1 {
-		t.Fatalf("calls = %v, want 1: only the human line may trigger", calls)
+	if calls := starter.snapshot(); len(calls) != 0 {
+		t.Fatalf("import started %d agent session(s) %v, want 0: import must be a data operation", len(calls), calls)
 	}
-	if want := fmt.Sprintf("%d:2:reviewer", thID); calls[0] != want {
-		t.Fatalf("call = %q, want %q", calls[0], want)
+	msgs, err := s.ListMessages(thID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("imported messages = %d, want 2: suppressing the trigger must not drop data", len(msgs))
 	}
 }
 

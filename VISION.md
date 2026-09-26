@@ -93,6 +93,8 @@ $ flf thread export --thread 42 --format jsonl > session.jsonl
 $ flf thread import --file session.jsonl --channel "local-context"   # or --thread 42 to append
 ```
 
+Import is inert with respect to agent runs: a human `@mention` inside an imported file does not start a session, so receiving a shared thread cannot launch a subprocess on your machine. Post the request as a live message to run an agent.
+
 There is deliberately no `flf agent invoke`. An agent run is started by a human `@mention` in a message and is cancelled only by a human.
 
 ---
@@ -111,5 +113,5 @@ These four questions were left open when this manifesto was written. Each is now
    ```
    `metadata` is accepted on input but never persisted, and is omitted from output when empty. A legacy `author` key is still accepted as an alias for `name`.
 
-4. **Orphaned Channel Lifecycle — permanently persistent, no TTL.** `--orphaned` sets `is_orphaned=1` and leaves `repo_abs_path` NULL; the channel name is then globally unique rather than unique per repo. Reaping is left to the human via manual archive. Note that archiving is not implemented yet: `archived_at` exists in the schema and is read by the list queries, but nothing writes it and no CLI command sets it.
+4. **Orphaned Channel Lifecycle — permanently persistent, no TTL.** `--orphaned` sets `is_orphaned=1` and leaves `repo_abs_path` NULL; the channel name is then globally unique rather than unique per repo. Reaping is left to the human via manual archive. Note that archiving is not implemented: `channels.archived_at` and `threads.archived_at` were removed from the schema after being found to be read by seven queries and written by none, so today there is no reaping mechanism at all.
 

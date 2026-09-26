@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"time"
 )
 
@@ -78,6 +79,52 @@ func EnsureDaemon() (string, error) {
 	return EnsureDaemonContext(context.Background())
 }
 
+var spawnDaemon = func() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(exe, "daemon", "start", "--background")
+	cmd.Stdout, cmd.Stderr = nil, nil
+	return cmd.Start()
+}
+
+const (
+	spawnLockWait = 5 * time.Second
+	spawnLockPoll = 25 * time.Millisecond
+)
+
+func withSpawnLock(ctx context.Context, fn func() error) error {
+	home := FluffleHome()
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		return fn()
+	}
+	f, err := os.OpenFile(filepath.Join(home, "daemon.lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return fn()
+	}
+	defer f.Close()
+	deadline := time.Now().Add(spawnLockWait)
+	for {
+		lockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if lockErr == nil {
+			defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+			return fn()
+		}
+		if !errors.Is(lockErr, syscall.EWOULDBLOCK) {
+			return fn()
+		}
+		if time.Now().After(deadline) {
+			return fn()
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(spawnLockPoll):
+		}
+	}
+}
+
 func EnsureDaemonContext(ctx context.Context) (string, error) {
 	if base, err := DaemonBaseURLContext(ctx); err == nil {
 		return base, nil
@@ -85,14 +132,18 @@ func EnsureDaemonContext(ctx context.Context) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	exe, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	cmd := exec.Command(exe, "daemon", "start", "--background")
-	cmd.Stdout, cmd.Stderr = nil, nil
-	if err := cmd.Start(); err != nil {
+	upWithoutSpawn := false
+	if err := withSpawnLock(ctx, func() error {
+		if _, err := DaemonBaseURLContext(ctx); err == nil {
+			upWithoutSpawn = true
+			return nil
+		}
+		return spawnDaemon()
+	}); err != nil {
 		return "", errors.New("DAEMON_DOWN: spawn failed")
+	}
+	if upWithoutSpawn {
+		return DaemonBaseURLContext(ctx)
 	}
 	var last error
 	for i := 0; i < 3; i++ {

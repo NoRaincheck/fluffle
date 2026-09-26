@@ -368,7 +368,7 @@ type InboxMessage struct {
 
 ## ListInbox Store Method
 
-`ListInbox(limit int) ([]InboxMessage, error)` — SQL joins `messages → threads → channels`, excludes archived, orders DESC then reverses to ASC. Limits capped at 200, negative defaults to 100.
+`ListInbox(limit int) ([]InboxMessage, error)` — SQL joins `messages → threads → channels`, orders DESC then reverses to ASC. Limits capped at 200, negative defaults to 100.
 
 ## GET /v1/inbox API Endpoint
 
