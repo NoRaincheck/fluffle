@@ -3443,7 +3443,7 @@ In `internal/session/manager.go`, replace the `resolveReply` stub with:
 
 ```go
 func (m *Manager) resolveReply(id int64, entry agentcfg.Entry, tc store.ThreadContext, result runner.Result) {
-	exit := int64ptr(result.ExitCode)
+	exit := int64ptr(int64(result.ExitCode))
 	if entry.Reply == "stdout" {
 		m.postReply(id, entry, tc, m.collectStdout(id), exit)
 		return
