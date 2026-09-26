@@ -106,6 +106,7 @@ type model struct {
 	previewMode         previewMode
 	sessions            []store.Session
 	sessionsByMsg       map[int64]store.Session
+	sessionMu           *sync.RWMutex
 	session             *store.Session
 	sessionEvents       []store.SessionEvent
 	sessionPollThreadID int64
@@ -115,8 +116,9 @@ type model struct {
 
 func New(base string) tea.Model {
 	m := model{
-		view: viewChannels,
-		api:  NewAPIClient(base),
+		view:    viewChannels,
+		api:     NewAPIClient(base),
+		sessionMu: &sync.RWMutex{},
 	}
 	m.compose = composeModel{width: 60, height: 4}
 	return m

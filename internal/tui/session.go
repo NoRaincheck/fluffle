@@ -74,6 +74,7 @@ func (m *model) fetchSessionsForPreview() tea.Cmd {
 }
 
 func (m *model) applySessions(sessions []store.Session) (tea.Model, tea.Cmd) {
+	m.sessionMu.Lock()
 	m.sessions = sessions
 	m.sessionsByMsg = make(map[int64]store.Session, len(sessions))
 	for _, s := range sessions {
@@ -85,6 +86,7 @@ func (m *model) applySessions(sessions []store.Session) (tea.Model, tea.Cmd) {
 			m.session = &fresh
 		}
 	}
+	m.sessionMu.Unlock()
 	return m, m.syncSessionTick()
 }
 
@@ -93,6 +95,8 @@ func isSessionLive(status string) bool {
 }
 
 func (m *model) anySessionActive() bool {
+	m.sessionMu.RLock()
+	defer m.sessionMu.RUnlock()
 	for _, s := range m.sessions {
 		if isSessionLive(s.Status) {
 			return true
@@ -118,6 +122,8 @@ func (m *model) syncSessionTick() tea.Cmd {
 }
 
 func (m *model) sessionForCursor() (store.Session, bool) {
+	m.sessionMu.RLock()
+	defer m.sessionMu.RUnlock()
 	rows := m.inboxFilteredSorted()
 	if m.cursor < 0 || m.cursor >= len(rows) {
 		return store.Session{}, false

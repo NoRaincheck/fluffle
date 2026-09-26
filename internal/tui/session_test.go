@@ -1046,6 +1046,59 @@ func TestSessionPicksTheNewestSessionInTheThread(t *testing.T) {
 	}
 }
 
+func TestSessionForCursorIsSafeUnderConcurrentSessionUpdate(t *testing.T) {
+	old := store.Session{ID: 4, TriggerMessageID: 1, ThreadID: 7, AgentName: "older", Status: store.SessionFailed}
+	recent := store.Session{ID: 9, TriggerMessageID: 1, ThreadID: 7, AgentName: "newer", Status: store.SessionSucceeded}
+	m := sessionModel(t, []store.Session{old, recent}, nil)
+	driftedRow(t, &m, store.Message{ID: 2, CreatedAt: "2026-09-26T10:05:00Z"}, []store.Session{old, recent})
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var gotErr bool
+
+	// Reader: repeatedly calls sessionForCursor from many goroutines.
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				_, ok := m.sessionForCursor()
+				if !ok {
+					mu.Lock()
+					gotErr = true
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+
+	// Writer: simulates applySessions replacing the sessions slice concurrently.
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				sess := store.Session{
+					ID:               int64(n*200 + j),
+					TriggerMessageID: 1,
+					ThreadID:         7,
+					AgentName:        fmt.Sprintf("update-%d", j),
+					Status:           store.SessionRunning,
+				}
+				m.sessionMu.Lock()
+				m.sessions = []store.Session{sess}
+				m.sessionsByMsg = map[int64]store.Session{1: sess}
+				m.sessionMu.Unlock()
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	if gotErr {
+		t.Fatal("sessionForCursor must always resolve under concurrent session updates")
+	}
+}
+
 func TestSessionDoesNotLeakAnotherThreadsSession(t *testing.T) {
 	other := store.Session{ID: 5, TriggerMessageID: 1, ThreadID: 8, AgentName: "elsewhere", Status: store.SessionSucceeded}
 	m := sessionModel(t, []store.Session{other}, nil)
