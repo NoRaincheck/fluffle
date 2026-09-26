@@ -2485,3 +2485,51 @@ func TestAgentSessionRejectsNonPositiveIDBeforeAnyDaemonContact(t *testing.T) {
 		})
 	}
 }
+
+func TestDaemonStatusHonorsJSONFlag(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"status":"ok"}`)
+	}))
+	defer srv.Close()
+	useTestDaemon(t, srv)
+
+	code, stdout, stderr := captureOutput(t, func() int {
+		return run([]string{"daemon", "status", "--json"})
+	})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (stderr %q)", code, stderr)
+	}
+	var got struct {
+		Status string `json:"status"`
+		URL    string `json:"url"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nstdout=%q\nstderr=%q", err, stdout, stderr)
+	}
+	if got.Status != "up" {
+		t.Fatalf("status = %q, want %q (stdout %q)", got.Status, "up", stdout)
+	}
+	if got.URL == "" {
+		t.Fatalf("url is empty (stdout %q)", stdout)
+	}
+}
+
+func TestDaemonStatusWithoutJSONFlagStaysPlainText(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"status":"ok"}`)
+	}))
+	defer srv.Close()
+	useTestDaemon(t, srv)
+
+	code, stdout, stderr := captureOutput(t, func() int {
+		return run([]string{"daemon", "status"})
+	})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (stderr %q)", code, stderr)
+	}
+	if !strings.HasPrefix(stdout, "daemon up at ") {
+		t.Fatalf("stdout = %q, want plain-text %q", stdout, "daemon up at ...")
+	}
+}

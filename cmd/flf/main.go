@@ -1143,13 +1143,14 @@ func reactAddCmd(args []string) int {
 }
 
 func daemonCmd(args []string) int {
+	if len(args) == 0 {
+		return fail("BAD_ARGS", "usage: flf daemon <start|stop|status> [--json] [--background]")
+	}
 	fs := newFlagSet("daemon")
 	jsonOut := fs.Bool("json", false, "JSON output")
-	if err := fs.Parse(args); err != nil {
+	background := fs.Bool("background", false, "run the daemon in the background")
+	if err := fs.Parse(args[1:]); err != nil {
 		return fail("BAD_ARGS", err.Error())
-	}
-	if len(args) == 0 {
-		return fail("BAD_ARGS", "usage: flf daemon <start|stop|status> [--json]")
 	}
 	switch args[0] {
 	case "status":
@@ -1165,8 +1166,7 @@ func daemonCmd(args []string) int {
 		fmt.Println("daemon up at", base)
 		return 0
 	case "start":
-		background := len(args) > 1 && args[1] == "--background"
-		return daemonStart(background)
+		return daemonStart(*background)
 	case "stop":
 		return daemonStop()
 	default:
