@@ -105,11 +105,14 @@ func (m *model) syncSessionTick() tea.Cmd {
 		m.releaseSessionPoll()
 		return nil
 	}
-	if m.sessionTickPending || !m.anySessionActive() {
+	if !m.anySessionActive() {
 		return nil
 	}
-	m.sessionTickPending = true
-	return sessionTickCmd(m.sessionPollThreadID, sessionTickInterval)
+	if m.sessionPollThreadID != 0 && m.sessionTickThread == m.sessionPollThreadID {
+		return nil
+	}
+	m.sessionTickThread = m.sessionPollThreadID
+	return sessionTickCmd(m.sessionTickThread, sessionTickInterval)
 }
 
 func (m *model) sessionForCursor() (store.Session, bool) {

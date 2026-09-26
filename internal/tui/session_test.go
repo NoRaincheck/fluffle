@@ -283,6 +283,7 @@ func TestTickHandlerRefetchesWhileActiveThenStops(t *testing.T) {
 	m := sessionModel(t, nil, nil)
 	m.sessions = []store.Session{{ID: 1, Status: store.SessionRunning}}
 	m.sessionPollThreadID = 7
+	m.sessionTickThread = 7
 	m.previewThreadID = 7
 	next, cmd := m.Update(sessionTickMsg{threadID: 7})
 	if cmd == nil {
@@ -607,6 +608,34 @@ func TestHiddenPaneIssuesNoSessionFetchesOnKeyPresses(t *testing.T) {
 		t.Fatalf("a hidden pane issued %d session fetches on %d key presses, want 0: %v", got, len(keys), hiddenHits())
 	}
 
+	next, _ = hidden.Update(keyRunes("p"))
+	hidden = toModel(next)
+	if !hidden.preview {
+		t.Fatal("precondition: the preview must be switched back on")
+	}
+	next, resizeCmd := hidden.Update(tea.WindowSizeMsg{Width: 70, Height: 40})
+	hidden = toModel(next)
+	if !hidden.preview {
+		t.Fatal("precondition: a resize must not switch the preview off, or this stops testing the width route")
+	}
+	if hidden.previewVisible() {
+		t.Fatal("precondition: a 70-column terminal must hide the pane")
+	}
+	if resizeCmd != nil {
+		flattenMsgs(resizeCmd())
+	}
+	before = len(hiddenHits())
+	for _, k := range keys {
+		next, cmd := hidden.Update(k)
+		hidden = toModel(next)
+		if cmd != nil {
+			flattenMsgs(cmd())
+		}
+	}
+	if got := len(hiddenHits()) - before; got != 0 {
+		t.Fatalf("a pane hidden by width issued %d session fetches on %d key presses, want 0: %v", got, len(keys), hiddenHits())
+	}
+
 	visible, visibleHits := pollModel(t, []store.Session{running})
 	visible.sessionPollThreadID = 0
 	before = len(visibleHits())
@@ -621,8 +650,8 @@ func TestHiddenPaneIssuesNoSessionFetchesOnKeyPresses(t *testing.T) {
 		t.Fatalf("positive control: the same key presses with the pane visible issued no fetches: %v", visibleHits())
 	}
 	for _, path := range visibleHits()[before:] {
-		if path != "/v1/threads/7/sessions" {
-			t.Fatalf("unexpected fetch %q", path)
+		if !strings.HasSuffix(path, "/sessions") {
+			t.Fatalf("the session poll hit an unexpected route: %q", path)
 		}
 	}
 }
@@ -631,15 +660,15 @@ func TestTwoAcceptedResponsesProduceOneChain(t *testing.T) {
 	running := store.Session{ID: 3, TriggerMessageID: 42, ThreadID: 7, Status: store.SessionRunning}
 	m, hits := pollModel(t, []store.Session{running})
 	before := len(hits())
-	m.sessionTickPending = false
+	m.sessionTickThread = 0
 
 	next, cmd := m.Update(sessionsFetchedMsg{threadID: 7, sessions: []store.Session{running}})
 	m = toModel(next)
 	if cmd == nil {
 		t.Fatal("precondition: the first accepted response must schedule a chain")
 	}
-	if !m.sessionTickPending {
-		t.Fatal("precondition: a scheduled chain must be marked pending")
+	if m.sessionTickThread != 7 {
+		t.Fatalf("precondition: a scheduled chain must be marked with its thread, got %d", m.sessionTickThread)
 	}
 
 	next, cmd = m.Update(sessionsFetchedMsg{threadID: 7, sessions: []store.Session{running}})
@@ -647,8 +676,8 @@ func TestTwoAcceptedResponsesProduceOneChain(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("a duplicate accepted response must not schedule a second chain")
 	}
-	if !m.sessionTickPending {
-		t.Fatal("the surviving chain must still be pending")
+	if m.sessionTickThread != 7 {
+		t.Fatalf("the surviving chain must still be pending, got thread %d", m.sessionTickThread)
 	}
 	_ = before
 }
@@ -665,8 +694,8 @@ func TestTickAfterWithdrawnArmingDoesNotFetchThreadZero(t *testing.T) {
 	if m.sessionPollThreadID != 0 {
 		t.Fatalf("precondition: the arming must be withdrawn, got %d", m.sessionPollThreadID)
 	}
-	if !m.sessionTickPending {
-		t.Fatal("precondition: a tick scheduled before the hide is still outstanding")
+	if m.sessionTickThread != 7 {
+		t.Fatalf("precondition: a tick scheduled before the hide is still outstanding, got thread %d", m.sessionTickThread)
 	}
 
 	next, cmd := m.Update(sessionTickMsg{threadID: 7})
@@ -677,8 +706,8 @@ func TestTickAfterWithdrawnArmingDoesNotFetchThreadZero(t *testing.T) {
 	if got := len(hits()) - before; got != 0 {
 		t.Fatalf("a tick whose arming was withdrawn issued %d fetches: %v", got, hits())
 	}
-	if m.sessionTickPending {
-		t.Fatal("a dead tick must not leave the chain marked pending")
+	if m.sessionTickThread != 0 {
+		t.Fatalf("a dead tick must clear its own outstanding mark, got thread %d", m.sessionTickThread)
 	}
 }
 
@@ -715,6 +744,134 @@ func TestFetchErrorReleasesTheArmingSoTheNextSyncRetries(t *testing.T) {
 	}
 	if got := hits()[len(hits())-1]; got != "/v1/threads/7/sessions" {
 		t.Fatalf("retry hit %q", got)
+	}
+}
+
+func twoThreadPollModel(t *testing.T, sessions []store.Session) (model, func() []string) {
+	t.Helper()
+	srv, hits := sessionPollServer(t, sessions)
+	m := toModel(New(srv.URL))
+	m.view = viewInbox
+	m.width = 120
+	m.height = 40
+	m.preview = true
+	m.inboxLayout = inboxLayoutCompact
+	m.inbox = []store.InboxMessage{
+		{Message: store.Message{ID: 42, ThreadID: 7, CreatedAt: "2026-09-26T12:00:00Z"}, ChannelID: 1, ChannelName: "c", ThreadTitle: "t7"},
+		{Message: store.Message{ID: 99, ThreadID: 9, CreatedAt: "2026-09-26T11:00:00Z"}, ChannelID: 1, ChannelName: "c", ThreadTitle: "t9"},
+	}
+	return m, hits
+}
+
+func TestThreadSwitchRearmsTheChainForTheNewThread(t *testing.T) {
+	seven := store.Session{ID: 1, TriggerMessageID: 42, ThreadID: 7, Status: store.SessionRunning}
+	nine := store.Session{ID: 2, TriggerMessageID: 99, ThreadID: 9, Status: store.SessionRunning}
+	all := []store.Session{seven, nine}
+	m, hits := twoThreadPollModel(t, all)
+	before := len(hits())
+
+	next, cmd := m.Update(previewMessagesFetchedMsg{threadID: 7})
+	m = toModel(next)
+	for _, msg := range flattenMsgs(cmd()) {
+		if sm, ok := msg.(sessionsFetchedMsg); ok {
+			next, cmd = m.Update(sm)
+			m = toModel(next)
+		}
+	}
+	if m.sessionTickThread != 7 {
+		t.Fatalf("precondition: the thread 7 chain must be armed, got thread %d", m.sessionTickThread)
+	}
+
+	next, cmd = m.Update(keyRunes("j"))
+	m = toModel(next)
+	if m.cursor != 1 {
+		t.Fatalf("precondition: the cursor must be on the second thread, got %d", m.cursor)
+	}
+	for _, msg := range flattenMsgs(cmd()) {
+		if pm, ok := msg.(previewMessagesFetchedMsg); ok {
+			next, _ = m.Update(pm)
+			m = toModel(next)
+		}
+	}
+	if m.previewThreadID != 9 {
+		t.Fatalf("precondition: the preview must be on thread 9, got %d", m.previewThreadID)
+	}
+
+	next, cmd = m.Update(sessionsFetchedMsg{threadID: 9, sessions: all})
+	m = toModel(next)
+	if m.sessionPollThreadID != 9 {
+		t.Fatalf("the new thread must be armed, got %d", m.sessionPollThreadID)
+	}
+	if m.sessionTickThread != 9 {
+		t.Fatalf("a thread switch must not cancel the poll: the new thread's chain was declined because thread %d's was pending", m.sessionTickThread)
+	}
+	if cmd == nil {
+		t.Fatal("the new thread's chain must be scheduled")
+	}
+	flattenMsgs(cmd())
+	if len(hits()) <= before {
+		t.Fatalf("the new thread must actually be polled: %v", hits())
+	}
+}
+
+func TestStaleTickForAnAbandonedThreadDoesNotFetch(t *testing.T) {
+	seven := store.Session{ID: 1, TriggerMessageID: 42, ThreadID: 7, Status: store.SessionRunning}
+	nine := store.Session{ID: 2, TriggerMessageID: 99, ThreadID: 9, Status: store.SessionRunning}
+	all := []store.Session{seven, nine}
+	m, hits := twoThreadPollModel(t, all)
+	before := len(hits())
+
+	next, _ := m.Update(previewMessagesFetchedMsg{threadID: 7})
+	m = toModel(next)
+	m.sessionPollThreadID = 9
+	m.sessionTickThread = 9
+
+	next, cmd := m.Update(sessionTickMsg{threadID: 7})
+	m = toModel(next)
+	if cmd != nil {
+		flattenMsgs(cmd())
+	}
+	if got := len(hits()) - before; got != 0 {
+		t.Fatalf("a tick for the abandoned thread 7 issued %d fetches while thread 9 is armed: %v", got, hits())
+	}
+	if m.sessionTickThread != 9 {
+		t.Fatalf("a foreign tick must not clear the armed chain for thread 9, got thread %d", m.sessionTickThread)
+	}
+	if m.sessionTickThread != 9 {
+		t.Fatalf("a foreign tick must not disturb the armed chain, got thread %d", m.sessionTickThread)
+	}
+	if m.sessionPollThreadID != 9 {
+		t.Fatalf("a foreign tick must not disturb the arming, got %d", m.sessionPollThreadID)
+	}
+}
+
+func TestStaleTickAfterAReleasedArmingDoesNotFetch(t *testing.T) {
+	running := store.Session{ID: 3, TriggerMessageID: 42, ThreadID: 7, Status: store.SessionRunning}
+	m, hits := pollModel(t, []store.Session{running})
+	before := len(hits())
+	if m.sessionTickThread != 7 {
+		t.Fatalf("precondition: the chain must be armed, got thread %d", m.sessionTickThread)
+	}
+
+	next, _ := m.Update(sessionsFetchedMsg{threadID: 7, err: errors.New("DAEMON_DOWN: refused")})
+	m = toModel(next)
+	if m.sessionPollThreadID != 0 {
+		t.Fatalf("precondition: a failed fetch must release the arming, got %d", m.sessionPollThreadID)
+	}
+	if m.sessionTickThread != 7 {
+		t.Fatalf("precondition: the outstanding tick must survive, got thread %d", m.sessionTickThread)
+	}
+
+	next, cmd := m.Update(sessionTickMsg{threadID: 7})
+	m = toModel(next)
+	if cmd != nil {
+		flattenMsgs(cmd())
+	}
+	if got := len(hits()) - before; got != 0 {
+		t.Fatalf("a tick whose arming was released issued %d fetches: %v", got, hits())
+	}
+	if m.sessionTickThread != 0 {
+		t.Fatalf("the tick must clear its own outstanding mark, got thread %d", m.sessionTickThread)
 	}
 }
 
@@ -859,6 +1016,7 @@ func TestTickRefetchesWithoutArmingASecondTimer(t *testing.T) {
 	m := sessionModel(t, []store.Session{running}, nil)
 	m.sessions = []store.Session{running}
 	m.sessionPollThreadID = 7
+	m.sessionTickThread = 7
 	_, cmd := m.Update(sessionTickMsg{threadID: 7})
 	if cmd == nil {
 		t.Fatal("a tick with an active session must refetch")
@@ -900,6 +1058,7 @@ func TestTickPollsTheThreadItWasArmedFor(t *testing.T) {
 	m.preview = true
 	m.sessions = []store.Session{{ID: 1, Status: store.SessionRunning}}
 	m.sessionPollThreadID = 42
+	m.sessionTickThread = 42
 	_, cmd := m.Update(sessionTickMsg{threadID: 42})
 	if cmd == nil {
 		t.Fatal("a tick with an active session must refetch")
@@ -981,6 +1140,7 @@ func TestTickSurvivesAcrossAFetchAndStopsWhenTheFetchFails(t *testing.T) {
 	ended := store.Session{ID: 3, TriggerMessageID: 42, Status: store.SessionSucceeded}
 	m := sessionModel(t, []store.Session{running}, nil)
 	m.sessionPollThreadID = 7
+	m.sessionTickThread = 7
 	m.previewThreadID = 7
 	m.sessions = []store.Session{running}
 	next, cmd := m.Update(sessionTickMsg{threadID: 7})
