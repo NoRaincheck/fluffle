@@ -189,6 +189,13 @@ func TestSessionEventsGetMonotonicSeq(t *testing.T) {
 	s, thID := newSessionFixture(t)
 	msgID := triggerMessage(t, s, thID, "@probe hi")
 	id, _ := s.CreateSession(thID, msgID, "probe", SessionQueued, "auto", "c", nil)
+	none, err := s.ListSessionEvents(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if none == nil {
+		t.Fatal("empty event list must be an empty slice, not nil")
+	}
 	types := []string{SessionEventPrompt, SessionEventStdout, SessionEventStdout, SessionEventExit}
 	for i, typ := range types {
 		seq, _, err := s.AppendSessionEvent(id, typ, "chunk")
@@ -260,6 +267,9 @@ func TestCountAgentMessagesSince(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := s.AppendMessage(thID, "probe", "agent", "assistant", "agent words"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AppendMessage(thID, "probe", "human", "user", "human words"); err != nil {
 		t.Fatal(err)
 	}
 	n, err := s.CountAgentMessagesSince(thID, "probe", "1970-01-01T00:00:00Z")
@@ -342,16 +352,25 @@ func TestReconcileSessionsTerminatesOnlyNonTerminal(t *testing.T) {
 	if n != 2 {
 		t.Fatalf("reconciled = %d, want 2", n)
 	}
-	for _, id := range []int64{wasRunning, wasQueued} {
-		got, _ := s.GetSession(id)
+	for _, want := range []struct {
+		id      int64
+		wantErr string
+	}{
+		{wasRunning, "daemon restarted while running"},
+		{wasQueued, "daemon restarted while queued"},
+	} {
+		got, _ := s.GetSession(want.id)
 		if got.Status != SessionCanceled {
-			t.Fatalf("session %d status = %q", id, got.Status)
+			t.Fatalf("session %d status = %q", want.id, got.Status)
 		}
 		if got.FinishedAt == nil || *got.FinishedAt != "2026-01-01T00:10:00Z" {
-			t.Fatalf("session %d finished_at = %v", id, got.FinishedAt)
+			t.Fatalf("session %d finished_at = %v", want.id, got.FinishedAt)
 		}
 		if got.Error == nil {
-			t.Fatalf("session %d has no error note", id)
+			t.Fatalf("session %d has no error note, want %q", want.id, want.wantErr)
+		}
+		if *got.Error != want.wantErr {
+			t.Fatalf("session %d error = %q, want %q", want.id, *got.Error, want.wantErr)
 		}
 	}
 	untouched, _ := s.GetSession(done)
