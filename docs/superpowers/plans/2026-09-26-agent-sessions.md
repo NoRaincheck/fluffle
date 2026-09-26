@@ -5414,7 +5414,9 @@ func TestE2E_AgentMentionWithMissingBinaryFailsVisibly(t *testing.T) {
 }
 ```
 
-Add this one small helper to `cmd/flf/e2e_test.go` for reading an id out of a `--json` response. It is the only helper these tests need beyond what already exists:
+Add this one small helper to `cmd/flf/e2e_test.go` for reading an id out of a `--json` response. It is the only helper these tests need beyond what already exists.
+
+**Note the `id` / `ID` fallback, which is not optional.** `flf channel create --json` emits two different keys depending on its path: `"id"` from an anonymous struct tagged `json:"id"` when the channel is newly created, and `"ID"` from a `store.Channel` with no json tag — so Go marshals the field name verbatim — when the channel already existed. This is pre-existing CLI inconsistency; **do not change the emitted key**, since other consumers may depend on it and this feature must not reshape existing output. Read either.
 
 ```go
 func jsonIDField(t *testing.T, out, field string) string {
@@ -5423,11 +5425,16 @@ func jsonIDField(t *testing.T, out, field string) string {
 	if err := json.Unmarshal([]byte(out), &payload); err != nil {
 		t.Fatalf("unmarshal %q: %v", out, err)
 	}
-	v, ok := payload[field]
-	if !ok {
-		t.Fatalf("field %q missing from %q", field, out)
+	if v, ok := payload[field]; ok {
+		return fmt.Sprintf("%v", v)
 	}
-	return fmt.Sprintf("%v", v)
+	if field == "id" {
+		if v, ok := payload["ID"]; ok {
+			return fmt.Sprintf("%v", v)
+		}
+	}
+	t.Fatalf("field %q missing from %q", field, out)
+	return ""
 }
 ```
 
