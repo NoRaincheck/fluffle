@@ -19,10 +19,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/NoRaincheck/fluffle/internal/agentcfg"
 	"github.com/NoRaincheck/fluffle/internal/apiserver"
 	"github.com/NoRaincheck/fluffle/internal/client"
 	"github.com/NoRaincheck/fluffle/internal/jsonl"
 	"github.com/NoRaincheck/fluffle/internal/repo"
+	"github.com/NoRaincheck/fluffle/internal/runner"
+	"github.com/NoRaincheck/fluffle/internal/session"
 	"github.com/NoRaincheck/fluffle/internal/store"
 	"github.com/NoRaincheck/fluffle/internal/tui"
 )
@@ -804,15 +807,19 @@ func postJSONLBatch(base string, threadID int64, lines []jsonl.Line, agentID str
 
 func agentCmd(args []string) int {
 	if len(args) == 0 {
-		return fail("BAD_ARGS", "usage: flf agent <read|append>")
+		return fail("BAD_ARGS", "usage: flf agent <read|append|list|session>")
 	}
 	switch args[0] {
 	case "read":
 		return agentReadCmd(args[1:])
 	case "append":
 		return agentAppendCmd(args[1:])
+	case "list":
+		return agentListCmd(args[1:])
+	case "session":
+		return agentSessionCmd(args[1:])
 	default:
-		return fail("BAD_ARGS", "usage: flf agent <read|append>")
+		return fail("BAD_ARGS", "usage: flf agent <read|append|list|session>")
 	}
 }
 
@@ -1167,28 +1174,93 @@ func daemonCmd(args []string) int {
 	}
 }
 
-func daemonStop() int {
-	b, err := os.ReadFile(filepath.Join(client.FluffleHome(), "daemon.json"))
+const (
+	daemonStopRequestTimeout = 2 * time.Second
+	daemonStopExitTimeout    = 5 * time.Second
+	daemonStopPollInterval   = 25 * time.Millisecond
+)
+
+func daemonStop() int { return daemonStopWithin(daemonStopExitTimeout) }
+
+func daemonStopWithin(exitTimeout time.Duration) int {
+	home := client.FluffleHome()
+	runtimeFile := filepath.Join(home, "daemon.json")
+	b, err := os.ReadFile(runtimeFile)
 	if err != nil {
 		return fail("DAEMON_DOWN", "not running")
 	}
 	var df struct {
-		PID int `json:"pid"`
+		PID  int `json:"pid"`
+		Port int `json:"port"`
 	}
 	if err := json.Unmarshal(b, &df); err != nil {
+		return fail("DAEMON_DOWN", "bad daemon.json")
+	}
+	if df.PID <= 0 {
 		return fail("DAEMON_DOWN", "bad daemon.json")
 	}
 	proc, err := os.FindProcess(df.PID)
 	if err != nil {
 		return fail("DAEMON_DOWN", err.Error())
 	}
-	if err := proc.Kill(); err != nil {
-		os.Remove(filepath.Join(client.FluffleHome(), "daemon.json"))
-		return fail("DAEMON_DOWN", err.Error())
+	if !requestDaemonShutdown(df.Port) || !waitForProcessExit(df.PID, exitTimeout) {
+		notice := fmt.Sprintf("daemon %d did not shut down gracefully; killing it", df.PID)
+		if err := proc.Kill(); err != nil {
+			os.Remove(runtimeFile)
+			return fail("DAEMON_DOWN", notice+"; kill failed: "+err.Error())
+		}
+		fmt.Fprintln(os.Stderr, "flf: "+notice)
 	}
-	os.Remove(filepath.Join(client.FluffleHome(), "daemon.json"))
+	os.Remove(runtimeFile)
 	fmt.Println("daemon stopped")
 	return 0
+}
+
+// requestDaemonShutdown asks the daemon to run its own shutdown path, which is
+// the only route that reaches the session barrier. The request is a
+// human-initiated control operation, so it deliberately carries no
+// X-Fluffle-Agent header; the route rejects agent callers with 403.
+func requestDaemonShutdown(port int) bool {
+	if port <= 0 {
+		return false
+	}
+	req, err := http.NewRequest(http.MethodPost, "http://127.0.0.1:"+strconv.Itoa(port)+"/api/shutdown", nil)
+	if err != nil {
+		return false
+	}
+	resp, err := (&http.Client{Timeout: daemonStopRequestTimeout}).Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode == http.StatusOK
+}
+
+// processAlive reports whether a pid still exists. os.FindProcess always
+// succeeds on Unix, so the only usable probe is signal 0.
+func processAlive(pid int) bool {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return proc.Signal(syscall.Signal(0)) == nil
+}
+
+// waitForProcessExit blocks until the pid is gone, the deadline passes, or the
+// pid is already dead on arrival. A killed-but-unreaped child still answers
+// signal 0, so the daemon's own reaping is what makes this return.
+func waitForProcessExit(pid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if !processAlive(pid) {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(daemonStopPollInterval)
+	}
 }
 
 func daemonStart(background bool) int {
@@ -1204,6 +1276,11 @@ func daemonStart(background bool) int {
 	if err != nil {
 		return fail("DAEMON_ERROR", err.Error())
 	}
+	agents := agentcfg.NewLoader(filepath.Join(home, "config.toml"))
+	sessions := session.NewManager(s, agents, runner.NewExec())
+	if err := sessions.Reconcile(); err != nil {
+		return fail("DAEMON_ERROR", err.Error())
+	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return fail("DAEMON_ERROR", err.Error())
@@ -1217,8 +1294,13 @@ func daemonStart(background bool) int {
 		return fail("DAEMON_ERROR", err.Error())
 	}
 	fmt.Println("fluffle daemon on 127.0.0.1:" + strconv.Itoa(port))
-	srv := &http.Server{Handler: apiserver.NewHandler(s)}
+	srv := &http.Server{Handler: apiserver.NewHandlerWithDeps(s, apiserver.Deps{
+		Starter:  sessions,
+		Agents:   agents,
+		Canceler: sessions,
+	})}
 	apiserver.SetShutdown(func() {
+		sessions.ShutdownAndWait()
 		srv.Close()
 	})
 	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
@@ -1250,7 +1332,7 @@ func daemonStartBackground() int {
 	childExit := make(chan error, 1)
 	go func() { childExit <- cmd.Wait() }()
 
-	port, err := awaitDaemonPort(home, 50, 100*time.Millisecond, childExit)
+	port, err := awaitDaemonPort(home, 50, 100*time.Millisecond, childExit, cmd.Process.Pid)
 	if err != nil {
 		return fail("DAEMON_ERROR", err.Error())
 	}
@@ -1258,13 +1340,14 @@ func daemonStartBackground() int {
 	return 0
 }
 
-func awaitDaemonPort(home string, attempts int, delay time.Duration, childExit <-chan error) (int, error) {
+func awaitDaemonPort(home string, attempts int, delay time.Duration, childExit <-chan error, childPID int) (int, error) {
 	for i := 0; i < attempts; i++ {
 		if data, err := os.ReadFile(filepath.Join(home, "daemon.json")); err == nil {
 			var df struct {
 				Port int `json:"port"`
+				PID  int `json:"pid"`
 			}
-			if json.Unmarshal(data, &df) == nil && df.Port > 0 {
+			if json.Unmarshal(data, &df) == nil && df.Port > 0 && childPID == df.PID {
 				return df.Port, nil
 			}
 		}

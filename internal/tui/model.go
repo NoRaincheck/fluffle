@@ -71,44 +71,54 @@ func inboxLayoutName(l inboxLayout) string {
 }
 
 type model struct {
-	width, height     int
-	quitting          bool
-	view              viewKind
-	cursor            int
-	scroll            int
-	status            string
-	api               *apiClient
-	channels          []store.Channel
-	threads           []store.Thread
-	messages          []store.Message
-	inbox             []store.InboxMessage
-	selectedChannel   *store.Channel
-	selectedThread    *store.Thread
-	compose           composeModel
-	filter            filterModel
-	inboxSort         inboxSort
-	inboxLayout       inboxLayout
-	fullThreads       map[int64][]store.Message
-	inboxFilterChan   string
-	inboxFilterThread string
-	preview           bool
-	previewThreads    []store.Thread
-	previewMessages   []store.Message
-	previewChannelID  int64
-	previewThreadID   int64
-	prevView          viewKind
-	hasPrev           bool
-	detailThreadID    int64
-	detailScroll      int
-	detailCursor      int
-	savedInboxCursor  int
-	savedInboxScroll  int
+	width, height       int
+	quitting            bool
+	view                viewKind
+	cursor              int
+	scroll              int
+	status              string
+	api                 *apiClient
+	channels            []store.Channel
+	threads             []store.Thread
+	messages            []store.Message
+	inbox               []store.InboxMessage
+	selectedChannel     *store.Channel
+	selectedThread      *store.Thread
+	compose             composeModel
+	filter              filterModel
+	inboxSort           inboxSort
+	inboxLayout         inboxLayout
+	fullThreads         map[int64][]store.Message
+	inboxFilterChan     string
+	inboxFilterThread   string
+	preview             bool
+	previewThreads      []store.Thread
+	previewMessages     []store.Message
+	previewChannelID    int64
+	previewThreadID     int64
+	prevView            viewKind
+	hasPrev             bool
+	detailThreadID      int64
+	detailScroll        int
+	detailCursor        int
+	savedInboxCursor    int
+	savedInboxScroll    int
+	previewMode         previewMode
+	sessions            []store.Session
+	sessionsByMsg       map[int64]store.Session
+	sessionMu           *sync.RWMutex
+	session             *store.Session
+	sessionEvents       []store.SessionEvent
+	sessionPollThreadID int64
+	sessionTickThread   int64
+	sessionTickGen      int64
 }
 
 func New(base string) tea.Model {
 	m := model{
-		view: viewChannels,
-		api:  NewAPIClient(base),
+		view:      viewChannels,
+		api:       NewAPIClient(base),
+		sessionMu: &sync.RWMutex{},
 	}
 	m.compose = composeModel{width: 60, height: 4}
 	return m
@@ -329,7 +339,44 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.previewMessages = msg.messages
 		m.previewThreadID = msg.threadID
+		return m, m.fetchSessionsForPreview()
+
+	case sessionsFetchedMsg:
+		if msg.err != nil {
+			m.status = fmt.Sprintf("error: %v", msg.err)
+			m.releaseSessionPoll()
+			return m, nil
+		}
+		if msg.threadID != m.previewThreadID {
+			return m, nil
+		}
+		m.sessionPollThreadID = msg.threadID
+		return m.applySessions(msg.sessions)
+
+	case sessionEventsFetchedMsg:
+		if msg.err != nil {
+			m.status = fmt.Sprintf("error: %v", msg.err)
+			return m, nil
+		}
+		m.session = &msg.session
+		m.sessionEvents = msg.events
+		m.previewMode = previewSession
 		return m, nil
+
+	case sessionTickMsg:
+		if m.sessionTickGen != msg.gen {
+			return m, nil
+		}
+		m.sessionTickGen = 0
+		m.sessionTickThread = 0
+		if m.sessionPollThreadID == 0 || msg.threadID != m.sessionPollThreadID {
+			return m, nil
+		}
+		if !m.previewVisible() || !m.anySessionActive() {
+			m.releaseSessionPoll()
+			return m, nil
+		}
+		return m, m.fetchSessions(msg.threadID)
 
 	case fullRowsFetchedMsg:
 		if msg.err != nil && len(msg.rows) == 0 {
@@ -681,6 +728,12 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.status = "preview off — p to show"
 		return m, nil
+	case "s":
+		next, cmd, handled := m.handleSessionKey(msg)
+		if handled {
+			return next, cmd
+		}
+		return m, cmd
 	case "g":
 		if m.view == viewInbox {
 			m.cursor = 0
@@ -833,7 +886,7 @@ func (m *model) handleThreadReply() (tea.Model, tea.Cmd) {
 }
 
 func (m *model) syncVisibleData() tea.Cmd {
-	return tea.Batch(m.maybeFetchPreview(), m.maybeFetchFullRows())
+	return tea.Batch(m.maybeFetchPreview(), m.maybeFetchFullRows(), m.fetchSessionsForPreview())
 }
 
 func (m *model) maybeFetchFullRows() tea.Cmd {
@@ -2140,6 +2193,9 @@ func (m model) renderPreview(w, h int) string {
 	}
 	var title string
 	var items []string
+	if m.view == viewInbox && m.previewMode == previewSession {
+		return m.renderSessionPreview(w, h)
+	}
 	switch m.view {
 	case viewInbox:
 		filtered := m.inboxFilteredSorted()
@@ -2646,7 +2702,11 @@ func (m model) helpView() string {
 	}
 	switch m.view {
 	case viewInbox:
-		parts = []string{hintKeyStyle.Render("↑↓/j/k") + " nav", hintKeyStyle.Render("Enter") + " view", hintKeyStyle.Render("r") + " reply", hintKeyStyle.Render("v") + " sort", hintKeyStyle.Render("f") + " filter", hintKeyStyle.Render("l") + " layout", previewHint, hintKeyStyle.Render("q") + " quit"}
+		sessionHint := hintKeyStyle.Render("s") + " session"
+		if m.previewMode == previewSession {
+			sessionHint = hintKeyStyle.Render("s") + " thread"
+		}
+		parts = []string{hintKeyStyle.Render("↑↓/j/k") + " nav", hintKeyStyle.Render("Enter") + " view", hintKeyStyle.Render("r") + " reply", hintKeyStyle.Render("v") + " sort", hintKeyStyle.Render("f") + " filter", hintKeyStyle.Render("l") + " layout", sessionHint, previewHint, hintKeyStyle.Render("q") + " quit"}
 	case viewInboxDetail:
 		parts = []string{hintKeyStyle.Render("↑↓/j/k") + " scroll", hintKeyStyle.Render("g/G") + " top/bottom", hintKeyStyle.Render("r") + " reply", hintKeyStyle.Render("Esc") + " back", previewHint, hintKeyStyle.Render("q") + " quit"}
 	case viewChannels:

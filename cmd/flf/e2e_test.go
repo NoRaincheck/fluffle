@@ -10,12 +10,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/NoRaincheck/fluffle/internal/store"
 )
 
 // waitFor polls fn every 50ms until it returns true or timeout expires.
@@ -182,8 +185,16 @@ type cliResult struct {
 
 func runCLIResult(t *testing.T, env []string, bin, input string, args ...string) cliResult {
 	t.Helper()
+	return runCLIResultInDir(t, env, bin, "", input, args...)
+}
+
+func runCLIResultInDir(t *testing.T, env []string, bin, dir, input string, args ...string) cliResult {
+	t.Helper()
 	cmd := exec.Command(bin, args...)
 	cmd.Env = append(os.Environ(), env...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
 	cmd.Stdin = strings.NewReader(input)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -354,10 +365,8 @@ func TestE2E_DaemonLifecycleEndToEnd(t *testing.T) {
 	}
 
 	// Verify process is gone
-	if proc, _ := os.FindProcess(pid); proc != nil {
-		if err := proc.Signal(os.Signal(nil)); err == nil {
-			t.Fatalf("process %d still exists after shutdown", pid)
-		}
+	if processAlive(pid) {
+		t.Fatalf("process %d still exists after shutdown", pid)
 	}
 }
 
@@ -1538,4 +1547,743 @@ func TestE2E_ReactionAfterCursorSurvivesOnOlderMessage(t *testing.T) {
 	}
 
 	stop()
+}
+
+type e2eAgentListItem struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Command     string `json:"command"`
+	Reply       string `json:"reply"`
+	Source      string `json:"source"`
+}
+
+var stdoutEventLine = regexp.MustCompile(`(?m)^\d+\tstdout\t.*the answer`)
+
+func e2eErrorMessage(t *testing.T, envelope string) string {
+	t.Helper()
+	var fields map[string]any
+	if err := json.Unmarshal([]byte(envelope), &fields); err != nil {
+		t.Fatalf("invalid error envelope: %v\n%s", err, envelope)
+	}
+	message, ok := fields["message"].(string)
+	if !ok || message == "" {
+		t.Fatalf("error envelope = %#v, want a message", fields)
+	}
+	return message
+}
+
+func e2eLines(t *testing.T, output string) []string {
+	t.Helper()
+	trimmed := strings.TrimSuffix(output, "\n")
+	if trimmed == "" {
+		t.Fatalf("output = %q, want at least one line", output)
+	}
+	return strings.Split(trimmed, "\n")
+}
+
+func decodeE2EAgentList(t *testing.T, raw string) map[string]e2eAgentListItem {
+	t.Helper()
+	var payload struct {
+		Agents []e2eAgentListItem `json:"agents"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		t.Fatalf("agent list JSON: %v\n%s", err, raw)
+	}
+	byName := map[string]e2eAgentListItem{}
+	for _, item := range payload.Agents {
+		byName[item.Name] = item
+	}
+	return byName
+}
+
+func TestE2E_AgentListCmd(t *testing.T) {
+	tmpDir := t.TempDir()
+	home := filepath.Join(tmpDir, "fluffle")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := buildTestBinary(t, tmpDir)
+	env := []string{"FLUFFLE_HOME=" + home}
+
+	repoDir := t.TempDir()
+	gitInit(t, repoDir)
+	spacedDir := filepath.Join(t.TempDir(), "repo with space")
+	if err := os.MkdirAll(spacedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitInit(t, spacedDir)
+
+	repoConfig := "[[agents]]\nname=\"local\"\ncommand=\"/bin/local\"\ndescription=\"repo agent\"\n"
+	if err := os.WriteFile(filepath.Join(repoDir, ".flf.toml"), []byte(repoConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	spacedConfig := "[[agents]]\nname=\"spaced\"\ncommand=\"/bin/spaced\"\n"
+	if err := os.WriteFile(filepath.Join(spacedDir, ".flf.toml"), []byte(spacedConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	globalConfig := "[[agents]]\nname=\"shared\"\ncommand=\"/bin/shared\"\nreply=\"cli\"\n"
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(globalConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stop := startAgentDaemon(t, bin, home)
+	runOK := func(args ...string) string {
+		t.Helper()
+		result := runCLIResult(t, env, bin, "", args...)
+		if result.exitCode != 0 {
+			t.Fatalf("flf %v: exit=%d stdout=%q stderr=%q", args, result.exitCode, result.stdout, result.stderr)
+		}
+		if result.stderr != "" {
+			t.Fatalf("flf %v wrote stderr: %q", args, result.stderr)
+		}
+		return result.stdout
+	}
+
+	agents := decodeE2EAgentList(t, runOK("agent", "list", "--repo", repoDir, "--json"))
+	local, ok := agents["local"]
+	if !ok {
+		t.Fatalf("agents = %+v, want the repo entry", agents)
+	}
+	if local.Description != "repo agent" || local.Command != "/bin/local" || local.Reply != "auto" {
+		t.Fatalf("repo entry = %+v", local)
+	}
+	if local.Source != filepath.Join(repoDir, ".flf.toml") {
+		t.Fatalf("repo entry source = %q, want %q", local.Source, filepath.Join(repoDir, ".flf.toml"))
+	}
+	shared, ok := agents["shared"]
+	if !ok {
+		t.Fatalf("agents = %+v, want the global entry alongside the repo entry", agents)
+	}
+	if shared.Reply != "cli" || shared.Command != "/bin/shared" || shared.Description != "" {
+		t.Fatalf("global entry = %+v", shared)
+	}
+	if shared.Source != filepath.Join(home, "config.toml") {
+		t.Fatalf("global entry source = %q, want %q", shared.Source, filepath.Join(home, "config.toml"))
+	}
+
+	fromRepo := runCLIResultInDir(t, env, bin, repoDir, "", "agent", "list", "--json")
+	if fromRepo.exitCode != 0 || fromRepo.stderr != "" {
+		t.Fatalf("agent list from the repo dir: exit=%d stdout=%q stderr=%q", fromRepo.exitCode, fromRepo.stdout, fromRepo.stderr)
+	}
+	agents = decodeE2EAgentList(t, fromRepo.stdout)
+	if len(agents) != 1 || agents["shared"].Command != "/bin/shared" {
+		t.Fatalf("agents without --repo = %+v, want only the global entry even when the cwd is a repo", agents)
+	}
+
+	assertE2ECLIErrorResult(t, runCLIResult(t, env, bin, "", "agent", "list", "--repo", filepath.Join(tmpDir, "no-such-repo")), "NOT_A_GIT_REPO")
+
+	agents = decodeE2EAgentList(t, runOK("agent", "list", "--repo", spacedDir, "--json"))
+	if spaced, ok := agents["spaced"]; !ok || spaced.Source != filepath.Join(spacedDir, ".flf.toml") {
+		t.Fatalf("agents for a spaced repo path = %+v, want the spaced entry", agents)
+	}
+
+	lines := e2eLines(t, runOK("agent", "list", "--repo", repoDir))
+	want := []string{
+		"local\t/bin/local\tauto\t" + filepath.Join(repoDir, ".flf.toml") + "\trepo agent",
+		"shared\t/bin/shared\tcli\t" + filepath.Join(home, "config.toml") + "\t-",
+	}
+	if len(lines) != len(want) {
+		t.Fatalf("human lines = %d, want %d: %q", len(lines), len(want), lines)
+	}
+	for i, line := range want {
+		if lines[i] != line {
+			t.Fatalf("human line %d = %q, want %q", i, lines[i], line)
+		}
+	}
+
+	stop()
+}
+
+func TestE2E_AgentSessionCmd(t *testing.T) {
+	tmpDir := t.TempDir()
+	home := filepath.Join(tmpDir, "fluffle")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := buildTestBinary(t, tmpDir)
+	env := []string{"FLUFFLE_HOME=" + home}
+	repoDir := t.TempDir()
+	gitInit(t, repoDir)
+
+	probe := filepath.Join(tmpDir, "probe-agent")
+	if err := os.WriteFile(probe, []byte("#!/bin/sh\ncat > /dev/null\nprintf 'the answer'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	config := "[[agents]]\nname=\"probe\"\ncommand=\"" + probe + "\"\nreply=\"stdout\"\ntimeout_secs=20\n"
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stop := startAgentDaemon(t, bin, home)
+	runOK := func(args ...string) string {
+		t.Helper()
+		result := runCLIResult(t, env, bin, "", args...)
+		if result.exitCode != 0 {
+			t.Fatalf("flf %v: exit=%d stdout=%q stderr=%q", args, result.exitCode, result.stdout, result.stderr)
+		}
+		if result.stderr != "" {
+			t.Fatalf("flf %v wrote stderr: %q", args, result.stderr)
+		}
+		return result.stdout
+	}
+
+	channelOut := runOK("channel", "create", "--name", "eng", "--repo", repoDir, "--json")
+	var channel struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(channelOut), &channel); err != nil || channel.ID <= 0 {
+		t.Fatalf("channel create: err=%v out=%s", err, channelOut)
+	}
+	threadOut := runOK("thread", "new", "--channel", "eng", "--repo", repoDir, "--title", "t", "--json")
+	var thread struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(threadOut), &thread); err != nil || thread.ID <= 0 {
+		t.Fatalf("thread new: err=%v out=%s", err, threadOut)
+	}
+	threadID := strconv.FormatInt(thread.ID, 10)
+	runOK("message", "send", "--thread", threadID, "--text", "hello", "--as", "alice", "--json")
+	runOK("message", "send", "--thread", threadID, "--text", "@probe hi", "--as", "alice", "--json")
+
+	// A fresh home holds one session, the one this mention creates, so it is id 1.
+	// The poll covers the real race: the run finishing after the trigger returns.
+	var (
+		last    cliResult
+		payload sessionPayload
+	)
+	if !waitFor(t, 40*time.Second, func() bool {
+		last = runCLIResult(t, env, bin, "", "agent", "session", "--id", "1", "--json")
+		if last.exitCode != 0 || last.stderr != "" {
+			return false
+		}
+		payload = sessionPayload{}
+		if err := json.Unmarshal([]byte(last.stdout), &payload); err != nil {
+			return false
+		}
+		return payload.Session.Status == store.SessionSucceeded
+	}) {
+		t.Fatalf("session never succeeded: exit=%d stdout=%q stderr=%q", last.exitCode, last.stdout, last.stderr)
+	}
+	sess := payload.Session
+	if sess.AgentName != "probe" || sess.Status != store.SessionSucceeded || sess.ReplyMode != "stdout" {
+		t.Fatalf("session = %+v", sess)
+	}
+	if sess.ThreadID != thread.ID || sess.TriggerMessageID <= 0 {
+		t.Fatalf("session references = %+v, want thread %d", sess, thread.ID)
+	}
+	canonicalRepo, err := filepath.EvalSymlinks(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.Cwd == nil || *sess.Cwd != canonicalRepo {
+		t.Fatalf("session cwd = %v, want %q", sess.Cwd, canonicalRepo)
+	}
+	if sess.Command != probe {
+		t.Fatalf("session command = %q, want %q", sess.Command, probe)
+	}
+	if sess.ExitCode == nil || *sess.ExitCode != 0 {
+		t.Fatalf("session exit code = %v, want 0", sess.ExitCode)
+	}
+	if sess.Error != nil {
+		t.Fatalf("session error = %q, want none", *sess.Error)
+	}
+	if sess.ReplyMessageID == nil {
+		t.Fatalf("session has no reply message: %+v", sess)
+	}
+
+	byType := map[string]store.SessionEvent{}
+	for i, event := range payload.Events {
+		if event.Seq != int64(i+1) || event.SessionID != sess.ID {
+			t.Fatalf("event %d = %+v", i, event)
+		}
+		byType[event.Type] = event
+	}
+	if byType[store.SessionEventPrompt].Content == "" {
+		t.Fatalf("events = %+v, want a prompt", payload.Events)
+	}
+	if !strings.Contains(byType[store.SessionEventStdout].Content, "the answer") {
+		t.Fatalf("events = %+v, want the agent stdout", payload.Events)
+	}
+	if byType[store.SessionEventExit].Content != "0" {
+		t.Fatalf("events = %+v, want the exit code", payload.Events)
+	}
+
+	lines := e2eLines(t, runOK("agent", "session", "--id", "1"))
+	if len(lines) < 5 {
+		t.Fatalf("human lines = %d, want the header, command, exit, cwd, and reply: %q", len(lines), lines)
+	}
+	if !strings.HasPrefix(lines[0], "session 1  agent=probe  thread=") || !strings.Contains(lines[0], "  status=succeeded ") || !strings.HasSuffix(lines[0], "  reply=stdout") {
+		t.Fatalf("session header = %q", lines[0])
+	}
+	if lines[1] != "command: "+probe {
+		t.Fatalf("command line = %q, want %q", lines[1], "command: "+probe)
+	}
+	if lines[2] != "exit: 0" {
+		t.Fatalf("exit line = %q, want %q", lines[2], "exit: 0")
+	}
+	if lines[3] != "cwd: "+canonicalRepo {
+		t.Fatalf("cwd line = %q, want %q", lines[3], "cwd: "+canonicalRepo)
+	}
+	if lines[4] != "reply: message "+strconv.FormatInt(*sess.ReplyMessageID, 10) {
+		t.Fatalf("reply line = %q", lines[4])
+	}
+	wantEvents := make([]string, 0, len(payload.Events))
+	for _, event := range payload.Events {
+		wantEvents = append(wantEvents, fmt.Sprintf("%d\t%s\t%s", event.Seq, event.Type, event.Content))
+	}
+	events := strings.Join(lines[5:], "\n")
+	if events != strings.Join(wantEvents, "\n") {
+		t.Fatalf("event lines = %q, want %q", events, strings.Join(wantEvents, "\n"))
+	}
+	if !stdoutEventLine.MatchString(events) {
+		t.Fatalf("event lines lack a stdout event carrying the answer: %q", events)
+	}
+
+	stop()
+}
+
+func TestE2E_AgentSessionCmdMissingIsExitOne(t *testing.T) {
+	tmpDir := t.TempDir()
+	home := filepath.Join(tmpDir, "fluffle")
+	bin := buildTestBinary(t, tmpDir)
+	env := []string{"FLUFFLE_HOME=" + home}
+	stop := startAgentDaemon(t, bin, home)
+
+	assertE2ECLIErrorResult(t, runCLIResult(t, env, bin, "", "agent", "session", "--id", "9999"), "SESSION_NOT_FOUND")
+
+	stop()
+}
+
+func TestE2E_AgentSessionCmdRequiresID(t *testing.T) {
+	tmpDir := t.TempDir()
+	home := filepath.Join(tmpDir, "fluffle")
+	bin := buildTestBinary(t, tmpDir)
+	env := []string{"FLUFFLE_HOME=" + home}
+
+	assertE2ECLIErrorResult(t, runCLIResult(t, env, bin, "", "agent", "session"), "BAD_ARGS")
+	assertE2ECLIErrorResult(t, runCLIResult(t, env, bin, "", "agent", "session", "--id", "0"), "BAD_ARGS")
+	assertE2ECLIErrorResult(t, runCLIResult(t, env, bin, "", "agent", "session", "--id", "-1"), "BAD_ARGS")
+	assertE2ECLIErrorResult(t, runCLIResult(t, env, bin, "", "agent", "session", "--id", "abc"), "BAD_ARGS")
+
+	missing := runCLIResult(t, env, bin, "", "agent", "session")
+	if message := e2eErrorMessage(t, missing.stderr); !strings.Contains(message, "--id") {
+		t.Fatalf("error message = %q, want it to name the missing flag", message)
+	}
+
+	usage := e2eErrorMessage(t, runCLIResult(t, env, bin, "", "agent", "bogus").stderr)
+	for _, want := range []string{"read", "append", "list", "session"} {
+		if !strings.Contains(usage, want) {
+			t.Fatalf("usage %q does not name %q", usage, want)
+		}
+	}
+}
+
+const e2eHTTPTimeout = 5 * time.Second
+
+// jsonIDField reads one id out of a --json response. flf channel create --json
+// emits "id" from the anonymous struct it falls back to and "ID" from a
+// store.Channel with no json tag, so either key is a real answer. runCLI only
+// logs a non-zero exit, so parsing the output is what catches a failed create.
+func jsonIDField(t *testing.T, out, field string) string {
+	t.Helper()
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		t.Fatalf("unmarshal %q: %v", out, err)
+	}
+	if v, ok := payload[field]; ok {
+		return fmt.Sprintf("%v", v)
+	}
+	if field == "id" {
+		if v, ok := payload["ID"]; ok {
+			return fmt.Sprintf("%v", v)
+		}
+	}
+	t.Fatalf("field %q missing from %q", field, out)
+	return ""
+}
+
+// e2eProcessGroupAlive reports whether any process remains in pgid, and only for
+// a pgid that is a real group leader: kill(-pgid, 0) answers ESRCH for a live pid
+// that leads no group, so it says nothing about liveness on its own. A pid entry
+// that still exists counts as alive, the rule processAlive (main.go:1250) follows
+// for unreaped zombies; darwin answers EPERM rather than ESRCH for a group left
+// holding only zombies, and linux answers 0, so both count as alive here.
+func e2eProcessGroupAlive(pgid int) bool {
+	err := syscall.Kill(-pgid, syscall.Signal(0))
+	return err == nil || err == syscall.EPERM
+}
+
+func e2eGetJSON(t *testing.T, url string, into any) {
+	t.Helper()
+	client := &http.Client{Timeout: e2eHTTPTimeout}
+	resp, err := client.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s: status %d", url, resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(into); err != nil {
+		t.Fatalf("GET %s: decode: %v", url, err)
+	}
+}
+
+func TestE2E_AgentMentionRunsAgentAndStoresSession(t *testing.T) {
+	tmpDir := t.TempDir()
+	home := filepath.Join(tmpDir, "fluffle")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := buildTestBinary(t, tmpDir)
+	env := []string{"FLUFFLE_HOME=" + home}
+
+	probe := filepath.Join(tmpDir, "probe-agent")
+	// pwd goes to stdout because sess.Cwd is copied from the thread's repo path
+	// when the row is created, so it would stay correct with the run-time cwd
+	// left unwired; the agent's own stdout is the only evidence of where it ran.
+	script := "#!/bin/sh\ncat > /dev/null\npwd\nprintf 'the answer'\n"
+	if err := os.WriteFile(probe, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	config := "[[agents]]\nname=\"probe\"\ncommand=\"" + probe + "\"\nreply=\"stdout\"\ntimeout_secs=20\n"
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	repo := t.TempDir()
+	gitInit(t, repo)
+	// The daemon canonicalizes the repo path and t.TempDir hands back a symlinked
+	// one on macOS, so both sides of the cwd comparison use the canonical form.
+	canonicalRepo, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stop := startAgentDaemon(t, bin, home)
+	port := waitForDaemonReady(t, home, 10*time.Second)
+
+	channelID := jsonIDField(t, runCLI(t, env, bin, "channel", "create", "--name", "eng", "--repo", repo, "--json"), "id")
+	threadArg := jsonIDField(t, runCLI(t, env, bin, "thread", "new", "--channel", "eng", "--repo", repo, "--title", "review", "--json"), "id")
+	threadID, err := strconv.ParseInt(threadArg, 10, 64)
+	if err != nil || channelID == "0" || threadID <= 0 {
+		t.Fatalf("channel = %q thread = %q: %v", channelID, threadArg, err)
+	}
+
+	triggerOut := runCLI(t, env, bin, "message", "send", "--thread", threadArg, "--text", "@probe what is the status?", "--as", "alice", "--json")
+	var trigger struct {
+		Seq int64 `json:"seq"`
+	}
+	if err := json.Unmarshal([]byte(triggerOut), &trigger); err != nil || trigger.Seq <= 0 {
+		t.Fatalf("trigger message: err=%v out=%s", err, triggerOut)
+	}
+
+	var replySeq int64
+	wantReply := canonicalRepo + "\nthe answer"
+	if !waitFor(t, 40*time.Second, func() bool {
+		out := runCLI(t, env, bin, "agent", "read", "--thread", threadArg, "--json")
+		for _, line := range strings.Split(out, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			var entry struct {
+				Type       string `json:"type"`
+				Name       string `json:"name"`
+				AuthorType string `json:"author_type"`
+				Content    string `json:"content"`
+				Seq        int64  `json:"seq"`
+			}
+			if err := json.Unmarshal([]byte(line), &entry); err != nil {
+				t.Fatalf("bad agent read line %q: %v", line, err)
+			}
+			if entry.Type == "message" && entry.AuthorType == "agent" && entry.Name == "probe" {
+				if entry.Content != wantReply {
+					t.Fatalf("agent reply content = %q, want %q", entry.Content, wantReply)
+				}
+				replySeq = entry.Seq
+				return true
+			}
+		}
+		return false
+	}) {
+		t.Fatalf("agent never replied within 40s: %s", runCLI(t, env, bin, "agent", "read", "--thread", threadArg, "--json"))
+	}
+	if replySeq <= trigger.Seq {
+		t.Fatalf("reply seq = %d, want greater than the trigger seq %d", replySeq, trigger.Seq)
+	}
+
+	// The reply message is appended before the session goes terminal, so a
+	// single read here can still see a running session.
+	var (
+		last    cliResult
+		payload sessionPayload
+	)
+	if !waitFor(t, 40*time.Second, func() bool {
+		last = runCLIResult(t, env, bin, "", "agent", "session", "--id", "1", "--json")
+		if last.exitCode != 0 {
+			return false
+		}
+		payload = sessionPayload{}
+		if err := json.Unmarshal([]byte(last.stdout), &payload); err != nil {
+			return false
+		}
+		return payload.Session.Status == store.SessionSucceeded
+	}) {
+		t.Fatalf("session never succeeded: exit=%d stdout=%q stderr=%q", last.exitCode, last.stdout, last.stderr)
+	}
+	sess := payload.Session
+	if sess.Status != store.SessionSucceeded {
+		t.Fatalf("session status = %q error %v", sess.Status, sess.Error)
+	}
+	if sess.AgentName != "probe" || sess.ReplyMode != "stdout" {
+		t.Fatalf("session = %+v", sess)
+	}
+	if sess.ReplyMessageID == nil {
+		t.Fatalf("session has no reply message id: %+v", sess)
+	}
+	if !strings.Contains(sess.Command, probe) {
+		t.Fatalf("session command = %q, want it to contain %q", sess.Command, probe)
+	}
+	if sess.Cwd == nil || *sess.Cwd != canonicalRepo {
+		t.Fatalf("session cwd = %v, want %q", sess.Cwd, canonicalRepo)
+	}
+	types := map[string]bool{}
+	stdoutEvent := ""
+	for _, event := range payload.Events {
+		types[event.Type] = true
+		if event.Type == store.SessionEventStdout {
+			stdoutEvent += event.Content
+		}
+	}
+	for _, want := range []string{store.SessionEventPrompt, store.SessionEventStdout, store.SessionEventExit} {
+		if !types[want] {
+			t.Fatalf("missing %q event; got %v", want, types)
+		}
+	}
+	// The agent reports the directory it was run in, which is what repo-anchoring
+	// promises; sess.Cwd above only proves the column was filled from the thread.
+	if strings.TrimSpace(stdoutEvent) != canonicalRepo+"\nthe answer" {
+		t.Fatalf("agent stdout = %q, want the agent to have run in %q", stdoutEvent, canonicalRepo)
+	}
+
+	human := runCLI(t, env, bin, "agent", "session", "--id", "1")
+	if !strings.Contains(human, "probe") || !strings.Contains(human, "the answer") {
+		t.Fatalf("human session output = %q", human)
+	}
+
+	// The pane the TUI renders is driven by the thread-scoped list, which
+	// carries no events: the TUI fetches the detail for a session it keys on.
+	// A second thread with its own session is what makes the scoping falsifiable;
+	// selecting only by id would pass against an unfiltered list.
+	otherArg := jsonIDField(t, runCLI(t, env, bin, "thread", "new", "--channel", "eng", "--repo", repo, "--title", "other", "--json"), "id")
+	otherThread, err := strconv.ParseInt(otherArg, 10, 64)
+	if err != nil || otherThread <= 0 || otherThread == threadID {
+		t.Fatalf("second thread = %q, want a distinct thread: %v", otherArg, err)
+	}
+	runCLI(t, env, bin, "message", "send", "--thread", otherArg, "--text", "@probe over here", "--as", "alice", "--json")
+	var otherSession store.Session
+	if !waitFor(t, 40*time.Second, func() bool {
+		result := runCLIResult(t, env, bin, "", "agent", "session", "--id", "2", "--json")
+		if result.exitCode != 0 {
+			return false
+		}
+		var other sessionPayload
+		if err := json.Unmarshal([]byte(result.stdout), &other); err != nil {
+			return false
+		}
+		otherSession = other.Session
+		return otherSession.Status == store.SessionSucceeded
+	}) {
+		t.Fatalf("second thread session never succeeded")
+	}
+
+	base := "http://127.0.0.1:" + strconv.Itoa(port)
+	var listed []store.Session
+	e2eGetJSON(t, base+"/v1/threads/"+strconv.FormatInt(threadID, 10)+"/sessions", &listed)
+	if len(listed) != 1 {
+		t.Fatalf("thread %d sessions = %+v, want only its own session %d", threadID, listed, sess.ID)
+	}
+	found := listed[0]
+	if found.ID != sess.ID {
+		t.Fatalf("thread %d session = %d, want %d", threadID, found.ID, sess.ID)
+	}
+	if found.AgentName != "probe" || found.Status != store.SessionSucceeded ||
+		found.TriggerMessageID != sess.TriggerMessageID || found.ThreadID != threadID {
+		t.Fatalf("listed session = %+v", found)
+	}
+	if otherSession.ThreadID != otherThread || otherSession.ID == sess.ID {
+		t.Fatalf("second session = %+v, want a distinct session on thread %d", otherSession, otherThread)
+	}
+	var otherListed []store.Session
+	e2eGetJSON(t, base+"/v1/threads/"+strconv.FormatInt(otherThread, 10)+"/sessions", &otherListed)
+	if len(otherListed) != 1 || otherListed[0].ID != otherSession.ID {
+		t.Fatalf("thread %d sessions = %+v, want only session %d", otherThread, otherListed, otherSession.ID)
+	}
+	var detail sessionPayload
+	e2eGetJSON(t, base+"/v1/sessions/"+strconv.FormatInt(sess.ID, 10), &detail)
+	if detail.Session.ID != sess.ID || len(detail.Events) == 0 {
+		t.Fatalf("session detail = %+v, want session %d with events", detail, sess.ID)
+	}
+
+	stop()
+}
+
+func TestE2E_AgentMentionWithMissingBinaryFailsVisibly(t *testing.T) {
+	tmpDir := t.TempDir()
+	home := filepath.Join(tmpDir, "fluffle")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := buildTestBinary(t, tmpDir)
+	env := []string{"FLUFFLE_HOME=" + home}
+
+	repo := t.TempDir()
+	gitInit(t, repo)
+	config := "[[agents]]\nname=\"ghost\"\ncommand=\"/definitely/not/here\"\nreply=\"stdout\"\ntimeout_secs=5\n"
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stop := startAgentDaemon(t, bin, home)
+
+	channelID := jsonIDField(t, runCLI(t, env, bin, "channel", "create", "--name", "eng", "--repo", repo, "--json"), "id")
+	threadArg := jsonIDField(t, runCLI(t, env, bin, "thread", "new", "--channel", "eng", "--repo", repo, "--title", "t", "--json"), "id")
+	if channelID == "0" || threadArg == "0" {
+		t.Fatalf("channel = %q thread = %q, want real ids", channelID, threadArg)
+	}
+	runCLI(t, env, bin, "message", "send", "--thread", threadArg, "--text", "@ghost hello", "--as", "alice", "--json")
+
+	var (
+		last   cliResult
+		failed store.Session
+	)
+	if !waitFor(t, 30*time.Second, func() bool {
+		last = runCLIResult(t, env, bin, "", "agent", "session", "--id", "1", "--json")
+		if last.exitCode != 0 {
+			return false
+		}
+		var payload sessionPayload
+		if err := json.Unmarshal([]byte(last.stdout), &payload); err != nil {
+			return false
+		}
+		failed = payload.Session
+		return failed.Status == store.SessionFailed && failed.Error != nil
+	}) {
+		t.Fatalf("a missing agent binary must fail the session visibly; got exit=%d stdout=%q stderr=%q", last.exitCode, last.stdout, last.stderr)
+	}
+	if !strings.Contains(*failed.Error, "/definitely/not/here") {
+		t.Fatalf("session error = %q, want it to name the missing command", *failed.Error)
+	}
+
+	stop()
+}
+
+func TestE2E_AgentDaemonStopReapsRunningAgent(t *testing.T) {
+	tmpDir := t.TempDir()
+	home := filepath.Join(tmpDir, "fluffle")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := buildTestBinary(t, tmpDir)
+	env := []string{"FLUFFLE_HOME=" + home}
+	repo := t.TempDir()
+	gitInit(t, repo)
+
+	pidFile := filepath.Join(tmpDir, "probe.pid")
+	probe := filepath.Join(tmpDir, "blocking-agent")
+	if err := os.WriteFile(probe, []byte("#!/bin/sh\necho $$ > \""+pidFile+"\"\nsleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	config := "[[agents]]\nname=\"blocker\"\ncommand=\"" + probe + "\"\nreply=\"stdout\"\ntimeout_secs=60\n"
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stop := startAgentDaemon(t, bin, home)
+	_, daemonPID := readDaemonJSON(t, home)
+
+	channelID := jsonIDField(t, runCLI(t, env, bin, "channel", "create", "--name", "eng", "--repo", repo, "--json"), "id")
+	threadArg := jsonIDField(t, runCLI(t, env, bin, "thread", "new", "--channel", "eng", "--repo", repo, "--title", "t", "--json"), "id")
+	if channelID == "0" || threadArg == "0" {
+		t.Fatalf("channel = %q thread = %q, want real ids", channelID, threadArg)
+	}
+	runCLI(t, env, bin, "message", "send", "--thread", threadArg, "--text", "@blocker go", "--as", "alice", "--json")
+
+	var (
+		last cliResult
+		sess store.Session
+	)
+	if !waitFor(t, 20*time.Second, func() bool {
+		last = runCLIResult(t, env, bin, "", "agent", "session", "--id", "1", "--json")
+		if last.exitCode != 0 {
+			return false
+		}
+		var payload sessionPayload
+		if err := json.Unmarshal([]byte(last.stdout), &payload); err != nil {
+			return false
+		}
+		sess = payload.Session
+		return sess.Status == store.SessionRunning
+	}) {
+		t.Fatalf("session never reached running: exit=%d stdout=%q stderr=%q", last.exitCode, last.stdout, last.stderr)
+	}
+
+	probePID := 0
+	if !waitFor(t, 20*time.Second, func() bool {
+		data, err := os.ReadFile(pidFile)
+		if err != nil {
+			return false
+		}
+		probePID, err = strconv.Atoi(strings.TrimSpace(string(data)))
+		return err == nil && probePID > 0
+	}) {
+		t.Fatalf("probe never published its pid to %s", pidFile)
+	}
+	if !e2eProcessGroupAlive(probePID) {
+		t.Fatalf("probe process group %d is already gone: the test would prove nothing", probePID)
+	}
+	t.Cleanup(func() {
+		if e2eProcessGroupAlive(probePID) {
+			_ = syscall.Kill(-probePID, syscall.SIGKILL)
+		}
+	})
+
+	stopResult := runCLIResult(t, env, bin, "", "daemon", "stop")
+	if stopResult.exitCode != 0 {
+		t.Fatalf("daemon stop: exit=%d stdout=%q stderr=%q", stopResult.exitCode, stopResult.stdout, stopResult.stderr)
+	}
+	if !waitForProcessExit(daemonPID, 10*time.Second) {
+		t.Fatalf("daemon %d survived flf daemon stop", daemonPID)
+	}
+	if !waitFor(t, 10*time.Second, func() bool { return !e2eProcessGroupAlive(probePID) }) {
+		t.Fatalf("agent process group %d survived flf daemon stop: the Setpgid/Kill(-pgid) path leaks subprocesses", probePID)
+	}
+	stop()
+
+	startAgentDaemon(t, bin, home)
+	restarted := runCLIResult(t, env, bin, "", "agent", "session", "--id", "1", "--json")
+	if restarted.exitCode != 0 {
+		t.Fatalf("session after restart: exit=%d stdout=%q stderr=%q", restarted.exitCode, restarted.stdout, restarted.stderr)
+	}
+	var payload sessionPayload
+	if err := json.Unmarshal([]byte(restarted.stdout), &payload); err != nil {
+		t.Fatalf("session after restart: err=%v out=%s", err, restarted.stdout)
+	}
+	if payload.Session.ID != sess.ID {
+		t.Fatalf("session after restart = %+v, want session %d", payload.Session, sess.ID)
+	}
+	if payload.Session.Status != store.SessionCanceled {
+		t.Fatalf("session status after restart = %q, want %q", payload.Session.Status, store.SessionCanceled)
+	}
+	// Status alone cannot tell the two apart, because every daemon start runs
+	// Reconcile, which rewrites running to canceled. Only the error text can:
+	// "daemon restarted while ..." is written by that reconcile, so its presence
+	// means the barrier never finished the row and startup covered for it.
+	if payload.Session.Error == nil {
+		t.Fatalf("session error = nil, want the reason the barrier recorded: %+v", payload.Session)
+	}
+	if strings.Contains(*payload.Session.Error, "daemon restarted while") {
+		t.Fatalf("session error = %q: the row was left unfinished by daemon stop and startup reconcile masked it, so the shutdown barrier did not run", *payload.Session.Error)
+	}
 }

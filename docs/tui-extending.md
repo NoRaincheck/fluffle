@@ -25,7 +25,7 @@ How to add features to the Fluffle TUI. See [TUI Architecture](tui-architecture.
 Two switch blocks in `handleKey()` in `model.go`:
 
 - **Control keys** (`key.Code`): `tea.KeyUp`, `tea.KeyEnter`, etc.
-- **Character keys** (`key.Text`): `"q"`, `"n"`, `"c"`, etc.
+- **Character keys** (`key.Text`): `"q"`, `"k"`/`"j"` (with `"up"`/`"down"`), `"r"`, `"v"`, `"f"`, `"l"`/`"L"`, `"p"`, `"s"`, `"g"`, `"G"`. `"c"` and `"n"` are **not** bound — `simple_test.go` asserts they do nothing.
 
 Always update `helpView()` for relevant views.
 
@@ -43,13 +43,13 @@ Always update `helpView()` for relevant views.
 |---------|------|
 | Refresh after action | `return m, m.fetchInbox()` |
 | Error in status bar | `m.status = fmt.Sprintf("error: %v", msg.err)` |
-| Empty state | `items = []string{"  (nothing here — press n to create)"}` |
+| Empty state | `items = []string{"  (nothing here)"}` |
 | Guard empty list | `if len(items) == 0 || cursor < 0 || cursor >= len(items)` |
 
 ## Modifying the Preview Panel
 
-- Content: edit `renderPreview()` — shows full message + last 5 replies
-- Fetch trigger: edit `maybeFetchPreview()` — debounced by thread ID; `syncVisibleData()` batches it with `maybeFetchFullRows()`
+- Content: edit `renderPreview()` — the thread view for the cursor's row. It delegates early to `renderSessionPreview()` in `session.go` when `previewMode == previewSession`, so a change to the thread rendering can be shadowed by the session pane.
+- Fetch trigger: edit `maybeFetchPreview()` — debounced by thread ID; `syncVisibleData()` batches three fetches, `maybeFetchPreview()`, `maybeFetchFullRows()`, and `fetchSessionsForPreview()`
 - Dimensions: computed in `View()` — `leftW = m.width/2 - 1`, `rightW = m.width - leftW - 3`
 
 ## Modifying Styles
@@ -62,9 +62,9 @@ All styles in `styles.go`. Add color + style var, apply in rendering.
 |---------|---------------|
 | New view | `model.go` (state, Update, View, render, helpView, syncVisibleData) |
 | New compose mode | `compose.go` (mode constant, View hints), `model.go` (handleComposeSend, handleKey) |
-| New key binding | `model.go` (handleKey, helpView) |
-| New API endpoint | `api.go` (wrapper), `model.go` (fetch, message type, Update handler) |
+| New key binding | `model.go` (handleKey, helpView) — or `session.go` (`handleSessionKey`) for the session pane |
+| New API endpoint | `api.go` (wrapper), `model.go` or `session.go` (fetch, message type, Update handler) |
 | New data type | `store/store.go` (type + query), `apiserver/` (HTTP handler), `api.go` (wrapper) |
 | New style | `styles.go` (color + style var), `model.go` (apply in rendering) |
-| Preview changes | `model.go` (renderPreview, maybeFetchPreview, View layout) |
+| Preview changes | `model.go` (renderPreview, maybeFetchPreview, View layout), `session.go` (session pane, poll, `s` key) |
 | Inbox layout | `model.go` (`inboxLayout`, `renderInboxFullWithWidth`, `inboxFullGeometry`, `clampInboxFullScroll`) |

@@ -1,0 +1,1437 @@
+package tui
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"unicode/utf8"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+
+	"github.com/NoRaincheck/fluffle/internal/store"
+)
+
+func strptr(s string) *string { return &s }
+
+func int64ptr(v int64) *int64 { return &v }
+
+func flattenMsgs(msg tea.Msg) []tea.Msg {
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		return []tea.Msg{msg}
+	}
+	var out []tea.Msg
+	for _, c := range batch {
+		if c == nil {
+			continue
+		}
+		out = append(out, flattenMsgs(c())...)
+	}
+	return out
+}
+
+func sessionServer(t *testing.T, sessions []store.Session, events []store.SessionEvent) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/threads/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(sessions)
+	})
+	mux.HandleFunc("/v1/sessions/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"session": store.Session{ID: 1, AgentName: "reviewer", Status: store.SessionSucceeded, ReplyMode: "auto"},
+			"events":  events,
+		})
+	})
+	mux.HandleFunc("/v1/inbox", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]store.InboxMessage{})
+	})
+	mux.HandleFunc("/v1/channels", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]store.Channel{})
+	})
+	return httptest.NewServer(mux)
+}
+
+func sessionModel(t *testing.T, sessions []store.Session, events []store.SessionEvent) model {
+	t.Helper()
+	srv := sessionServer(t, sessions, events)
+	t.Cleanup(srv.Close)
+	m := toModel(New(srv.URL))
+	m.view = viewInbox
+	m.width = 120
+	m.height = 40
+	m.preview = true
+	m.inboxLayout = inboxLayoutCompact
+	return m
+}
+
+func TestSessionKeyRequiresASessionOnTheCursorRow(t *testing.T) {
+	m := sessionModel(t, nil, nil)
+	next, _, handled := m.handleSessionKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	got := toModel(next)
+	if handled {
+		t.Fatal("s must not be handled when the cursor row has no session")
+	}
+	if got.previewMode != previewThread {
+		t.Fatalf("previewMode = %v", got.previewMode)
+	}
+}
+
+func TestSessionKeyFlipsToSessionMode(t *testing.T) {
+	one := store.Session{ID: 5, TriggerMessageID: 42, AgentName: "reviewer", Status: store.SessionSucceeded}
+	m := sessionModel(t, []store.Session{one}, nil)
+	m.inbox = []store.InboxMessage{{Message: store.Message{ID: 42}}}
+	m.sessionsByMsg = map[int64]store.Session{42: one}
+	next, _, handled := m.handleSessionKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	got := toModel(next)
+	if !handled {
+		t.Fatal("s should be handled when the cursor row has a session")
+	}
+	if got.previewMode != previewSession {
+		t.Fatalf("previewMode = %v, want previewSession", got.previewMode)
+	}
+}
+
+func TestSessionKeyFlipsBackToThread(t *testing.T) {
+	one := store.Session{ID: 5, TriggerMessageID: 42}
+	m := sessionModel(t, []store.Session{one}, nil)
+	m.inbox = []store.InboxMessage{{Message: store.Message{ID: 42}}}
+	m.sessionsByMsg = map[int64]store.Session{42: one}
+	m.previewMode = previewSession
+	next, _, handled := m.handleSessionKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	got := toModel(next)
+	if !handled || got.previewMode != previewThread {
+		t.Fatalf("handled = %v previewMode = %v", handled, got.previewMode)
+	}
+}
+
+func TestSessionKeyReportsTheFallbackOnTheStatusLine(t *testing.T) {
+	m := sessionModel(t, nil, nil)
+	m.inbox = []store.InboxMessage{{Message: store.Message{ID: 7}}}
+	next, _, handled := m.handleSessionKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	got := toModel(next)
+	if handled {
+		t.Fatal("s must not be handled when the cursor row has no session")
+	}
+	if !strings.Contains(got.status, "no session") {
+		t.Fatalf("status = %q, want a no-session hint", got.status)
+	}
+	if got.previewMode != previewThread {
+		t.Fatalf("previewMode = %v, want the thread pane to stay", got.previewMode)
+	}
+}
+
+func TestSessionKeyIsIgnoredWhereThePaneIsHidden(t *testing.T) {
+	one := store.Session{ID: 5, TriggerMessageID: 42, Status: store.SessionSucceeded}
+	m := sessionModel(t, []store.Session{one}, nil)
+	m.inbox = []store.InboxMessage{{Message: store.Message{ID: 42}}}
+	m.sessionsByMsg = map[int64]store.Session{42: one}
+	m.view = viewInboxDetail
+	next, _, handled := m.handleSessionKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	got := toModel(next)
+	if handled {
+		t.Fatal("s must respect the previewVisible gate")
+	}
+	if got.previewMode != previewThread {
+		t.Fatalf("previewMode = %v", got.previewMode)
+	}
+}
+
+func TestRenderSessionPreviewShowsHeaderAndEvents(t *testing.T) {
+	one := store.Session{ID: 5, AgentName: "reviewer", Status: store.SessionSucceeded, ReplyMode: "auto", StartedAt: strptr("2026-09-26T10:00:00Z"), FinishedAt: strptr("2026-09-26T10:00:12Z"), ReplyMessageID: int64ptr(9)}
+	events := []store.SessionEvent{
+		{Seq: 1, Type: store.SessionEventPrompt, Content: "the prompt"},
+		{Seq: 2, Type: store.SessionEventStdout, Content: "the answer"},
+		{Seq: 3, Type: store.SessionEventExit, Content: "0"},
+	}
+	m := sessionModel(t, []store.Session{one}, events)
+	m.session = &one
+	m.sessionEvents = events
+	out := stripAnsi(m.renderSessionPreview(60, 20))
+	for _, want := range []string{"SESSION", "reviewer", "succeeded", "stdout", "prompt", "the answer", "exit", "12s"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("preview missing %q\n---\n%s", want, out)
+		}
+	}
+}
+
+func TestRenderSessionPreviewOmitsTheDurationWhileRunning(t *testing.T) {
+	one := store.Session{ID: 5, AgentName: "reviewer", Status: store.SessionRunning, ReplyMode: "auto",
+		StartedAt: strptr("2026-09-26T10:00:00Z"), FinishedAt: strptr("2026-09-26T10:00:12Z")}
+	m := sessionModel(t, []store.Session{one}, nil)
+	m.session = &one
+	header := strings.Split(stripAnsi(m.renderSessionPreview(80, 20)), "\n")[0]
+	if strings.Contains(header, "12s") {
+		t.Fatalf("a live session has no elapsed duration: %q", header)
+	}
+}
+
+func TestRenderSessionPreviewShowsRunningStatus(t *testing.T) {
+	one := store.Session{ID: 5, AgentName: "reviewer", Status: store.SessionRunning, ReplyMode: "auto"}
+	m := sessionModel(t, []store.Session{one}, nil)
+	m.session = &one
+	out := stripAnsi(m.renderSessionPreview(60, 20))
+	if !strings.Contains(out, "running") && !strings.Contains(out, "RUNNING") {
+		t.Fatalf("running status not shown:\n%s", out)
+	}
+}
+
+func TestRenderSessionPreviewShowsReplyLinkage(t *testing.T) {
+	withReply := store.Session{ID: 5, AgentName: "reviewer", Status: store.SessionSucceeded, ReplyMode: "auto", ReplyMessageID: int64ptr(9)}
+	m := sessionModel(t, []store.Session{withReply}, nil)
+	m.session = &withReply
+	if !strings.Contains(stripAnsi(m.renderSessionPreview(80, 20)), "9") {
+		t.Fatal("reply message id not rendered")
+	}
+}
+
+func TestRenderSessionPreviewHandlesNoSession(t *testing.T) {
+	m := sessionModel(t, nil, nil)
+	out := stripAnsi(m.renderSessionPreview(60, 20))
+	if !strings.Contains(out, "no session") {
+		t.Fatalf("empty state missing:\n%s", out)
+	}
+}
+
+func TestRenderSessionPreviewSurvivesALargeEventBody(t *testing.T) {
+	one := store.Session{ID: 5, AgentName: "reviewer", Status: store.SessionSucceeded, ReplyMode: "auto"}
+	body := strings.Repeat("é→x", 90000) + "TAILMARKER"
+	events := []store.SessionEvent{
+		{Seq: 1, Type: store.SessionEventPrompt, Content: "look at this"},
+		{Seq: 2, Type: store.SessionEventStdout, Content: body},
+		{Seq: 3, Type: store.SessionEventExit, Content: "0"},
+	}
+	m := sessionModel(t, []store.Session{one}, events)
+	m.session = &one
+	m.sessionEvents = events
+	const w = 60
+	out := stripAnsi(m.renderSessionPreview(w, 20))
+	if !utf8.ValidString(out) {
+		t.Fatal("a large non-ASCII event body corrupted the pane")
+	}
+	for i, line := range strings.Split(out, "\n") {
+		if got := lipgloss.Width(line); got > w {
+			t.Fatalf("line %d width = %d, want <= %d: %q", i, got, w, line)
+		}
+	}
+	if !strings.Contains(out, "look at this") {
+		t.Fatalf("the small event was dropped:\n%s", out)
+	}
+	if !strings.Contains(out, store.SessionEventExit) {
+		t.Fatalf("the tail event was dropped:\n%s", out)
+	}
+}
+
+func TestRenderSessionPreviewTruncatesWholeRunes(t *testing.T) {
+	one := store.Session{ID: 5, AgentName: "reviewer", Status: store.SessionSucceeded, ReplyMode: "auto"}
+	events := []store.SessionEvent{{Seq: 1, Type: store.SessionEventStdout, Content: strings.Repeat("日", 40)}}
+	m := sessionModel(t, []store.Session{one}, events)
+	m.session = &one
+	m.sessionEvents = events
+	for _, w := range []int{20, 30, 47} {
+		out := stripAnsi(m.renderSessionPreview(w, 12))
+		if !utf8.ValidString(out) {
+			t.Fatalf("width %d produced invalid utf-8:\n%q", w, out)
+		}
+		for i, line := range strings.Split(out, "\n") {
+			if got := lipgloss.Width(line); got > w {
+				t.Fatalf("width %d: line %d is %d wide: %q", w, i, got, line)
+			}
+		}
+	}
+}
+
+func TestTickOnlySchedulesWhileASessionIsNonTerminal(t *testing.T) {
+	m := sessionModel(t, nil, nil)
+	m.sessions = []store.Session{{ID: 1, Status: store.SessionSucceeded}}
+	if cmd := m.syncSessionTick(); cmd != nil {
+		t.Fatal("all sessions terminal must not schedule a tick")
+	}
+	m.sessions = []store.Session{{ID: 1, Status: store.SessionSucceeded}, {ID: 2, Status: store.SessionRunning}}
+	if cmd := m.syncSessionTick(); cmd == nil {
+		t.Fatal("a running session must schedule a tick")
+	}
+}
+
+func TestTickStopsAfterReachingTerminal(t *testing.T) {
+	m := sessionModel(t, nil, nil)
+	m.sessions = []store.Session{{ID: 1, Status: store.SessionRunning}}
+	if cmd := m.syncSessionTick(); cmd == nil {
+		t.Fatal("expected a tick while running")
+	}
+	msg := sessionsFetchedMsg{sessions: []store.Session{{ID: 1, Status: store.SessionSucceeded}}}
+	next, cmd := m.applySessions(msg.sessions)
+	got := toModel(next)
+	if got.sessions[0].Status != store.SessionSucceeded {
+		t.Fatalf("status = %q", got.sessions[0].Status)
+	}
+	if cmd != nil {
+		t.Fatal("terminal sessions must not reschedule the tick")
+	}
+}
+
+func TestTickHandlerRefetchesWhileActiveThenStops(t *testing.T) {
+	m := sessionModel(t, nil, nil)
+	m.sessions = []store.Session{{ID: 1, Status: store.SessionRunning}}
+	m.sessionPollThreadID = 7
+	m.sessionTickThread = 7
+	m.sessionTickGen = 1
+	m.previewThreadID = 7
+	next, cmd := m.Update(sessionTickMsg{threadID: 7, gen: 1})
+	if cmd == nil {
+		t.Fatal("a tick while running must reschedule through the fetch it issues")
+	}
+	next, cmd = toModel(next).Update(sessionsFetchedMsg{threadID: 7, sessions: []store.Session{{ID: 1, Status: store.SessionSucceeded}}})
+	if cmd != nil {
+		t.Fatal("terminal sessions must not reschedule the tick")
+	}
+	_, cmd = toModel(next).Update(sessionTickMsg{threadID: 7})
+	if cmd != nil {
+		t.Fatal("the tick must go quiet once every session is terminal")
+	}
+}
+
+func TestApplySessionsRebuildsTheMessageIndex(t *testing.T) {
+	m := sessionModel(t, nil, nil)
+	next, _ := m.applySessions([]store.Session{
+		{ID: 1, TriggerMessageID: 10},
+		{ID: 2, TriggerMessageID: 20},
+	})
+	got := toModel(next)
+	if len(got.sessionsByMsg) != 2 {
+		t.Fatalf("sessionsByMsg = %+v", got.sessionsByMsg)
+	}
+	if got.sessionsByMsg[20].ID != 2 {
+		t.Fatalf("index = %+v", got.sessionsByMsg)
+	}
+}
+
+func TestEnteringTheInboxBootstrapsTheSessionIndex(t *testing.T) {
+	one := store.Session{ID: 5, TriggerMessageID: 42, Status: store.SessionSucceeded}
+	m := sessionModel(t, []store.Session{one}, nil)
+	m.inbox = []store.InboxMessage{{Message: store.Message{ID: 42, ThreadID: 7}, ChannelID: 1, ChannelName: "c", ThreadTitle: "t"}}
+	cmd := m.maybeFetchPreview()
+	if cmd == nil {
+		t.Fatal("preview sync must fetch the thread's messages on entry")
+	}
+	var messages previewMessagesFetchedMsg
+	for _, msg := range flattenMsgs(cmd()) {
+		if pm, ok := msg.(previewMessagesFetchedMsg); ok {
+			messages = pm
+		}
+	}
+	if messages.threadID != 7 {
+		t.Fatalf("preview did not fetch thread 7, got %+v", messages)
+	}
+	next, cmd := m.Update(messages)
+	got := toModel(next)
+	if got.previewThreadID != 7 {
+		t.Fatalf("previewThreadID = %d", got.previewThreadID)
+	}
+	if cmd == nil {
+		t.Fatal("entering a thread must fetch its sessions")
+	}
+	for _, msg := range flattenMsgs(cmd()) {
+		sm, ok := msg.(sessionsFetchedMsg)
+		if !ok {
+			continue
+		}
+		if sm.err != nil {
+			t.Fatalf("ListSessions = %v", sm.err)
+		}
+		if sm.threadID != 7 {
+			t.Fatalf("sessions fetched for thread %d, want 7", sm.threadID)
+		}
+		if len(sm.sessions) != 1 || sm.sessions[0].ID != 5 {
+			t.Fatalf("sessions = %+v", sm.sessions)
+		}
+		return
+	}
+	t.Fatal("entering a thread never fetched its sessions")
+}
+
+func TestAnActiveSessionDiscoveredOnEntryKeepsTheTickAlive(t *testing.T) {
+	running := store.Session{ID: 3, TriggerMessageID: 42, Status: store.SessionRunning}
+	m := sessionModel(t, []store.Session{running}, nil)
+	m.inbox = []store.InboxMessage{{Message: store.Message{ID: 42, ThreadID: 7}, ChannelID: 1, ChannelName: "c", ThreadTitle: "t"}}
+	next, _ := m.Update(previewMessagesFetchedMsg{threadID: 7})
+	next, cmd := toModel(next).Update(sessionsFetchedMsg{threadID: 7, sessions: []store.Session{running}})
+	got := toModel(next)
+	if got.sessions[0].Status != store.SessionRunning {
+		t.Fatal("the running session was not indexed")
+	}
+	if got.sessionPollThreadID != 7 {
+		t.Fatalf("sessionPollThreadID = %d, want 7", got.sessionPollThreadID)
+	}
+	if cmd == nil {
+		t.Fatal("a running session discovered on entry must start the tick")
+	}
+}
+
+func TestPressingSThroughUpdateFlipsThePreviewPane(t *testing.T) {
+	one := store.Session{ID: 5, TriggerMessageID: 42, Status: store.SessionSucceeded}
+	m := sessionModel(t, []store.Session{one}, nil)
+	m.inbox = []store.InboxMessage{{Message: store.Message{ID: 42, ThreadID: 7}, ChannelID: 1}}
+	m.sessionsByMsg = map[int64]store.Session{42: one}
+	next, _ := m.Update(keyRunes("s"))
+	if toModel(next).previewMode != previewSession {
+		t.Fatal("s through Update must reach handleSessionKey")
+	}
+}
+
+func TestPreviewPaneRoutesToTheSessionRenderer(t *testing.T) {
+	one := store.Session{ID: 5, AgentName: "reviewer", Status: store.SessionSucceeded, ReplyMode: "auto"}
+	m := sessionModel(t, []store.Session{one}, nil)
+	m.session = &one
+	m.previewMode = previewSession
+	if !strings.Contains(stripAnsi(m.renderPreview(60, 20)), "SESSION") {
+		t.Fatalf("renderPreview must delegate to the session pane:\n%s", stripAnsi(m.renderPreview(60, 20)))
+	}
+	m.previewMode = previewThread
+	if strings.Contains(stripAnsi(m.renderPreview(60, 20)), "SESSION  reviewer") {
+		t.Fatal("the thread pane must come back in thread mode")
+	}
+}
+
+func TestSessionPaneNeverShowsAnotherSessionsEvents(t *testing.T) {
+	a := store.Session{ID: 1, AgentName: "alpha", Status: store.SessionSucceeded, ReplyMode: "auto", TriggerMessageID: 10}
+	b := store.Session{ID: 2, AgentName: "beta", Status: store.SessionSucceeded, ReplyMode: "auto", TriggerMessageID: 20}
+	m := sessionModel(t, []store.Session{a, b}, nil)
+	m.inbox = []store.InboxMessage{
+		{Message: store.Message{ID: 10, ThreadID: 7, CreatedAt: "2026-09-26T12:00:00Z"}, ChannelID: 1, ChannelName: "c", ThreadTitle: "t"},
+		{Message: store.Message{ID: 20, ThreadID: 8, CreatedAt: "2026-09-26T10:00:00Z"}, ChannelID: 1, ChannelName: "c", ThreadTitle: "u"},
+	}
+	m.sessionsByMsg = map[int64]store.Session{10: a, 20: b}
+	m.session = &a
+	m.sessionEvents = []store.SessionEvent{{Seq: 1, Type: store.SessionEventPrompt, Content: "PROMPT-FOR-ALPHA"}}
+	m.previewMode = previewSession
+
+	out := stripAnsi(m.renderSessionPreview(60, 20))
+	if !strings.Contains(out, "PROMPT-FOR-ALPHA") {
+		t.Fatalf("the cursor row's own events must be shown:\n%s", out)
+	}
+
+	m.cursor = 1
+	out = stripAnsi(m.renderSessionPreview(60, 20))
+	if !strings.Contains(out, "beta") {
+		t.Fatalf("the header must follow the cursor:\n%s", out)
+	}
+	if strings.Contains(out, "PROMPT-FOR-ALPHA") {
+		t.Fatalf("beta's header must not sit above alpha's events:\n%s", out)
+	}
+
+	m.cursor = 0
+	if out := stripAnsi(m.renderSessionPreview(60, 20)); !strings.Contains(out, "PROMPT-FOR-ALPHA") {
+		t.Fatalf("returning to the cursor row must restore its events:\n%s", out)
+	}
+}
+
+func sessionPollServer(t *testing.T, sessions []store.Session) (*httptest.Server, func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	var hits []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/threads/", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits = append(hits, r.URL.Path)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(sessions)
+	})
+	mux.HandleFunc("/v1/inbox", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]store.InboxMessage{})
+	})
+	mux.HandleFunc("/v1/channels", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]store.Channel{})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), hits...)
+	}
+}
+
+func pollModel(t *testing.T, sessions []store.Session) (model, func() []string) {
+	t.Helper()
+	srv, hits := sessionPollServer(t, sessions)
+	m := toModel(New(srv.URL))
+	m.view = viewInbox
+	m.width = 120
+	m.height = 40
+	m.preview = true
+	m.inboxLayout = inboxLayoutCompact
+	m.inbox = []store.InboxMessage{{
+		Message:   store.Message{ID: 42, ThreadID: 7, CreatedAt: "2026-09-26T12:00:00Z"},
+		ChannelID: 1, ChannelName: "c", ThreadTitle: "t",
+	}}
+	next, _ := m.Update(previewMessagesFetchedMsg{threadID: 7})
+	next, _ = toModel(next).Update(sessionsFetchedMsg{threadID: 7, sessions: sessions})
+	m = toModel(next)
+	if m.sessionPollThreadID != 7 {
+		t.Fatalf("precondition: the chain must be armed for thread 7, got %d", m.sessionPollThreadID)
+	}
+	return m, hits
+}
+
+func TestPollReArmsForTheSameThreadAfterThePaneIsHiddenAndShown(t *testing.T) {
+	running := store.Session{ID: 3, TriggerMessageID: 42, ThreadID: 7, Status: store.SessionRunning}
+	m, hits := pollModel(t, []store.Session{running})
+	before := len(hits())
+
+	next, _ := m.Update(keyRunes("p"))
+	m = toModel(next)
+	if m.preview {
+		t.Fatal("precondition: p must hide the pane")
+	}
+	next, _ = m.Update(sessionsFetchedMsg{threadID: 7, sessions: []store.Session{running}})
+	m = toModel(next)
+	if m.sessionPollThreadID != 0 {
+		t.Fatalf("a chain that stopped must release its arming, got %d", m.sessionPollThreadID)
+	}
+
+	next, cmd := m.Update(keyRunes("p"))
+	m = toModel(next)
+	if !m.preview {
+		t.Fatal("precondition: p must show the pane again")
+	}
+	if cmd == nil {
+		t.Fatal("showing the pane must re-sync visible data")
+	}
+	flattenMsgs(cmd())
+	if len(hits()) <= before {
+		t.Fatalf("showing the pane must re-arm the poll for the same thread, hits = %v", hits())
+	}
+	if got := hits()[before]; got != "/v1/threads/7/sessions" {
+		t.Fatalf("re-armed poll hit %q, want the same thread", got)
+	}
+}
+
+func TestPollReArmsAfterADetailRoundTrip(t *testing.T) {
+	running := store.Session{ID: 3, TriggerMessageID: 42, ThreadID: 7, Status: store.SessionRunning}
+	m, hits := pollModel(t, []store.Session{running})
+	before := len(hits())
+
+	next, _ := m.Update(keyType(tea.KeyEnter))
+	m = toModel(next)
+	if m.previewVisible() {
+		t.Fatal("precondition: the detail view suppresses the pane")
+	}
+	next, _ = m.Update(sessionsFetchedMsg{threadID: 7, sessions: []store.Session{running}})
+	m = toModel(next)
+	if m.sessionPollThreadID != 0 {
+		t.Fatalf("a chain that stopped must release its arming, got %d", m.sessionPollThreadID)
+	}
+
+	next, cmd := m.Update(keyType(tea.KeyEsc))
+	m = toModel(next)
+	if m.view != viewInbox {
+		t.Fatalf("precondition: Esc must return to the inbox, got %d", m.view)
+	}
+	if m.previewThreadID != 7 {
+		t.Fatalf("the round trip must not change the previewed thread, got %d", m.previewThreadID)
+	}
+	if cmd == nil {
+		t.Fatal("returning to the inbox must re-sync visible data")
+	}
+	flattenMsgs(cmd())
+	if len(hits()) <= before {
+		t.Fatalf("returning to the inbox must re-arm the poll, hits = %v", hits())
+	}
+}
+
+func TestPollReArmsAfterAResizeBackAboveThePaneMinimum(t *testing.T) {
+	running := store.Session{ID: 3, TriggerMessageID: 42, ThreadID: 7, Status: store.SessionRunning}
+	m, hits := pollModel(t, []store.Session{running})
+	before := len(hits())
+
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 70, Height: 40})
+	m = toModel(next)
+	if m.previewVisible() {
+		t.Fatal("precondition: a 70-column terminal hides the pane")
+	}
+	next, _ = m.Update(sessionsFetchedMsg{threadID: 7, sessions: []store.Session{running}})
+	m = toModel(next)
+	if m.sessionPollThreadID != 0 {
+		t.Fatalf("a chain that stopped must release its arming, got %d", m.sessionPollThreadID)
+	}
+
+	next, cmd := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = toModel(next)
+	if !m.previewVisible() {
+		t.Fatal("precondition: a 120-column terminal shows the pane")
+	}
+	if cmd == nil {
+		t.Fatal("widening back must re-sync visible data")
+	}
+	flattenMsgs(cmd())
+	if len(hits()) <= before {
+		t.Fatalf("widening back must re-arm the poll, hits = %v", hits())
+	}
+}
+
+func TestHiddenPaneIssuesNoSessionFetchesOnKeyPresses(t *testing.T) {
+	running := store.Session{ID: 3, TriggerMessageID: 42, ThreadID: 7, Status: store.SessionRunning}
+	keys := []tea.KeyMsg{keyRunes("j"), keyRunes("k"), keyRunes("j"), keyRunes("g"), keyRunes("G")}
+
+	hidden, hiddenHits := pollModel(t, []store.Session{running})
+	next, _ := hidden.Update(keyRunes("p"))
+	hidden = toModel(next)
+	if hidden.previewVisible() {
+		t.Fatal("precondition: the pane must be hidden")
+	}
+	next, _ = hidden.Update(sessionsFetchedMsg{threadID: 7, sessions: []store.Session{running}})
+	hidden = toModel(next)
+	if hidden.sessionPollThreadID != 0 {
+		t.Fatalf("precondition: a hidden pane must have withdrawn the arming, got %d", hidden.sessionPollThreadID)
+	}
+	before := len(hiddenHits())
+	for _, k := range keys {
+		next, cmd := hidden.Update(k)
+		hidden = toModel(next)
+		if cmd != nil {
+			flattenMsgs(cmd())
+		}
+	}
+	if got := len(hiddenHits()) - before; got != 0 {
+		t.Fatalf("a hidden pane issued %d session fetches on %d key presses, want 0: %v", got, len(keys), hiddenHits())
+	}
+
+	next, _ = hidden.Update(keyRunes("p"))
+	hidden = toModel(next)
+	if !hidden.preview {
+		t.Fatal("precondition: the preview must be switched back on")
+	}
+	next, resizeCmd := hidden.Update(tea.WindowSizeMsg{Width: 70, Height: 40})
+	hidden = toModel(next)
+	if !hidden.preview {
+		t.Fatal("precondition: a resize must not switch the preview off, or this stops testing the width route")
+	}
+	if hidden.previewVisible() {
+		t.Fatal("precondition: a 70-column terminal must hide the pane")
+	}
+	if resizeCmd != nil {
+		flattenMsgs(resizeCmd())
+	}
+	before = len(hiddenHits())
+	for _, k := range keys {
+		next, cmd := hidden.Update(k)
+		hidden = toModel(next)
+		if cmd != nil {
+			flattenMsgs(cmd())
+		}
+	}
+	if got := len(hiddenHits()) - before; got != 0 {
+		t.Fatalf("a pane hidden by width issued %d session fetches on %d key presses, want 0: %v", got, len(keys), hiddenHits())
+	}
+
+	visible, visibleHits := pollModel(t, []store.Session{running})
+	visible.sessionPollThreadID = 0
+	before = len(visibleHits())
+	for _, k := range keys {
+		next, cmd := visible.Update(k)
+		visible = toModel(next)
+		if cmd != nil {
+			flattenMsgs(cmd())
+		}
+	}
+	if got := len(visibleHits()) - before; got == 0 {
+		t.Fatalf("positive control: the same key presses with the pane visible issued no fetches: %v", visibleHits())
+	}
+	for _, path := range visibleHits()[before:] {
+		if !strings.HasSuffix(path, "/sessions") {
+			t.Fatalf("the session poll hit an unexpected route: %q", path)
+		}
+	}
+}
+
+func TestTwoAcceptedResponsesProduceOneChain(t *testing.T) {
+	running := store.Session{ID: 3, TriggerMessageID: 42, ThreadID: 7, Status: store.SessionRunning}
+	m, _ := pollModel(t, []store.Session{running})
+	m.sessionTickThread = 0
+
+	next, cmd := m.Update(sessionsFetchedMsg{threadID: 7, sessions: []store.Session{running}})
+	m = toModel(next)
+	if cmd == nil {
+		t.Fatal("precondition: the first accepted response must schedule a chain")
+	}
+	if m.sessionTickThread != 7 {
+		t.Fatalf("precondition: a scheduled chain must be marked with its thread, got %d", m.sessionTickThread)
+	}
+
+	next, cmd = m.Update(sessionsFetchedMsg{threadID: 7, sessions: []store.Session{running}})
+	m = toModel(next)
+	if cmd != nil {
+		t.Fatal("a duplicate accepted response must not schedule a second chain")
+	}
+	if m.sessionTickThread != 7 {
+		t.Fatalf("the surviving chain must still be outstanding, got thread %d", m.sessionTickThread)
+	}
+}
+
+func TestTickAfterWithdrawnArmingDoesNotFetchThreadZero(t *testing.T) {
+	running := store.Session{ID: 3, TriggerMessageID: 42, ThreadID: 7, Status: store.SessionRunning}
+	m, hits := pollModel(t, []store.Session{running})
+	before := len(hits())
+
+	next, _ := m.Update(keyRunes("p"))
+	m = toModel(next)
+	next, _ = m.Update(sessionsFetchedMsg{threadID: 7, sessions: []store.Session{running}})
+	m = toModel(next)
+	if m.sessionPollThreadID != 0 {
+		t.Fatalf("precondition: the arming must be withdrawn, got %d", m.sessionPollThreadID)
+	}
+	if m.sessionTickThread != 7 {
+		t.Fatalf("precondition: a tick scheduled before the hide is still outstanding, got thread %d", m.sessionTickThread)
+	}
+
+	next, cmd := m.Update(sessionTickMsg{threadID: 7, gen: m.sessionTickGen})
+	m = toModel(next)
+	if cmd != nil {
+		flattenMsgs(cmd())
+	}
+	if got := len(hits()) - before; got != 0 {
+		t.Fatalf("a tick whose arming was withdrawn issued %d fetches: %v", got, hits())
+	}
+	if m.sessionTickThread != 0 {
+		t.Fatalf("a dead tick must clear its own outstanding mark, got thread %d", m.sessionTickThread)
+	}
+}
+
+func TestFetchErrorReleasesTheArmingSoTheNextSyncRetries(t *testing.T) {
+	running := store.Session{ID: 3, TriggerMessageID: 42, ThreadID: 7, Status: store.SessionRunning}
+	m, hits := pollModel(t, []store.Session{running})
+	before := len(hits())
+
+	next, cmd := m.Update(sessionTickMsg{threadID: 7, gen: m.sessionTickGen})
+	m = toModel(next)
+	if cmd == nil {
+		t.Fatal("precondition: the chain must fetch")
+	}
+	flattenMsgs(cmd())
+
+	next, cmd = m.Update(sessionsFetchedMsg{threadID: 7, err: errors.New("DAEMON_DOWN: connection refused")})
+	m = toModel(next)
+	if cmd != nil {
+		t.Fatal("a failed fetch must not leave a chain armed")
+	}
+	if m.sessionPollThreadID != 0 {
+		t.Fatalf("a failed fetch must release the arming, got %d", m.sessionPollThreadID)
+	}
+
+	next, cmd = m.Update(keyRunes("j"))
+	m = toModel(next)
+	next, cmd = m.Update(keyRunes("k"))
+	if cmd == nil {
+		t.Fatal("the next sync after a failure must retry")
+	}
+	flattenMsgs(cmd())
+	if len(hits()) <= before {
+		t.Fatalf("the retry never reached the daemon: %v", hits())
+	}
+	if got := hits()[len(hits())-1]; got != "/v1/threads/7/sessions" {
+		t.Fatalf("retry hit %q", got)
+	}
+}
+
+func twoThreadPollModel(t *testing.T, sessions []store.Session) (model, func() []string) {
+	t.Helper()
+	srv, hits := sessionPollServer(t, sessions)
+	m := toModel(New(srv.URL))
+	m.view = viewInbox
+	m.width = 120
+	m.height = 40
+	m.preview = true
+	m.inboxLayout = inboxLayoutCompact
+	m.inbox = []store.InboxMessage{
+		{Message: store.Message{ID: 42, ThreadID: 7, CreatedAt: "2026-09-26T12:00:00Z"}, ChannelID: 1, ChannelName: "c", ThreadTitle: "t7"},
+		{Message: store.Message{ID: 99, ThreadID: 9, CreatedAt: "2026-09-26T11:00:00Z"}, ChannelID: 1, ChannelName: "c", ThreadTitle: "t9"},
+	}
+	return m, hits
+}
+
+func TestThreadSwitchRearmsTheChainForTheNewThread(t *testing.T) {
+	seven := store.Session{ID: 1, TriggerMessageID: 42, ThreadID: 7, Status: store.SessionRunning}
+	nine := store.Session{ID: 2, TriggerMessageID: 99, ThreadID: 9, Status: store.SessionRunning}
+	all := []store.Session{seven, nine}
+	m, hits := twoThreadPollModel(t, all)
+	before := len(hits())
+
+	next, cmd := m.Update(previewMessagesFetchedMsg{threadID: 7})
+	m = toModel(next)
+	for _, msg := range flattenMsgs(cmd()) {
+		if sm, ok := msg.(sessionsFetchedMsg); ok {
+			next, cmd = m.Update(sm)
+			m = toModel(next)
+		}
+	}
+	if m.sessionTickThread != 7 {
+		t.Fatalf("precondition: the thread 7 chain must be armed, got thread %d", m.sessionTickThread)
+	}
+
+	next, cmd = m.Update(keyRunes("j"))
+	m = toModel(next)
+	if m.cursor != 1 {
+		t.Fatalf("precondition: the cursor must be on the second thread, got %d", m.cursor)
+	}
+	for _, msg := range flattenMsgs(cmd()) {
+		if pm, ok := msg.(previewMessagesFetchedMsg); ok {
+			next, _ = m.Update(pm)
+			m = toModel(next)
+		}
+	}
+	if m.previewThreadID != 9 {
+		t.Fatalf("precondition: the preview must be on thread 9, got %d", m.previewThreadID)
+	}
+
+	next, cmd = m.Update(sessionsFetchedMsg{threadID: 9, sessions: all})
+	m = toModel(next)
+	if m.sessionPollThreadID != 9 {
+		t.Fatalf("the new thread must be armed, got %d", m.sessionPollThreadID)
+	}
+	if m.sessionTickThread != 9 {
+		t.Fatalf("a thread switch must not cancel the poll: the new thread's chain was declined because thread %d's was pending", m.sessionTickThread)
+	}
+	if cmd == nil {
+		t.Fatal("the new thread's chain must be scheduled")
+	}
+	flattenMsgs(cmd())
+	if len(hits()) <= before {
+		t.Fatalf("the new thread must actually be polled: %v", hits())
+	}
+}
+
+func TestStaleTickForAnAbandonedThreadDoesNotFetch(t *testing.T) {
+	seven := store.Session{ID: 1, TriggerMessageID: 42, ThreadID: 7, Status: store.SessionRunning}
+	nine := store.Session{ID: 2, TriggerMessageID: 99, ThreadID: 9, Status: store.SessionRunning}
+	all := []store.Session{seven, nine}
+	m, hits := twoThreadPollModel(t, all)
+
+	next, _ := m.Update(previewMessagesFetchedMsg{threadID: 7})
+	m = toModel(next)
+	next, _ = m.Update(sessionsFetchedMsg{threadID: 7, sessions: all})
+	m = toModel(next)
+	live := m.sessionTickGen
+	if live == 0 {
+		t.Fatal("precondition: a chain must be outstanding")
+	}
+
+	m.sessionPollThreadID = 9
+	before := len(hits())
+	next, cmd := m.Update(sessionTickMsg{threadID: 7, gen: live})
+	m = toModel(next)
+	if cmd != nil {
+		flattenMsgs(cmd())
+	}
+	if got := len(hits()) - before; got != 0 {
+		t.Fatalf("a tick for the abandoned thread 7 fetched %d times while thread 9 was armed: %v", got, hits())
+	}
+	if m.sessionPollThreadID != 9 {
+		t.Fatalf("a tick for the abandoned thread must not disturb the arming, got %d", m.sessionPollThreadID)
+	}
+
+	m.sessionTickGen = live + 1
+	m.sessionTickThread = 9
+	before = len(hits())
+	next, cmd = m.Update(sessionTickMsg{threadID: 7, gen: live})
+	m = toModel(next)
+	if cmd != nil {
+		flattenMsgs(cmd())
+	}
+	if got := len(hits()) - before; got != 0 {
+		t.Fatalf("a superseded tick issued %d fetches: %v", got, hits())
+	}
+	if m.sessionTickGen != live+1 {
+		t.Fatalf("a superseded tick must not consume the current chain, got gen %d", m.sessionTickGen)
+	}
+	if m.sessionTickThread != 9 {
+		t.Fatalf("a superseded tick must not disturb the armed chain, got thread %d", m.sessionTickThread)
+	}
+}
+
+func TestStaleTickAfterAReleasedArmingDoesNotFetch(t *testing.T) {
+	running := store.Session{ID: 3, TriggerMessageID: 42, ThreadID: 7, Status: store.SessionRunning}
+	m, hits := pollModel(t, []store.Session{running})
+	before := len(hits())
+	if m.sessionTickThread != 7 {
+		t.Fatalf("precondition: the chain must be armed, got thread %d", m.sessionTickThread)
+	}
+
+	next, _ := m.Update(sessionsFetchedMsg{threadID: 7, err: errors.New("DAEMON_DOWN: refused")})
+	m = toModel(next)
+	if m.sessionPollThreadID != 0 {
+		t.Fatalf("precondition: a failed fetch must release the arming, got %d", m.sessionPollThreadID)
+	}
+	if m.sessionTickThread != 7 {
+		t.Fatalf("precondition: the outstanding tick must survive, got thread %d", m.sessionTickThread)
+	}
+
+	next, cmd := m.Update(sessionTickMsg{threadID: 7, gen: m.sessionTickGen})
+	m = toModel(next)
+	if cmd != nil {
+		flattenMsgs(cmd())
+	}
+	if got := len(hits()) - before; got != 0 {
+		t.Fatalf("a tick whose arming was released issued %d fetches: %v", got, hits())
+	}
+	if m.sessionTickThread != 0 {
+		t.Fatalf("the tick must clear its own outstanding mark, got thread %d", m.sessionTickThread)
+	}
+}
+
+func TestASupersededChainIsDiscardedRatherThanFetching(t *testing.T) {
+	seven := store.Session{ID: 1, TriggerMessageID: 42, ThreadID: 7, Status: store.SessionRunning}
+	nine := store.Session{ID: 2, TriggerMessageID: 99, ThreadID: 9, Status: store.SessionRunning}
+	all := []store.Session{seven, nine}
+	m, hits := twoThreadPollModel(t, all)
+
+	next, _ := m.Update(previewMessagesFetchedMsg{threadID: 7})
+	m = toModel(next)
+	next, _ = m.Update(sessionsFetchedMsg{threadID: 7, sessions: all})
+	m = toModel(next)
+	first := m.sessionTickGen
+	if first == 0 {
+		t.Fatal("precondition: the first chain must be outstanding")
+	}
+
+	next, _ = m.Update(previewMessagesFetchedMsg{threadID: 9})
+	m = toModel(next)
+	next, _ = m.Update(sessionsFetchedMsg{threadID: 9, sessions: all})
+	m = toModel(next)
+	next, _ = m.Update(previewMessagesFetchedMsg{threadID: 7})
+	m = toModel(next)
+	next, _ = m.Update(sessionsFetchedMsg{threadID: 7, sessions: all})
+	m = toModel(next)
+	if m.sessionTickGen == first {
+		t.Fatal("precondition: the round trip must supersede the first chain")
+	}
+	before := len(hits())
+
+	next, cmd := m.Update(sessionTickMsg{threadID: 7, gen: first})
+	m = toModel(next)
+	if cmd != nil {
+		flattenMsgs(cmd())
+	}
+	if got := len(hits()) - before; got != 0 {
+		t.Fatalf("the superseded chain's tick issued %d fetches; a chain must be identified by more than its thread: %v", got, hits())
+	}
+	if m.sessionTickGen != 0 && m.sessionTickGen == first {
+		t.Fatal("a superseded tick must not consume the current chain")
+	}
+}
+
+func TestTickIsStoppedWhenAnAllTerminalAcceptChangesTheArmedThread(t *testing.T) {
+	seven := store.Session{ID: 1, TriggerMessageID: 42, ThreadID: 7, Status: store.SessionRunning}
+	terminal := store.Session{ID: 2, TriggerMessageID: 99, ThreadID: 9, Status: store.SessionSucceeded}
+	m, hits := twoThreadPollModel(t, []store.Session{seven, terminal})
+
+	next, _ := m.Update(previewMessagesFetchedMsg{threadID: 7})
+	m = toModel(next)
+	next, _ = m.Update(sessionsFetchedMsg{threadID: 7, sessions: []store.Session{seven}})
+	m = toModel(next)
+	gen := m.sessionTickGen
+	if gen == 0 {
+		t.Fatal("precondition: the thread 7 chain must be outstanding")
+	}
+
+	// An all-terminal accept re-arms thread 9 without re-stamping a chain.
+	next, _ = m.Update(previewMessagesFetchedMsg{threadID: 9})
+	m = toModel(next)
+	next, _ = m.Update(sessionsFetchedMsg{threadID: 9, sessions: []store.Session{terminal}})
+	m = toModel(next)
+	if m.sessionPollThreadID != 9 {
+		t.Fatalf("precondition: thread 9 must be armed, got %d", m.sessionPollThreadID)
+	}
+	if m.sessionTickGen != gen {
+		t.Fatal("precondition: an all-terminal accept must not re-stamp a chain")
+	}
+	before := len(hits())
+
+	next, cmd := m.Update(sessionTickMsg{threadID: 7, gen: gen})
+	m = toModel(next)
+	if cmd != nil {
+		flattenMsgs(cmd())
+	}
+	if got := len(hits()) - before; got != 0 {
+		t.Fatalf("the thread 7 tick fetched %d times after thread 9 was armed: %v", got, hits())
+	}
+	if m.sessionPollThreadID != 9 {
+		t.Fatalf("the thread 9 arming must survive the stale tick, got %d", m.sessionPollThreadID)
+	}
+}
+
+// driftedRow builds a thread whose inbox row's representative has moved off the
+// session's trigger message, which is what groupInboxByChannelThread produces once any
+// later message exists in the thread.
+func driftedRow(t *testing.T, m *model, later store.Message, sessions []store.Session) {
+	t.Helper()
+	trigger := store.InboxMessage{
+		Message:     store.Message{ID: 1, ThreadID: 7, CreatedAt: "2026-09-26T10:00:00Z"},
+		ChannelID:   7,
+		ChannelName: "core",
+		ThreadTitle: "work",
+	}
+	follow := later
+	follow.ThreadID = 7
+	m.inbox = []store.InboxMessage{trigger, {Message: follow, ChannelID: 7, ChannelName: "core", ThreadTitle: "work"}}
+	rows := m.inboxFilteredSorted()
+	if len(rows) != 1 {
+		t.Fatalf("precondition: one thread must collapse to one row, got %d", len(rows))
+	}
+	if rows[0].ID == 1 {
+		t.Fatal("precondition: the row representative must have drifted off the trigger")
+	}
+	m.sessions = sessions
+	m.sessionsByMsg = map[int64]store.Session{}
+	for _, sess := range sessions {
+		m.sessionsByMsg[sess.TriggerMessageID] = sess
+	}
+}
+
+func TestSessionResolvesWhenAnAgentReplyMovedTheRowRepresentative(t *testing.T) {
+	sess := store.Session{ID: 5, TriggerMessageID: 1, ThreadID: 7, AgentName: "reviewer", Status: store.SessionSucceeded}
+	m := sessionModel(t, []store.Session{sess}, nil)
+	driftedRow(t, &m, store.Message{ID: 2, CreatedAt: "2026-09-26T10:05:00Z", AuthorType: "agent"}, []store.Session{sess})
+	row := m.inboxFilteredSorted()[0]
+	if _, ok := m.sessionsByMsg[row.ID]; ok {
+		t.Fatalf("precondition: the trigger-keyed index must miss, but it holds the row's id %d", row.ID)
+	}
+	next, _, handled := m.handleSessionKey(keyRunes("s"))
+	got := toModel(next)
+	if !handled {
+		t.Fatalf("s must resolve after an agent reply moved the representative, status = %q", got.status)
+	}
+	if got.session == nil || got.session.ID != 5 {
+		t.Fatalf("session = %+v", got.session)
+	}
+}
+
+func TestSessionResolvesWhenAHumanMessageMovedTheRowRepresentative(t *testing.T) {
+	sess := store.Session{ID: 5, TriggerMessageID: 1, ThreadID: 7, AgentName: "reviewer", Status: store.SessionSucceeded}
+	m := sessionModel(t, []store.Session{sess}, nil)
+	driftedRow(t, &m, store.Message{ID: 3, CreatedAt: "2026-09-26T10:09:00Z", AuthorType: "human"}, []store.Session{sess})
+	next, _, handled := m.handleSessionKey(keyRunes("s"))
+	got := toModel(next)
+	if !handled {
+		t.Fatalf("s must resolve after a human message moved the representative, status = %q", got.status)
+	}
+	if got.session == nil || got.session.ID != 5 {
+		t.Fatalf("session = %+v", got.session)
+	}
+}
+
+func TestSessionPicksTheNewestSessionInTheThread(t *testing.T) {
+	old := store.Session{ID: 4, TriggerMessageID: 1, ThreadID: 7, AgentName: "older", Status: store.SessionFailed}
+	recent := store.Session{ID: 9, TriggerMessageID: 1, ThreadID: 7, AgentName: "newer", Status: store.SessionSucceeded}
+	m := sessionModel(t, []store.Session{old, recent}, nil)
+	driftedRow(t, &m, store.Message{ID: 2, CreatedAt: "2026-09-26T10:05:00Z"}, []store.Session{old, recent})
+	got, ok := m.sessionForCursor()
+	if !ok {
+		t.Fatal("the thread's session must resolve")
+	}
+	if got.ID != recent.ID {
+		t.Fatalf("resolved session %d (%s), want the newest %d (%s)", got.ID, got.AgentName, recent.ID, recent.AgentName)
+	}
+}
+
+func TestSessionForCursorIsSafeUnderConcurrentSessionUpdate(t *testing.T) {
+	old := store.Session{ID: 4, TriggerMessageID: 1, ThreadID: 7, AgentName: "older", Status: store.SessionFailed}
+	recent := store.Session{ID: 9, TriggerMessageID: 1, ThreadID: 7, AgentName: "newer", Status: store.SessionSucceeded}
+	m := sessionModel(t, []store.Session{old, recent}, nil)
+	driftedRow(t, &m, store.Message{ID: 2, CreatedAt: "2026-09-26T10:05:00Z"}, []store.Session{old, recent})
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var gotErr bool
+
+	// Reader: repeatedly calls sessionForCursor from many goroutines.
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				_, ok := m.sessionForCursor()
+				if !ok {
+					mu.Lock()
+					gotErr = true
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+
+	// Writer: simulates applySessions replacing the sessions slice concurrently.
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				sess := store.Session{
+					ID:               int64(n*200 + j),
+					TriggerMessageID: 1,
+					ThreadID:         7,
+					AgentName:        fmt.Sprintf("update-%d", j),
+					Status:           store.SessionRunning,
+				}
+				m.sessionMu.Lock()
+				m.sessions = []store.Session{sess}
+				m.sessionsByMsg = map[int64]store.Session{1: sess}
+				m.sessionMu.Unlock()
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	if gotErr {
+		t.Fatal("sessionForCursor must always resolve under concurrent session updates")
+	}
+}
+
+func TestSessionDoesNotLeakAnotherThreadsSession(t *testing.T) {
+	other := store.Session{ID: 5, TriggerMessageID: 1, ThreadID: 8, AgentName: "elsewhere", Status: store.SessionSucceeded}
+	m := sessionModel(t, []store.Session{other}, nil)
+	driftedRow(t, &m, store.Message{ID: 2, CreatedAt: "2026-09-26T10:05:00Z"}, []store.Session{other})
+	if _, ok := m.sessionForCursor(); ok {
+		t.Fatal("a row whose thread has no sessions must not resolve another thread's session")
+	}
+	next, _, handled := m.handleSessionKey(keyRunes("s"))
+	got := toModel(next)
+	if handled {
+		t.Fatal("s must not be handled for a thread with no sessions")
+	}
+	if got.status != "no session on this message" {
+		t.Fatalf("status = %q, want the no-session hint", got.status)
+	}
+}
+
+func TestSessionSurvivesToggleBackOnADriftedRow(t *testing.T) {
+	sess := store.Session{ID: 5, TriggerMessageID: 1, ThreadID: 7, AgentName: "reviewer", Status: store.SessionSucceeded}
+	m := sessionModel(t, []store.Session{sess}, nil)
+	driftedRow(t, &m, store.Message{ID: 2, CreatedAt: "2026-09-26T10:05:00Z"}, []store.Session{sess})
+
+	next, _, handled := m.handleSessionKey(keyRunes("s"))
+	m = toModel(next)
+	if !handled || m.previewMode != previewSession {
+		t.Fatalf("first s: handled = %v mode = %v", handled, m.previewMode)
+	}
+	next, _, handled = m.handleSessionKey(keyRunes("s"))
+	m = toModel(next)
+	if !handled || m.previewMode != previewThread {
+		t.Fatalf("second s: handled = %v mode = %v", handled, m.previewMode)
+	}
+	if m.session != nil || m.sessionEvents != nil {
+		t.Fatal("toggling back must clear the loaded transcript, or the re-open test is vacuous")
+	}
+	next, _, handled = m.handleSessionKey(keyRunes("s"))
+	m = toModel(next)
+	if !handled || m.previewMode != previewSession {
+		t.Fatalf("third s must re-open the session, handled = %v mode = %v", handled, m.previewMode)
+	}
+	if m.session == nil || m.session.ID != 5 {
+		t.Fatalf("re-opening must re-resolve the session, got %+v", m.session)
+	}
+}
+
+func TestHelpMentionsTheSessionKey(t *testing.T) {
+	m := sessionModel(t, nil, nil)
+	if out := stripAnsi(m.helpView()); !strings.Contains(out, "s session") {
+		t.Fatalf("helpView must document the s key, got %q", out)
+	}
+}
+
+func TestHelpOffersTheThreadKeyInSessionMode(t *testing.T) {
+	m := sessionModel(t, nil, nil)
+	m.previewMode = previewSession
+	out := stripAnsi(m.helpView())
+	if !strings.Contains(out, "s thread") {
+		t.Fatalf("helpView must offer the way back, got %q", out)
+	}
+}
+
+func assertPaneIsIntact(t *testing.T, out string, w int) {
+	t.Helper()
+	if !utf8.ValidString(out) {
+		t.Fatal("the pane produced invalid utf-8")
+	}
+	for i, line := range strings.Split(out, "\n") {
+		if got := lipgloss.Width(line); got > w {
+			t.Fatalf("line %d width = %d, want <= %d: %q", i, got, w, line)
+		}
+	}
+}
+
+func TestRenderSessionPreviewBoundsALongAgentName(t *testing.T) {
+	one := store.Session{ID: 5, AgentName: strings.Repeat("é", 500), Status: store.SessionSucceeded, ReplyMode: "auto"}
+	m := sessionModel(t, []store.Session{one}, nil)
+	m.session = &one
+	assertPaneIsIntact(t, stripAnsi(m.renderSessionPreview(60, 20)), 60)
+}
+
+func TestRenderSessionPreviewScrubsTheErrorField(t *testing.T) {
+	one := store.Session{ID: 5, AgentName: "reviewer", Status: store.SessionFailed, ReplyMode: "auto",
+		Error: strptr("\x1b[31mboom\nsecond line\x1b[0m")}
+	m := sessionModel(t, []store.Session{one}, nil)
+	m.session = &one
+	raw := m.renderSessionPreview(60, 20)
+	if strings.Contains(raw, "\x1b") {
+		t.Fatalf("the daemon-supplied error leaked escape codes into the header: %q", raw)
+	}
+	lines := strings.Split(raw, "\n")
+	if len(lines) != 2 {
+		t.Fatalf("the daemon-supplied error injected a line break: %q", raw)
+	}
+	if !strings.Contains(lines[0], "boom second") {
+		t.Fatalf("the newline was not folded into a space: %q", lines[0])
+	}
+	assertPaneIsIntact(t, stripAnsi(raw), 60)
+}
+
+func TestEventWindowIsTopAnchoredAndBounded(t *testing.T) {
+	one := store.Session{ID: 5, AgentName: "reviewer", Status: store.SessionSucceeded, ReplyMode: "auto"}
+	events := make([]store.SessionEvent, 60)
+	for i := range events {
+		events[i] = store.SessionEvent{Seq: int64(i + 1), Type: store.SessionEventStdout, Content: fmt.Sprintf("chunk%d", i)}
+	}
+	m := sessionModel(t, []store.Session{one}, events)
+	m.session = &one
+	m.sessionEvents = events
+	out := stripAnsi(m.renderSessionPreview(50, 8))
+	lines := strings.Split(out, "\n")
+	if len(lines) > 8 {
+		t.Fatalf("rendered %d lines at h=8:\n%s", len(lines), out)
+	}
+	if !strings.Contains(lines[1], "chunk0") {
+		t.Fatalf("the window must be anchored on the first event:\n%s", out)
+	}
+	if !strings.Contains(lines[5], "chunk4") {
+		t.Fatalf("h-3 events must be visible:\n%s", out)
+	}
+	if strings.Contains(out, "chunk5") {
+		t.Fatalf("the window must stop after h-3 events:\n%s", out)
+	}
+}
+
+func TestSessionKeyResolvesThroughAnActiveFilter(t *testing.T) {
+	one := store.Session{ID: 5, TriggerMessageID: 42, ThreadID: 8, Status: store.SessionSucceeded}
+	m := sessionModel(t, []store.Session{one}, nil)
+	m.inbox = []store.InboxMessage{
+		{Message: store.Message{ID: 1, ThreadID: 7, CreatedAt: "2026-09-26T12:00:00Z"}, ChannelID: 1, ChannelName: "ui", ThreadTitle: "alpha"},
+		{Message: store.Message{ID: 42, ThreadID: 8, CreatedAt: "2026-09-26T10:00:00Z"}, ChannelID: 2, ChannelName: "core", ThreadTitle: "beta"},
+	}
+	m.sessions = []store.Session{one}
+	m.sessionsByMsg = map[int64]store.Session{42: one}
+	if _, ok := m.sessionForCursor(); ok {
+		t.Fatal("precondition: unfiltered, the cursor row must have no session")
+	}
+	m.inboxFilterChan = "core"
+	if rows := m.inboxFilteredSorted(); len(rows) != 1 || rows[0].ID != 42 {
+		t.Fatalf("filter setup failed: %+v", rows)
+	}
+	next, _, handled := m.handleSessionKey(keyRunes("s"))
+	got := toModel(next)
+	if !handled {
+		t.Fatal("an active filter must not hide a session from s")
+	}
+	if got.session == nil || got.session.ID != 5 {
+		t.Fatalf("session = %+v", got.session)
+	}
+}
+
+func TestSessionKeyIsIgnoredOutsideTheInbox(t *testing.T) {
+	one := store.Session{ID: 5, TriggerMessageID: 42, Status: store.SessionSucceeded}
+	for _, view := range []viewKind{viewChannels, viewThreads, viewMessages} {
+		m := sessionModel(t, []store.Session{one}, nil)
+		m.inbox = []store.InboxMessage{{Message: store.Message{ID: 42, ThreadID: 7}, ChannelID: 1, ChannelName: "c", ThreadTitle: "t"}}
+		m.sessionsByMsg = map[int64]store.Session{42: one}
+		m.view = view
+		if !m.previewVisible() {
+			t.Fatalf("precondition: the pane is drawn in view %d", view)
+		}
+		next, _, handled := m.handleSessionKey(keyRunes("s"))
+		if handled {
+			t.Fatalf("s must be ignored in view %d", view)
+		}
+		if toModel(next).previewMode != previewThread {
+			t.Fatalf("view %d left the model in session mode", view)
+		}
+	}
+}
+
+func TestPollStopsWhenThePaneIsHidden(t *testing.T) {
+	m := sessionModel(t, nil, nil)
+	m.sessions = []store.Session{{ID: 1, Status: store.SessionRunning}}
+	if cmd := m.syncSessionTick(); cmd == nil {
+		t.Fatal("precondition: with the pane on, a running session must poll")
+	}
+	m.preview = false
+	if cmd := m.syncSessionTick(); cmd != nil {
+		t.Fatal("a hidden pane must not keep polling")
+	}
+}
+
+func TestTickRefetchesWithoutArmingASecondTimer(t *testing.T) {
+	running := store.Session{ID: 3, TriggerMessageID: 42, Status: store.SessionRunning}
+	m := sessionModel(t, []store.Session{running}, nil)
+	m.sessions = []store.Session{running}
+	m.sessionPollThreadID = 7
+	m.sessionTickThread = 7
+	_, cmd := m.Update(sessionTickMsg{threadID: 7})
+	if cmd == nil {
+		t.Fatal("a tick with an active session must refetch")
+	}
+	msgs := flattenMsgs(cmd())
+	for _, msg := range msgs {
+		if _, ok := msg.(sessionTickMsg); ok {
+			t.Fatal("the tick handler must not arm its own timer; the fetch carries the chain")
+		}
+	}
+	found := false
+	for _, msg := range msgs {
+		if sm, ok := msg.(sessionsFetchedMsg); ok && sm.err == nil && sm.threadID == 7 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the tick did not refetch sessions for thread 7: %+v", msgs)
+	}
+}
+
+func TestTickPollsTheThreadItWasArmedFor(t *testing.T) {
+	var mu sync.Mutex
+	var paths []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/threads/", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]store.Session{})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	m := toModel(New(srv.URL))
+	m.view = viewInbox
+	m.width = 120
+	m.height = 40
+	m.preview = true
+	m.sessions = []store.Session{{ID: 1, Status: store.SessionRunning}}
+	m.sessionPollThreadID = 42
+	m.sessionTickThread = 42
+	_, cmd := m.Update(sessionTickMsg{threadID: 42})
+	if cmd == nil {
+		t.Fatal("a tick with an active session must refetch")
+	}
+	cmd()
+	mu.Lock()
+	defer mu.Unlock()
+	if len(paths) != 1 || paths[0] != "/v1/threads/42/sessions" {
+		t.Fatalf("poll paths = %v, want the thread the chain was armed for", paths)
+	}
+}
+
+func TestAFailingPollTerminatesTheChain(t *testing.T) {
+	running := store.Session{ID: 3, Status: store.SessionRunning}
+	m := sessionModel(t, nil, nil)
+	m.sessions = []store.Session{running}
+	m.sessionPollThreadID = 7
+	m.status = "inbox — 3 messages · q quit"
+	next, cmd := m.Update(sessionsFetchedMsg{threadID: 7, err: errors.New("BAD_JSONL: thread id must be a positive integer")})
+	if cmd != nil {
+		t.Fatal("a failed poll must not re-arm, or the loop never terminates")
+	}
+	got := toModel(next)
+	if len(got.sessions) != 1 || got.sessions[0].Status != store.SessionRunning {
+		t.Fatalf("a failed poll must leave the last known state alone: %+v", got.sessions)
+	}
+	if strings.Contains(got.status, "inbox —") {
+		t.Fatalf("the error must be surfaced, status = %q", got.status)
+	}
+}
+
+func TestLateSessionsResponseForAnAbandonedThreadIsDropped(t *testing.T) {
+	stale := store.Session{ID: 1, TriggerMessageID: 10, Status: store.SessionRunning}
+	fresh := store.Session{ID: 2, TriggerMessageID: 20, Status: store.SessionSucceeded}
+	m := sessionModel(t, []store.Session{fresh}, nil)
+	m.sessions = []store.Session{fresh}
+	m.sessionsByMsg = map[int64]store.Session{20: fresh}
+	m.previewThreadID = 2
+	next, cmd := m.Update(sessionsFetchedMsg{threadID: 1, sessions: []store.Session{stale}})
+	got := toModel(next)
+	if cmd != nil {
+		t.Fatal("a stale response must not arm the poll")
+	}
+	if _, ok := got.sessionsByMsg[10]; ok {
+		t.Fatal("a stale response overwrote the index for the current thread")
+	}
+	if len(got.sessions) != 1 || got.sessions[0].ID != 2 {
+		t.Fatalf("sessions = %+v", got.sessions)
+	}
+}
+
+func TestSessionPaneFollowsTheCursor(t *testing.T) {
+	a := store.Session{ID: 1, AgentName: "alpha", Status: store.SessionSucceeded, ReplyMode: "auto", TriggerMessageID: 10}
+	b := store.Session{ID: 2, AgentName: "beta", Status: store.SessionSucceeded, ReplyMode: "auto", TriggerMessageID: 20}
+	m := sessionModel(t, []store.Session{a, b}, nil)
+	m.inbox = []store.InboxMessage{
+		{Message: store.Message{ID: 10, ThreadID: 7, CreatedAt: "2026-09-26T12:00:00Z"}, ChannelID: 1, ChannelName: "c", ThreadTitle: "t"},
+		{Message: store.Message{ID: 20, ThreadID: 8, CreatedAt: "2026-09-26T10:00:00Z"}, ChannelID: 1, ChannelName: "c", ThreadTitle: "u"},
+	}
+	m.sessionsByMsg = map[int64]store.Session{10: a, 20: b}
+	m.session = &a
+	m.sessionEvents = []store.SessionEvent{{Seq: 1, Type: store.SessionEventPrompt, Content: "prompt a"}}
+	m.previewMode = previewSession
+	if !strings.Contains(stripAnsi(m.renderSessionPreview(60, 20)), "alpha") {
+		t.Fatal("the pane must show the cursor row's session")
+	}
+	m.cursor = 1
+	out := stripAnsi(m.renderSessionPreview(60, 20))
+	if !strings.Contains(out, "beta") {
+		t.Fatalf("the pane must follow the cursor to the next thread:\n%s", out)
+	}
+	if strings.Contains(out, "alpha") {
+		t.Fatalf("the pane kept showing the abandoned session:\n%s", out)
+	}
+}
+
+func TestTickSurvivesAcrossAFetchAndStopsWhenTheFetchFails(t *testing.T) {
+	running := store.Session{ID: 3, TriggerMessageID: 42, Status: store.SessionRunning}
+	ended := store.Session{ID: 3, TriggerMessageID: 42, Status: store.SessionSucceeded}
+	m := sessionModel(t, []store.Session{running}, nil)
+	m.sessionPollThreadID = 7
+	m.sessionTickThread = 7
+	m.sessionTickGen = 1
+	m.previewThreadID = 7
+	m.sessions = []store.Session{running}
+	next, cmd := m.Update(sessionTickMsg{threadID: 7, gen: 1})
+	if cmd == nil {
+		t.Fatal("precondition: the tick must refetch")
+	}
+	for _, msg := range flattenMsgs(cmd()) {
+		if sm, ok := msg.(sessionsFetchedMsg); ok {
+			next, cmd = toModel(next).Update(sm)
+		}
+	}
+	if cmd == nil {
+		t.Fatal("a still-running session must keep the chain alive across the fetch")
+	}
+	_, cmd = toModel(next).Update(sessionsFetchedMsg{threadID: 7, err: errors.New("DAEMON_DOWN: connection refused")})
+	if cmd != nil {
+		t.Fatal("the chain must stop on a fetch failure")
+	}
+	_, cmd = toModel(next).Update(sessionsFetchedMsg{threadID: 7, sessions: []store.Session{ended}})
+	if cmd != nil {
+		t.Fatal("the chain must stop when the session finishes")
+	}
+}

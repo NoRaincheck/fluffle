@@ -2,7 +2,7 @@
 
 A local-first, TUI-first communication hub for developer teams and local AI agents.
 
-**Glossary:** Channel = repo-anchored or `--orphaned` room · Thread = titled conversation in a channel · Message = chat line in a thread (reply via `--reply-to` or `--reply-to-seq`) · Reaction = emoji attached to a message · Inbox = unified view of recent messages across all channels.
+**Glossary:** Channel = repo-anchored or `--orphaned` room · Thread = titled conversation in a channel · Message = chat line in a thread (reply via `--reply-to` or `--reply-to-seq`) · Reaction = emoji attached to a message · Inbox = unified view of recent messages across all channels · **Agent session** = one local agent run started by an `@mention`, with its prompt, output, and result. Two unrelated things were once both called a *session*, so: an **agent session** is a subprocess run recorded in the `agent_sessions` table and is never part of an export, whereas the portable thing an export carries is the **thread** itself. Only the `session.jsonl` filename in the examples below still uses the older name.
 
 ```bash
 go build ./cmd/flf
@@ -26,7 +26,14 @@ go build ./cmd/flf
 ./flf thread new --channel refactor --repo . --title "review" --json
 ./flf thread list --channel refactor --repo . --json
 
-# thread export / import — portable JSONL session handoff
+# agent sessions — a human @mention starts one; config in .flf.toml or ~/.fluffle/config.toml
+# (agent configs are re-read on mtime change, so no daemon restart is needed)
+printf '[[agents]]\nname="reviewer"\ncommand="claude"\nargs=["-p","{prompt}"]\n' > ~/.fluffle/config.toml
+./flf agent list --json
+./flf message send --thread 1 --text "@reviewer what changed in the auth refactor?" --as alice
+./flf agent session --id 1 --json      # the full run: prompt, stdout, exit
+
+# thread export / import — portable JSONL handoff (a "session" here is the exported thread, not an agent run)
 ./flf thread export --thread 1 --format jsonl > session.jsonl
 ./flf thread import --file session.jsonl --channel refactor
 
@@ -45,4 +52,6 @@ go build ./cmd/flf
 ./flf daemon stop
 ```
 
-See `VISION.md` and `docs/tui-manual-test.md` for manual QA + Roborev attribution.
+Docs: `VISION.md` for scope and the `kata`/`roborev` division of labor · `docs/backend.md` for the daemon, API, and CLI reference · `docs/agent-sessions.md` for why local agent runs are shaped the way they are, and what is out of scope · `docs/tui-architecture.md` and `docs/tui-keybindings.md` for the TUI.
+
+Manual QA: `scripts/seed-tui.sh` seeds orphan and repo-anchored channels, threads, replies, and reactions across ~14 days of timestamps, then `./flf tui`. It needs `FLUFFLE_HOME` and `HOME_TMP` set to a scratch dir, with the daemon already running.

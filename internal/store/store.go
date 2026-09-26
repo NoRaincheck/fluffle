@@ -65,6 +65,35 @@ CREATE TABLE IF NOT EXISTS reactions(
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   UNIQUE(message_id, emoji, name)
 );
+CREATE TABLE IF NOT EXISTS agent_sessions(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  thread_id INTEGER NOT NULL REFERENCES threads(id),
+  trigger_message_id INTEGER NOT NULL REFERENCES messages(id),
+  agent_name TEXT NOT NULL CHECK(length(trim(agent_name)) > 0),
+  status TEXT NOT NULL CHECK(status IN ('queued','running','succeeded','failed','canceled')),
+  reply_mode TEXT NOT NULL CHECK(reply_mode IN ('stdout','cli','auto')),
+  command TEXT NOT NULL CHECK(length(trim(command)) > 0),
+  cwd TEXT,
+  exit_code INTEGER,
+  error TEXT,
+  reply_message_id INTEGER REFERENCES messages(id),
+  started_at TEXT,
+  finished_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_session_trigger ON agent_sessions(trigger_message_id, agent_name);
+CREATE INDEX IF NOT EXISTS idx_sessions_thread ON agent_sessions(thread_id, id);
+CREATE INDEX IF NOT EXISTS idx_sessions_status ON agent_sessions(status);
+CREATE TABLE IF NOT EXISTS agent_session_events(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id INTEGER NOT NULL REFERENCES agent_sessions(id),
+  seq INTEGER NOT NULL,
+  type TEXT NOT NULL CHECK(type IN ('prompt','stdout','stderr','exit','error')),
+  content TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  UNIQUE(session_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_session_events ON agent_session_events(session_id, seq);
 `
 
 type Store struct{ db *sql.DB }

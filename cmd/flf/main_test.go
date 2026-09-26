@@ -5,19 +5,26 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/NoRaincheck/fluffle/internal/agentcfg"
 	"github.com/NoRaincheck/fluffle/internal/jsonl"
+	"github.com/NoRaincheck/fluffle/internal/runner"
+	"github.com/NoRaincheck/fluffle/internal/session"
+	"github.com/NoRaincheck/fluffle/internal/store"
 )
 
 type recordedCLIRequest struct {
@@ -1720,13 +1727,18 @@ func TestAgentReadAllowsExplicitZeroLastWithoutCursor(t *testing.T) {
 	}
 }
 
+// awaitedChildPID stands in for the pid of the child daemon spawned by
+// daemonStartBackground, so the awaitDaemonPort tests can pin that only the
+// runtime file written by that child is accepted.
+const awaitedChildPID = 4242
+
 func TestAwaitDaemonPortReportsChildExitAndTimeout(t *testing.T) {
 	t.Run("child exit", func(t *testing.T) {
 		exited := make(chan error, 1)
 		exited <- errors.New("exit status 2")
 		home := t.TempDir()
 		code, output := captureStderr(t, func() int {
-			_, err := awaitDaemonPort(home, 20, time.Millisecond, exited)
+			_, err := awaitDaemonPort(home, 20, time.Millisecond, exited, awaitedChildPID)
 			if err == nil {
 				t.Fatal("expected readiness error")
 			}
@@ -1744,7 +1756,7 @@ func TestAwaitDaemonPortReportsChildExitAndTimeout(t *testing.T) {
 	t.Run("readiness timeout", func(t *testing.T) {
 		home := t.TempDir()
 		code, output := captureStderr(t, func() int {
-			_, err := awaitDaemonPort(home, 3, time.Millisecond, make(chan error))
+			_, err := awaitDaemonPort(home, 3, time.Millisecond, make(chan error), awaitedChildPID)
 			if err == nil {
 				t.Fatal("expected readiness timeout")
 			}
@@ -1761,21 +1773,32 @@ func TestAwaitDaemonPortReportsChildExitAndTimeout(t *testing.T) {
 
 	t.Run("invalid runtime file", func(t *testing.T) {
 		home := t.TempDir()
-		if err := os.WriteFile(filepath.Join(home, "daemon.json"), []byte(`{"port":0}`), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(home, "daemon.json"), []byte(`{"port":0,"pid":4242}`), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		_, err := awaitDaemonPort(home, 3, time.Millisecond, make(chan error))
+		_, err := awaitDaemonPort(home, 3, time.Millisecond, make(chan error), awaitedChildPID)
 		if err == nil {
 			t.Fatal("expected error for a runtime file without a usable port")
 		}
 	})
 
-	t.Run("ready port", func(t *testing.T) {
+	t.Run("runtime file from another process", func(t *testing.T) {
 		home := t.TempDir()
-		if err := os.WriteFile(filepath.Join(home, "daemon.json"), []byte(`{"port":1234}`), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(home, "daemon.json"), []byte(`{"port":1234,"pid":999999}`), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		port, err := awaitDaemonPort(home, 3, time.Millisecond, make(chan error))
+		_, err := awaitDaemonPort(home, 3, time.Millisecond, make(chan error), awaitedChildPID)
+		if err == nil {
+			t.Fatal("expected error for a runtime file this child did not write")
+		}
+	})
+
+	t.Run("ready port", func(t *testing.T) {
+		home := t.TempDir()
+		if err := os.WriteFile(filepath.Join(home, "daemon.json"), []byte(`{"port":1234,"pid":4242}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		port, err := awaitDaemonPort(home, 3, time.Millisecond, make(chan error), awaitedChildPID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1783,4 +1806,682 @@ func TestAwaitDaemonPortReportsChildExitAndTimeout(t *testing.T) {
 			t.Fatalf("port = %d, want 1234", port)
 		}
 	})
+}
+
+func TestDaemonStartReconcilesStaleSessions(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("FLUFFLE_HOME", home)
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(home, "fluffle.db")
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chID, _ := s.CreateChannel("c", "/repo", "", "", "", false)
+	thID, _ := s.CreateThread(chID, "t")
+	seq, _ := s.AppendMessage(thID, "alice", "human", "user", "@probe hi")
+	msgID, _ := s.MessageIDBySeq(thID, seq)
+	running, _ := s.CreateSession(thID, msgID, "probe", store.SessionRunning, "stdout", "c", nil)
+	queued, _ := s.CreateSession(thID, msgID, "other", store.SessionQueued, "stdout", "c", nil)
+	done, _ := s.CreateSession(thID, msgID, "done", store.SessionSucceeded, "stdout", "c", nil)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	agents := agentcfg.NewLoader(filepath.Join(home, "config.toml"))
+	m := session.NewManager(reopened, agents, runner.NewExec())
+	defer m.Shutdown()
+	if err := m.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, id := range []int64{running, queued} {
+		got, err := reopened.GetSession(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != store.SessionCanceled {
+			t.Fatalf("session %d status = %q, want canceled", id, got.Status)
+		}
+		if got.FinishedAt == nil {
+			t.Fatalf("session %d has no finished_at", id)
+		}
+		if got.Error == nil || !strings.Contains(*got.Error, "daemon restarted") {
+			t.Fatalf("session %d error = %v", id, got.Error)
+		}
+	}
+	untouched, _ := reopened.GetSession(done)
+	if untouched.Status != store.SessionSucceeded {
+		t.Fatalf("terminal session was modified: %q", untouched.Status)
+	}
+}
+
+// TestDaemonStopSleepsUntilKilled is the child process used by the daemonStop
+// tests. It only does anything when re-executed with FLUFFLE_STOP_HELPER=1.
+func TestDaemonStopSleepsUntilKilled(t *testing.T) {
+	if os.Getenv("FLUFFLE_STOP_HELPER") != "1" {
+		t.Skip("helper process; only runs when re-executed by the daemonStop tests")
+	}
+	time.Sleep(2 * time.Minute)
+}
+
+// startFakeDaemon starts a real child process that stands in for a running
+// daemon, so the stop tests can assert on genuine process death rather than on
+// a mock. waitDead blocks until the child is killed and reaped, which is what
+// makes the assertions race-free: a killed-but-unreaped child still answers
+// signal 0 on Unix, so the tests must wait for the reap, not sample it.
+func startFakeDaemon(t *testing.T) (pid int, waitDead func() bool) {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=TestDaemonStopSleepsUntilKilled", "-test.timeout=3m")
+	cmd.Env = append(os.Environ(), "FLUFFLE_STOP_HELPER=1")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	reaped := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(reaped)
+	}()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		select {
+		case <-reaped:
+		case <-time.After(10 * time.Second):
+			t.Error("fake daemon was not reaped")
+		}
+	})
+	return cmd.Process.Pid, func() bool {
+		select {
+		case <-reaped:
+			return true
+		case <-time.After(10 * time.Second):
+			return false
+		}
+	}
+}
+
+func writeDaemonRuntimeFile(t *testing.T, home string, port, pid int) {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{"port": port, "pid": pid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "daemon.json"), payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func serverPort(t *testing.T, server *httptest.Server) int {
+	t.Helper()
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(parsed.Port())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return port
+}
+
+func TestDaemonStopRequestsGracefulShutdownBeforeKilling(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("FLUFFLE_HOME", home)
+	pid, waitDead := startFakeDaemon(t)
+
+	var mu sync.Mutex
+	var seen []recordedCLIRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, recordedCLIRequest{
+			Method: r.Method,
+			Path:   r.URL.Path,
+			Header: r.Header.Clone(),
+		})
+		mu.Unlock()
+		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+			t.Errorf("killing the fake daemon: %v", err)
+		}
+		waitDead()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	writeDaemonRuntimeFile(t, home, serverPort(t, server), pid)
+
+	code, stdout, stderr := captureOutput(t, daemonStop)
+
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (stderr %q)", code, stderr)
+	}
+	if !strings.Contains(stdout, "daemon stopped") {
+		t.Fatalf("stdout = %q, want the success message", stdout)
+	}
+
+	mu.Lock()
+	got := append([]recordedCLIRequest(nil), seen...)
+	mu.Unlock()
+	if len(got) != 1 {
+		t.Fatalf("daemon requests = %d, want exactly the graceful shutdown POST", len(got))
+	}
+	if got[0].Method != http.MethodPost || got[0].Path != "/api/shutdown" {
+		t.Fatalf("request = %s %s, want POST /api/shutdown", got[0].Method, got[0].Path)
+	}
+	if agent := got[0].Header.Get("X-Fluffle-Agent"); agent != "" {
+		t.Fatalf("X-Fluffle-Agent = %q, want the header absent: a human stop must not be spoofed as an agent", agent)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want a clean graceful stop with no forced-kill notice", stderr)
+	}
+	if !waitDead() {
+		t.Fatal("fake daemon survived the graceful stop")
+	}
+	if _, err := os.Stat(filepath.Join(home, "daemon.json")); !os.IsNotExist(err) {
+		t.Fatalf("daemon.json still present after a clean stop: %v", err)
+	}
+}
+
+func TestDaemonStopFallsBackToKillWhenGracefulShutdownFails(t *testing.T) {
+	t.Run("nothing listening on the recorded port", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("FLUFFLE_HOME", home)
+		pid, waitDead := startFakeDaemon(t)
+
+		dead, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		closedPort := dead.Addr().(*net.TCPAddr).Port
+		if err := dead.Close(); err != nil {
+			t.Fatal(err)
+		}
+		writeDaemonRuntimeFile(t, home, closedPort, pid)
+
+		code, stdout, stderr := captureOutput(t, daemonStop)
+		if code != 0 {
+			t.Fatalf("exit = %d, want 0: an unreachable graceful path must still stop the daemon", code)
+		}
+		if !strings.Contains(stdout, "daemon stopped") {
+			t.Fatalf("stdout = %q, want the success message", stdout)
+		}
+		if !strings.Contains(stderr, "did not shut down gracefully") {
+			t.Fatalf("stderr = %q, want the forced-kill notice so the stop is not reported as clean", stderr)
+		}
+		if !waitDead() {
+			t.Fatal("fake daemon survived the kill fallback")
+		}
+	})
+
+	t.Run("listener accepts but never answers", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("FLUFFLE_HOME", home)
+		pid, waitDead := startFakeDaemon(t)
+
+		release := make(chan struct{})
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			select {
+			case <-release:
+			case <-time.After(30 * time.Second):
+			}
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer func() {
+			close(release)
+			server.Close()
+		}()
+		writeDaemonRuntimeFile(t, home, serverPort(t, server), pid)
+
+		done := make(chan int, 1)
+		go func() { done <- daemonStop() }()
+		var code int
+		select {
+		case code = <-done:
+		case <-time.After(30 * time.Second):
+			t.Fatal("daemonStop hung on a non-responsive graceful endpoint")
+		}
+		if code != 0 {
+			t.Fatalf("exit = %d, want 0", code)
+		}
+		if !waitDead() {
+			t.Fatal("fake daemon survived the kill fallback")
+		}
+	})
+}
+
+func TestDaemonStopReportsDaemonDownForUnusableRuntimeFile(t *testing.T) {
+	t.Run("missing daemon.json", func(t *testing.T) {
+		t.Setenv("FLUFFLE_HOME", t.TempDir())
+		code, stderr := captureStderr(t, daemonStop)
+		if code != 2 {
+			t.Fatalf("exit = %d, want 2", code)
+		}
+		assertCLIErrorEnvelope(t, stderr, "DAEMON_DOWN")
+	})
+
+	t.Run("malformed daemon.json", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("FLUFFLE_HOME", home)
+		if err := os.WriteFile(filepath.Join(home, "daemon.json"), []byte("not json"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		code, stderr := captureStderr(t, daemonStop)
+		if code != 2 {
+			t.Fatalf("exit = %d, want 2", code)
+		}
+		assertCLIErrorEnvelope(t, stderr, "DAEMON_DOWN")
+	})
+
+	t.Run("daemon.json without a usable pid", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("FLUFFLE_HOME", home)
+		writeDaemonRuntimeFile(t, home, 65000, 0)
+		code, stderr := captureStderr(t, daemonStop)
+		if code != 2 {
+			t.Fatalf("exit = %d, want 2: pid 0 would signal the caller's own process group", code)
+		}
+		assertCLIErrorEnvelope(t, stderr, "DAEMON_DOWN")
+	})
+
+	t.Run("stale daemon.json whose process is already gone", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("FLUFFLE_HOME", home)
+		pid, waitDead := startFakeDaemon(t)
+		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+			t.Fatal(err)
+		}
+		if !waitDead() {
+			t.Fatal("could not stage a dead pid")
+		}
+		dead, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		closedPort := dead.Addr().(*net.TCPAddr).Port
+		if err := dead.Close(); err != nil {
+			t.Fatal(err)
+		}
+		writeDaemonRuntimeFile(t, home, closedPort, pid)
+
+		code, stdout, stderr := captureOutput(t, daemonStop)
+		if code != 2 {
+			t.Fatalf("exit = %d, want 2", code)
+		}
+		if stdout != "" {
+			t.Fatalf("stdout = %q, want nothing on a failed stop", stdout)
+		}
+		// assertCLIErrorEnvelope decodes the whole stream, so it also proves
+		// stderr carries exactly one JSON document and no bare notice above it.
+		message := assertCLIErrorEnvelope(t, stderr, "DAEMON_DOWN")
+		if !strings.Contains(message, "did not shut down gracefully") {
+			t.Fatalf("message = %q, want the forced-kill reason inside the envelope", message)
+		}
+		if !strings.Contains(message, "kill failed") {
+			t.Fatalf("message = %q, want the kill failure folded into the envelope", message)
+		}
+	})
+}
+
+// TestDaemonStopWaitsForTheProcessBeforeForcingAKill covers the wait itself. The
+// other stop tests either reap the child inside the handler, so the wait
+// succeeds on its first probe, or never reach it because the graceful POST
+// failed. Only a daemon that answers 200 and then refuses to die exercises the
+// loop, and only a non-200 response distinguishes a real graceful stop from a
+// rejected one.
+func TestDaemonStopWaitsForTheProcessBeforeForcingAKill(t *testing.T) {
+	t.Run("graceful 200 but the process never exits", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("FLUFFLE_HOME", home)
+		pid, waitDead := startFakeDaemon(t)
+
+		var mu sync.Mutex
+		requests := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			mu.Lock()
+			requests++
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer server.Close()
+		writeDaemonRuntimeFile(t, home, serverPort(t, server), pid)
+
+		const exitWait = 400 * time.Millisecond
+		start := time.Now()
+		code, stdout, stderr := captureOutput(t, func() int {
+			return daemonStopWithin(exitWait)
+		})
+		elapsed := time.Since(start)
+
+		if code != 0 {
+			t.Fatalf("exit = %d, want 0", code)
+		}
+		if !strings.Contains(stdout, "daemon stopped") {
+			t.Fatalf("stdout = %q, want the success message", stdout)
+		}
+		if !strings.Contains(stderr, "did not shut down gracefully") {
+			t.Fatalf("stderr = %q, want the forced-kill notice after the wait ran out", stderr)
+		}
+		if elapsed < exitWait/2 {
+			t.Fatalf("elapsed = %v, want at least %v: the stop must wait for the daemon to exit", elapsed, exitWait/2)
+		}
+		if elapsed > 10*time.Second {
+			t.Fatalf("elapsed = %v, want the wait to stay bounded", elapsed)
+		}
+		if !waitDead() {
+			t.Fatal("fake daemon survived the forced kill")
+		}
+		mu.Lock()
+		got := requests
+		mu.Unlock()
+		if got != 1 {
+			t.Fatalf("daemon requests = %d, want exactly one graceful POST", got)
+		}
+	})
+
+	t.Run("non-200 response is not treated as a graceful stop", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("FLUFFLE_HOME", home)
+		pid, waitDead := startFakeDaemon(t)
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"code":"AGENT_FORBIDDEN","message":"agents cannot stop the daemon"}`))
+		}))
+		defer server.Close()
+		writeDaemonRuntimeFile(t, home, serverPort(t, server), pid)
+
+		// A long exit wait: a rejected request must not be waited out, because
+		// only a 200 means the daemon actually started shutting down.
+		const exitWait = 8 * time.Second
+		start := time.Now()
+		code, stdout, stderr := captureOutput(t, func() int {
+			return daemonStopWithin(exitWait)
+		})
+		elapsed := time.Since(start)
+
+		if code != 0 {
+			t.Fatalf("exit = %d, want 0", code)
+		}
+		if !strings.Contains(stdout, "daemon stopped") {
+			t.Fatalf("stdout = %q, want the success message", stdout)
+		}
+		if !strings.Contains(stderr, "did not shut down gracefully") {
+			t.Fatalf("stderr = %q, want the forced-kill notice for a rejected request", stderr)
+		}
+		if elapsed >= exitWait/2 {
+			t.Fatalf("elapsed = %v, want no wait after a 403: the daemon never began shutting down", elapsed)
+		}
+		if !waitDead() {
+			t.Fatal("fake daemon survived the forced kill")
+		}
+	})
+}
+
+func TestAgentListEncodesRepoAndNeverDefaultsToCwd(t *testing.T) {
+	var requests []recordedCLIRequest
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		recordCLIRequest(&requests, &mu, r)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/health":
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		case "/v1/agents":
+			if r.URL.Query().Get("repo") == "" {
+				_, _ = w.Write([]byte(`{"agents":[{"name":"shared","description":"","command":"/bin/shared","reply":"cli","source":"/home/test/config.toml"}]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"agents":[{"name":"local","description":"repo agent","command":"/bin/local","reply":"auto","source":"/repo/.flf.toml"},{"name":"shared","description":"","command":"/bin/shared","reply":"cli","source":"/home/test/config.toml"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	useTestDaemon(t, server)
+
+	code, stdout, stderr := captureOutput(t, func() int {
+		return run([]string{"agent", "list", "--json"})
+	})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0: %s", code, stderr)
+	}
+	var payload struct {
+		Agents []struct {
+			Name string `json:"name"`
+		} `json:"agents"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("agent list JSON: %v\n%s", err, stdout)
+	}
+	if len(payload.Agents) != 1 || payload.Agents[0].Name != "shared" {
+		t.Fatalf("agents = %+v, want the global config only", payload.Agents)
+	}
+
+	workDir := t.TempDir()
+	t.Chdir(workDir)
+	if err := os.MkdirAll(filepath.Join(workDir, "repo with space"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	relative := filepath.Join("nested repo", "..", "repo with space")
+	abs, err := filepath.Abs(relative)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr = captureOutput(t, func() int {
+		return run([]string{"agent", "list", "--repo", relative, "--json"})
+	})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, `"name": "local"`) || !strings.Contains(stdout, `"name": "shared"`) {
+		t.Fatalf("stdout = %q, want the repo and global entries", stdout)
+	}
+
+	recorded := snapshotCLIRequests(&requests, &mu)
+	if len(recorded) != 4 {
+		t.Fatalf("requests = %d, want two health probes and two agent reads", len(recorded))
+	}
+	if got := recorded[1]; got.Method != http.MethodGet || got.Path != "/v1/agents" || got.RawQuery != "repo=" {
+		t.Fatalf("agent read without --repo = %s %s?%s, want an empty repo parameter", got.Method, got.Path, got.RawQuery)
+	}
+	if got := recorded[3]; got.Method != http.MethodGet || got.Path != "/v1/agents" || got.RawQuery != "repo="+url.QueryEscape(abs) {
+		t.Fatalf("agent read = %s %s?%s, want repo=%s", got.Method, got.Path, got.RawQuery, url.QueryEscape(abs))
+	}
+
+	code, stdout, stderr = captureOutput(t, func() int {
+		return run([]string{"agent", "list", "--repo", relative})
+	})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0: %s", code, stderr)
+	}
+	human := "local\t/bin/local\tauto\t/repo/.flf.toml\trepo agent\n" +
+		"shared\t/bin/shared\tcli\t/home/test/config.toml\t-\n"
+	if stdout != human {
+		t.Fatalf("stdout = %q, want %q", stdout, human)
+	}
+}
+
+func TestAgentListRejectsMissingRepoPath(t *testing.T) {
+	var requests []recordedCLIRequest
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		recordCLIRequest(&requests, &mu, r)
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/health" {
+			_, _ = w.Write([]byte(`{"ok":true}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	useTestDaemon(t, server)
+
+	code, stdout, stderr := captureOutput(t, func() int {
+		return run([]string{"agent", "list", "--repo", filepath.Join(t.TempDir(), "no-such-repo")})
+	})
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1: %s", code, stderr)
+	}
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want empty", stdout)
+	}
+	assertCLIErrorEnvelope(t, stderr, "NOT_A_GIT_REPO")
+	recorded := snapshotCLIRequests(&requests, &mu)
+	if len(recorded) != 0 {
+		t.Fatalf("requests = %+v, want the path rejected before any daemon contact", recorded)
+	}
+}
+
+func TestAgentListAcceptsReplyModeThisCLIDoesNotKnow(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/health" {
+			_, _ = w.Write([]byte(`{"ok":true}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"agents":[{"name":"local","description":"","command":"/bin/local","reply":"future-mode","source":"/repo/.flf.toml"}]}`))
+	}))
+	defer server.Close()
+	useTestDaemon(t, server)
+
+	code, stdout, stderr := captureOutput(t, func() int {
+		return run([]string{"agent", "list", "--json"})
+	})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0: a reply mode newer than this CLI is not a broken response: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, `"reply": "future-mode"`) {
+		t.Fatalf("stdout = %q, want the unknown reply mode passed through", stdout)
+	}
+}
+
+func TestAgentSessionRejectsUnverifiableResponse(t *testing.T) {
+	t.Run("session without an id is a daemon error", func(t *testing.T) {
+		var requests []recordedCLIRequest
+		var mu sync.Mutex
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			recordCLIRequest(&requests, &mu, r)
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/v1/health":
+				_, _ = w.Write([]byte(`{"ok":true}`))
+			case "/v1/sessions/1":
+				_, _ = w.Write([]byte(`{"session":{"ID":0,"ThreadID":2,"TriggerMessageID":3,"AgentName":"probe","Status":"succeeded","ReplyMode":"stdout","Command":"/bin/probe"},"events":[]}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+		useTestDaemon(t, server)
+
+		code, stdout, stderr := captureOutput(t, func() int {
+			return run([]string{"agent", "session", "--id", "1", "--json"})
+		})
+		if code != 2 {
+			t.Fatalf("exit = %d, want 2: %s", code, stderr)
+		}
+		if stdout != "" {
+			t.Fatalf("stdout = %q, want empty", stdout)
+		}
+		assertCLIErrorEnvelope(t, stderr, "DAEMON_ERROR")
+		recorded := snapshotCLIRequests(&requests, &mu)
+		if len(recorded) != 2 || recorded[1].Path != "/v1/sessions/1" {
+			t.Fatalf("requests = %+v, want a read of the requested session", recorded)
+		}
+	})
+
+	t.Run("event from another session is a daemon error", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/v1/health":
+				_, _ = w.Write([]byte(`{"ok":true}`))
+			case "/v1/sessions/1":
+				_, _ = w.Write([]byte(`{"session":{"ID":1,"ThreadID":2,"TriggerMessageID":3,"AgentName":"probe","Status":"running","ReplyMode":"stdout","Command":"/bin/probe"},"events":[{"ID":9,"SessionID":2,"Seq":1,"Type":"stdout","Content":"the answer","CreatedAt":""}]}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+		useTestDaemon(t, server)
+
+		code, stdout, stderr := captureOutput(t, func() int {
+			return run([]string{"agent", "session", "--id", "1", "--json"})
+		})
+		if code != 2 {
+			t.Fatalf("exit = %d, want 2: %s", code, stderr)
+		}
+		if stdout != "" {
+			t.Fatalf("stdout = %q, want empty", stdout)
+		}
+		assertCLIErrorEnvelope(t, stderr, "DAEMON_ERROR")
+	})
+}
+
+func TestAgentSessionHumanOutputRendersNullFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/health":
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		case "/v1/sessions/7":
+			_, _ = w.Write([]byte(`{"session":{"ID":7,"ThreadID":2,"TriggerMessageID":3,"AgentName":"probe","Status":"running","ReplyMode":"stdout","Command":"/bin/probe","Cwd":null,"ExitCode":null,"Error":null,"ReplyMessageID":null,"StartedAt":null,"FinishedAt":null,"CreatedAt":"2026-09-26T05:14:28.529Z"},"events":[{"ID":1,"SessionID":7,"Seq":1,"Type":"prompt","Content":"prompt text","CreatedAt":""},{"ID":2,"SessionID":7,"Seq":2,"Type":"stdout","Content":"partial answer","CreatedAt":""}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	useTestDaemon(t, server)
+
+	code, stdout, stderr := captureOutput(t, func() int {
+		return run([]string{"agent", "session", "--id", "7"})
+	})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0: %s", code, stderr)
+	}
+	want := "session 7  agent=probe  thread=2  trigger=3  status=running  reply=stdout\n" +
+		"command: /bin/probe\n" +
+		"cwd: none\n" +
+		"1\tprompt\tprompt text\n" +
+		"2\tstdout\tpartial answer\n"
+	if stdout != want {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
+	}
+}
+
+func TestAgentSessionRejectsNonPositiveIDBeforeAnyDaemonContact(t *testing.T) {
+	for _, id := range []string{"-1", "0", "abc"} {
+		t.Run(id, func(t *testing.T) {
+			var requests []recordedCLIRequest
+			var mu sync.Mutex
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				recordCLIRequest(&requests, &mu, r)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"ok":true}`))
+			}))
+			defer server.Close()
+			useTestDaemon(t, server)
+
+			code, stdout, stderr := captureOutput(t, func() int {
+				return run([]string{"agent", "session", "--id", id})
+			})
+			if code != 1 {
+				t.Fatalf("exit = %d, want 1: %s", code, stderr)
+			}
+			if stdout != "" {
+				t.Fatalf("stdout = %q, want empty", stdout)
+			}
+			assertCLIErrorEnvelope(t, stderr, "BAD_ARGS")
+			recorded := snapshotCLIRequests(&requests, &mu)
+			if len(recorded) != 0 {
+				t.Fatalf("requests = %+v, want the id rejected before the daemon is contacted", recorded)
+			}
+		})
+	}
 }
