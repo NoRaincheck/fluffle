@@ -58,7 +58,7 @@ Grouped table: one row per channel/thread, showing that group's most recent mess
 | `f` | Open filter (substring match on channel, then channel/thread) |
 | `l` / `L` | Toggle layout: compact ↔ full (switching to full turns the preview off) |
 | `p` | Toggle preview panel (turning it on also switches to compact) |
-| `s` | Switch the preview pane between the thread and the agent session started by the selected row's newest message |
+| `s` | Switch the preview pane between the thread and the agent session belonging to the selected row's thread |
 | `q` | Quit |
 | `Ctrl+C` | Quit |
 | `Esc` | No-op (reserved for future filter clear) |
@@ -114,7 +114,7 @@ Toggled by `p`. Shows a right-side panel with preview content for the cursor-hig
 - Full original post, word-wrapped with no truncation (via `wrapText`)
 - Replies fill remaining pane height; newest-tail truncation when space runs out
 - No truncation marker on root post — always fully visible
-- `s` replaces this content with the agent session started by the selected row's newest message — see [Session Preview](#session-preview-s)
+- `s` replaces this content with the agent session belonging to the selected row's thread — see [Session Preview](#session-preview-s)
 
 **Not shown in full layout.** The preview panel is suppressed while the full layout is active, the same way it is suppressed in the detail view — the rows already carry the original post and every reply, and a split pane leaves too little room for the content column.
 
@@ -134,13 +134,13 @@ In other words `preview == true` implies `layout == compact`, always.
 
 ## Session Preview (`s`)
 
-`s` switches the right-hand pane between the thread and the agent session started by the selected row's newest message. It is a pane mode, not a separate view, and it is only live in the inbox view.
+`s` switches the right-hand pane between the thread and the agent session belonging to the selected row's thread. It is a pane mode, not a separate view, and it is only live in the inbox view.
 
 | Condition | Behavior |
 |-----------|----------|
 | Preview pane not drawn (`p` off, < 80 cols, full layout, detail view) | `s` does nothing |
-| Selected row's newest message has no session | Pane unchanged; status bar reads `no session on this message` |
-| Selected row has a session (first press) | Pane switches to the session and fetches its events |
+| Selected row's thread has no session at all | Pane unchanged; status bar reads `no session on this message` |
+| Selected row's thread has a session (first press) | Pane switches to the session — the triggering run if the row is its trigger, otherwise the thread's newest — and fetches its events |
 | Already in session mode (second press) | Pane switches back to the thread and drops the loaded session |
 
 **Pane contents** (top to bottom):
@@ -201,6 +201,6 @@ Always visible at the bottom. Shows:
 - **Preview toggle**: `preview on — p to hide` (or `preview on — p to hide · layout:compact` when `p` also switched layout)
 - **Layout toggle**: `layout: full — l to switch` (or `layout: full — preview off · l to switch` when `l` also turned the preview off)
 - **Error**: `error: DAEMON_DOWN: ...` (unreachable daemon), `error: DAEMON_ERROR: ...` (undecodable response), or `error: DELIVERY_UNKNOWN: ...` (a write that may have committed)
-- **Session pane**: `no session on this message` when `s` is pressed on a row with no session
+- **Session lookup**: `no session on this message` when `s` is pressed on a row whose thread has no session at all
 - **Empty state**: `inbox — no messages · q quit`, or `inbox — 0/N messages (filtered)` followed by the sort/filter suffix and `q quit` when a filter hides every row
 - **Action feedback**: `sent`, `thread "name" created`

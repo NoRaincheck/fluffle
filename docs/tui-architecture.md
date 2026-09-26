@@ -1,6 +1,6 @@
 # TUI Architecture
 
-Bubble Tea v1.3.10 terminal UI for Fluffle. Flat inbox table with right-side preview panel (wide terminals), centered compose modal overlay. The preview pane has two modes — the thread, and the agent session started by the cursor row's representative message — switched with `s`.
+Bubble Tea v1.3.10 terminal UI for Fluffle. Flat inbox table with right-side preview panel (wide terminals), centered compose modal overlay. The preview pane has two modes — the thread, and the agent session belonging to the cursor row's thread — switched with `s`.
 
 ## Overview
 
@@ -36,7 +36,7 @@ Press `l` for the full layout, where each group expands to its original post plu
 │                                         > one more thing                       │
 ```
 
-Single flat **Global Inbox** table showing all channels/threads, one row per channel/thread group. `l` toggles between two layouts: **compact** (default — one line per group, most recent message) and **full** (original post plus every reply, inline). `p` toggles a right-side preview panel showing the word-wrapped original post + replies; `s` swaps that pane's content for the agent session started by the cursor row's representative message. Preview auto-enables at ≥100 cols, respects toggle at ≥80 cols, forced off below 80, and is suppressed in the detail view and in the full layout.
+Single flat **Global Inbox** table showing all channels/threads, one row per channel/thread group. `l` toggles between two layouts: **compact** (default — one line per group, most recent message) and **full** (original post plus every reply, inline). `p` toggles a right-side preview panel showing the word-wrapped original post + replies; `s` swaps that pane's content for the agent session belonging to the cursor row's thread. Preview auto-enables at ≥100 cols, respects toggle at ≥80 cols, forced off below 80, and is suppressed in the detail view and in the full layout.
 
 ## Package Structure
 
@@ -112,16 +112,25 @@ The character keys `handleKey` acts on are `q`, `k`/`↑`, `j`/`↓`, `r`, `v`, 
 | `width, height` | Current terminal dimensions (from `WindowSizeMsg`) |
 | `previewMode` | `previewThread` or `previewSession` — which content the right pane shows |
 | `sessions` | Sessions for `previewThreadID`, as returned by the last poll |
-| `sessionsByMsg` | `triggerMessageID → Session` index built from `sessions`; the pane's lookup key, which is the **trigger** message id |
+| `sessionsByMsg` | `triggerMessageID → Session` index built from `sessions`; step 1 of the pane's lookup, keyed on the **trigger** message id |
 | `session` | The session whose events are loaded (`nil` until `s` fetches them) |
 | `sessionEvents` | Events for `session`, in `seq` order |
 | `sessionPollThreadID` | Thread whose session list was last fetched, and the poll's arming target; `0` means released |
 | `sessionTickThread` | Thread a tick is in flight for, so arming stays idempotent |
 | `sessionTickGen` | Monotonic tick generation; a `sessionTickMsg` with a stale gen is dropped |
 
-`sessionForCursor()` resolves the pane's session by looking `sessionsByMsg` up with the **id of the message the cursor's inbox row represents**. A row is a channel/thread group whose representative is that group's newest message, and `inboxFilteredSorted()` groups *before* it filters, so a thread yields exactly one row whether or not a filter is active — a filter removes rows, it never splits a thread into per-message rows. `s` therefore resolves only while the `@mention` that started the run is still the group's most representative message.
+`sessionForCursor()` resolves the pane's session in **two steps**. A row is a channel/thread group whose representative is that group's newest message, and `inboxFilteredSorted()` groups *before* it filters, so a thread yields exactly one row whether or not a filter is active — a filter removes rows, it never splits a thread into per-message rows.
 
-That representative is a projection of the **cached** `m.inbox`, which is refetched only on `Init`, on filter apply, on return from a pushed view, and after a send — the session poll refetches sessions, never the inbox. So a run that finishes does **not** immediately change the row: a user sitting in the inbox normally still has a working `s`, because the cached representative is still the `@mention`. The row goes inert at the next inbox refetch, which is when the agent's reply — newer, and posted by the daemon rather than by the TUI — becomes the representative. From then on `s` reports `no session on this message` on that row. The pane does not blank in the meantime: it falls back to the loaded `m.session`. What is lost is the ability to re-open a session on a row that no longer resolves to one, not the ability to keep reading the one already on screen.
+1. **Trigger-keyed first.** If the row's id is some session's `TriggerMessageID`, that session wins — the exact run the row's representative started.
+2. **Thread-scoped fallback, on a miss only.** The newest session whose `ThreadID` equals `row.ThreadID`, highest session id first, so a later run beats an earlier one.
+
+Only when neither step finds anything does the lookup report no session, and `handleSessionKey` turns that into the status-bar line `no session on this message`.
+
+The `ThreadID` guard in step 2 is load-bearing. `m.sessions` does happen to be scoped to the preview thread today, but the fallback does not rely on that: it filters on `row.ThreadID` itself, so a row in a thread with no sessions of its own reports `no session on this message` rather than opening a neighbouring thread's run.
+
+**Timing.** The row's representative is a projection of the **cached** `m.inbox`, refetched only on `Init`, on filter apply, on return from a pushed view, and after a send — the session poll refetches sessions, never the inbox. Drift between the representative and the trigger therefore becomes *visible* at one of those refetches, not the moment a message lands, and step 2 means any thread that has at least one session keeps resolving across all of them.
+
+**Trade-off.** `s` on a row whose thread's only session is an old one now opens that old session instead of reporting nothing. For a thread-level pane that is the right default, and the header names agent, status and session id, so the user can tell what they are looking at.
 
 ### Data Fetching
 
@@ -253,7 +262,7 @@ The thread branch:
 
 ### `renderSessionPreview(w, h)` (`session.go`)
 
-Renders the agent session started by the message the cursor's inbox row represents. It re-resolves the session from `sessionForCursor()` on every render, so moving the cursor updates the pane without another fetch, and it falls back to the loaded `m.session` when the polled list has no entry for the row — which is how a session stays on screen after the cursor has moved to a row that has none.
+Renders the agent session belonging to the cursor's inbox row's thread. It re-resolves the session from `sessionForCursor()` on every render, so moving the cursor updates the pane without another fetch, and it falls back to the loaded `m.session` when the lookup finds nothing for the row — which is how a session stays on screen after the cursor has moved to a row that has none.
 
 - Header: `SESSION  <agent> · <status> · <reply mode> · #<id>`, plus elapsed duration once terminal, `replied #<seq>` when the daemon posted the reply, and the failure reason when there is one. Stripped of ANSI and newlines, then truncated to the pane width.
 - Events: one line per event, `<type>` in a fixed 8-column field, then the **first line** of the event content with tabs expanded, truncated to the pane width. `loaded` is `m.session != nil && m.session.ID == s.ID`; when it is false the events are suppressed entirely, so the pane will not display one session's events under another's header.
