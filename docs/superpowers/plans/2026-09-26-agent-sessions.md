@@ -3661,7 +3661,7 @@ func TestLeadingMentionTriggersSession(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("calls = %v", calls)
 	}
-	if want := fmt.Sprintf("%d:2:reviewer", thID); calls[0] != want {
+	if want := fmt.Sprintf("%d:1:reviewer", thID); calls[0] != want {
 		t.Fatalf("call = %q, want %q", calls[0], want)
 	}
 }
@@ -3679,7 +3679,7 @@ func TestMultipleLeadingMentionsAreAllPassed(t *testing.T) {
 	_, h, starter, _, thID := newSessionHandler(t, cfg)
 	postThread(t, h, thID, "messages", `{"name":"alice","role":"user","content":"@a1 @b2 go"}`, "")
 	calls := starter.snapshot()
-	if len(calls) != 1 || calls[0] != fmt.Sprintf("%d:2:a1,b2", thID) {
+	if len(calls) != 1 || calls[0] != fmt.Sprintf("%d:1:a1,b2", thID) {
 		t.Fatalf("calls = %v", calls)
 	}
 }
@@ -3708,8 +3708,8 @@ func TestBatchEventsTriggerOncePerMentioningMessage(t *testing.T) {
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("batch status = %d body %s", rec2.Code, rec2.Body.String())
 	}
-	if len(starter.snapshot()) != 2 {
-		t.Fatalf("calls = %v, want 2", starter.snapshot())
+	if len(starter.snapshot()) != 3 {
+		t.Fatalf("calls = %v, want 3 (one for the first batch, two for the second)", starter.snapshot())
 	}
 }
 
