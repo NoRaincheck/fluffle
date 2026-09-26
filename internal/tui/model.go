@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -36,6 +37,39 @@ const (
 	inboxSortChannelThreadDesc
 )
 
+type inboxLayout int
+
+const (
+	inboxLayoutCompact inboxLayout = iota
+	inboxLayoutFull
+)
+
+const (
+	inboxPrefixW = 2
+	inboxTimeW   = 12
+	inboxChanW   = 12
+	inboxThreadW = 16
+	inboxNameW   = 12
+	inboxColGap  = 2
+	inboxChromeH = 3
+)
+
+const (
+	inboxPrefixSpacer   = "  "
+	inboxReplyPrefix    = "> "
+	inboxLoadingReplies = "(loading replies…)"
+)
+
+func inboxLayoutName(l inboxLayout) string {
+	switch l {
+	case inboxLayoutFull:
+		return "full"
+	case inboxLayoutCompact:
+		return "compact"
+	}
+	return "compact"
+}
+
 type model struct {
 	width, height     int
 	quitting          bool
@@ -53,6 +87,8 @@ type model struct {
 	compose           composeModel
 	filter            filterModel
 	inboxSort         inboxSort
+	inboxLayout       inboxLayout
+	fullThreads       map[int64][]store.Message
 	inboxFilterChan   string
 	inboxFilterThread string
 	preview           bool
@@ -83,6 +119,11 @@ func (m model) Init() tea.Cmd { return m.fetchInbox() }
 type inboxFetchedMsg struct {
 	inbox []store.InboxMessage
 	err   error
+}
+
+type fullRowsFetchedMsg struct {
+	rows map[int64][]store.Message
+	err  error
 }
 
 func (m *model) fetchInbox() tea.Cmd {
@@ -127,6 +168,34 @@ func (m *model) fetchPreviewMessages(threadID int64) tea.Cmd {
 	}
 }
 
+func (m *model) fetchFullRows(threadIDs []int64) tea.Cmd {
+	ids := append([]int64(nil), threadIDs...)
+	return func() tea.Msg {
+		var mu sync.Mutex
+		var wg sync.WaitGroup
+		rows := make(map[int64][]store.Message, len(ids))
+		var firstErr error
+		for _, id := range ids {
+			wg.Add(1)
+			go func(threadID int64) {
+				defer wg.Done()
+				msgs, err := m.api.ListMessages(nil, threadID)
+				mu.Lock()
+				defer mu.Unlock()
+				if err != nil {
+					if firstErr == nil {
+						firstErr = err
+					}
+					return
+				}
+				rows[threadID] = msgs
+			}(id)
+		}
+		wg.Wait()
+		return fullRowsFetchedMsg{rows: rows, err: firstErr}
+	}
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case inboxFetchedMsg:
@@ -135,33 +204,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.inbox = msg.inbox
+		m.fullThreads = nil
 		m.cursor = 0
 		m.scroll = 0
 		m.view = viewInbox
-		filtered := m.inboxFilteredSorted()
-		if len(msg.inbox) == 0 {
-			m.status = "inbox — no messages · q quit"
-		} else if len(filtered) == 0 {
-			m.status = fmt.Sprintf("inbox — 0/%d messages (filtered)%s · q quit", totalGroups(msg.inbox), m.inboxStatusSuffix())
-		} else {
-			m.status = fmt.Sprintf("inbox — %d messages · ↑↓/j/k nav · r reply · v sort · f filter%s · q quit", len(filtered), m.inboxStatusSuffix())
-		}
-		return m, m.maybeFetchPreview()
+		m.refreshInboxStatus()
+		return m, m.syncVisibleData()
 	case filterAppliedMsg:
 		ch, th := parseInboxFilter(msg.text)
 		m.inboxFilterChan = ch
 		m.inboxFilterThread = th
 		m.cursor = 0
 		m.scroll = 0
-		filtered := m.inboxFilteredSorted()
-		if len(m.inbox) == 0 {
-			m.status = "inbox — no messages · q quit"
-		} else if len(filtered) == 0 {
-			m.status = fmt.Sprintf("inbox — 0/%d messages (filtered)%s · q quit", m.inboxTotalGroups(), m.inboxStatusSuffix())
-		} else {
-			m.status = fmt.Sprintf("inbox — %d messages · ↑↓/j/k nav · r reply · v sort · f filter%s · q quit", len(filtered), m.inboxStatusSuffix())
-		}
-		return m, m.maybeFetchPreview()
+		m.refreshInboxStatus()
+		return m, m.syncVisibleData()
 	case channelsFetchedMsg:
 		if msg.err != nil {
 			m.status = fmt.Sprintf("error: %v", msg.err)
@@ -176,7 +232,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = fmt.Sprintf("%d channels — ↑↓ nav · Enter open · q quit", len(msg.channels))
 		}
 		if m.preview && len(msg.channels) > 0 {
-			return m, m.maybeFetchPreview()
+			return m, m.syncVisibleData()
 		}
 		return m, nil
 
@@ -275,6 +331,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.previewThreadID = msg.threadID
 		return m, nil
 
+	case fullRowsFetchedMsg:
+		if msg.err != nil && len(msg.rows) == 0 {
+			return m, nil
+		}
+		if m.fullThreads == nil {
+			m.fullThreads = make(map[int64][]store.Message, len(msg.rows))
+		}
+		for id, msgs := range msg.rows {
+			m.fullThreads[id] = sortedMessagesAsc(msgs)
+		}
+		return m, nil
+
 	case composeSendMsg:
 		return m.handleComposeSend(msg)
 
@@ -285,14 +353,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.compose.height = 4
 		m.filter.width = max(30, msg.Width*80/100)
 		m.filter.height = 4
-		if msg.Width >= 100 && !m.preview {
+		if msg.Width >= 100 && !m.preview && m.inboxLayout != inboxLayoutFull {
 			m.preview = true
-			return m, m.maybeFetchPreview()
+			return m, m.syncVisibleData()
 		}
-		if m.preview {
-			return m, m.maybeFetchPreview()
-		}
-		return m, nil
+		return m, m.syncVisibleData()
 
 	case tea.KeyMsg:
 		if m.filter.IsActive() {
@@ -344,7 +409,7 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cursor--
 		}
 		m.clampCursor()
-		return m, m.maybeFetchPreview()
+		return m, m.syncVisibleData()
 	case tea.KeyDown:
 		if m.view == viewInboxDetail {
 			sorted := sortedMessagesAsc(m.messages)
@@ -374,7 +439,7 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cursor++
 		}
 		m.clampCursor()
-		return m, m.maybeFetchPreview()
+		return m, m.syncVisibleData()
 	case tea.KeyEnter:
 		switch m.view {
 		case viewInbox:
@@ -440,7 +505,7 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else {
 				m.status = fmt.Sprintf("inbox — %d messages · ↑↓/j/k nav · r reply · v sort · f filter%s · q quit", len(filtered), m.inboxStatusSuffix())
 			}
-			return m, m.maybeFetchPreview()
+			return m, m.syncVisibleData()
 		case viewInbox:
 			return m, nil
 		case viewMessages:
@@ -462,7 +527,7 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				} else {
 					m.status = fmt.Sprintf("inbox — %d messages · ↑↓/j/k nav · r reply · v sort · f filter%s · q quit", len(filtered), m.inboxStatusSuffix())
 				}
-				return m, tea.Batch(m.fetchInbox(), m.maybeFetchPreview())
+				return m, tea.Batch(m.fetchInbox(), m.syncVisibleData())
 			}
 			m.view = viewThreads
 			m.cursor = 0
@@ -487,7 +552,7 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				} else {
 					m.status = fmt.Sprintf("inbox — %d messages · ↑↓/j/k nav · r reply · v sort · f filter%s · q quit", len(filtered), m.inboxStatusSuffix())
 				}
-				return m, tea.Batch(m.fetchInbox(), m.maybeFetchPreview())
+				return m, tea.Batch(m.fetchInbox(), m.syncVisibleData())
 			}
 			m.view = viewChannels
 			m.cursor = 0
@@ -517,7 +582,7 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cursor--
 		}
 		m.clampCursor()
-		return m, m.maybeFetchPreview()
+		return m, m.syncVisibleData()
 	case "j", "down":
 		if m.view == viewInboxDetail {
 			sorted := sortedMessagesAsc(m.messages)
@@ -547,7 +612,7 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cursor++
 		}
 		m.clampCursor()
-		return m, m.maybeFetchPreview()
+		return m, m.syncVisibleData()
 	case "r":
 		return m.handleThreadReply()
 	case "v":
@@ -567,7 +632,7 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else {
 				m.status = fmt.Sprintf("inbox — %d messages · ↑↓/j/k nav · r reply · v sort · f filter%s · q quit", len(filtered), m.inboxStatusSuffix())
 			}
-			return m, m.maybeFetchPreview()
+			return m, m.syncVisibleData()
 		}
 		return m, nil
 	case "f":
@@ -583,28 +648,45 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, nil
-	case "L":
+	case "l", "L":
+		if m.view != viewInbox {
+			return m, nil
+		}
+		if m.inboxLayout == inboxLayoutFull {
+			m.inboxLayout = inboxLayoutCompact
+			m.status = "layout: compact — l to switch"
+		} else {
+			m.inboxLayout = inboxLayoutFull
+			if m.preview {
+				m.preview = false
+				m.status = "layout: full — preview off · l to switch"
+			} else {
+				m.status = "layout: full — l to switch"
+			}
+		}
+		m.cursor = 0
+		m.scroll = 0
+		m.clampCursor()
+		return m, m.syncVisibleData()
+	case "p":
 		m.preview = !m.preview
 		if m.preview {
-			m.status = "preview on — L to hide"
-			return m, m.maybeFetchPreview()
+			if m.inboxLayout != inboxLayoutCompact {
+				m.inboxLayout = inboxLayoutCompact
+				m.status = "preview on — p to hide · layout:compact"
+			} else {
+				m.status = "preview on — p to hide"
+			}
+			return m, m.syncVisibleData()
 		}
-		m.status = "preview off — L to show"
-		return m, nil
-	case "l":
-		m.preview = !m.preview
-		if m.preview {
-			m.status = "preview on — L to hide"
-			return m, m.maybeFetchPreview()
-		}
-		m.status = "preview off — L to show"
+		m.status = "preview off — p to show"
 		return m, nil
 	case "g":
 		if m.view == viewInbox {
 			m.cursor = 0
 			m.scroll = 0
 			m.clampCursor()
-			return m, m.maybeFetchPreview()
+			return m, m.syncVisibleData()
 		}
 		if m.view == viewInboxDetail {
 			m.detailCursor = 0
@@ -622,7 +704,7 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.cursor = 0
 			}
 			m.clampCursor()
-			return m, m.maybeFetchPreview()
+			return m, m.syncVisibleData()
 		}
 		if m.view == viewInboxDetail {
 			sorted := sortedMessagesAsc(m.messages)
@@ -750,8 +832,193 @@ func (m *model) handleThreadReply() (tea.Model, tea.Cmd) {
 	}
 }
 
+func (m *model) syncVisibleData() tea.Cmd {
+	return tea.Batch(m.maybeFetchPreview(), m.maybeFetchFullRows())
+}
+
+func (m *model) maybeFetchFullRows() tea.Cmd {
+	if m.inboxLayout != inboxLayoutFull || m.view != viewInbox {
+		return nil
+	}
+	blocks := m.inboxFullBlocks()
+	starts, ends := inboxFullBlockRanges(blocks)
+	visible := m.inboxPanelHeight() - inboxChromeH
+	if visible < 1 {
+		visible = 1
+	}
+	var ids []int64
+	seen := make(map[int64]bool)
+	for i, b := range blocks {
+		if ends[i] <= m.scroll || starts[i] >= m.scroll+visible {
+			continue
+		}
+		if seen[b.im.ThreadID] {
+			continue
+		}
+		if _, cached := m.fullThreads[b.im.ThreadID]; cached {
+			continue
+		}
+		seen[b.im.ThreadID] = true
+		ids = append(ids, b.im.ThreadID)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	return m.fetchFullRows(ids)
+}
+
+type inboxFullBlock struct {
+	im      store.InboxMessage
+	head    store.Message
+	replies []store.Message
+	loading bool
+}
+
+func (m model) inboxFullBlocks() []inboxFullBlock {
+	filtered := m.inboxFilteredSorted()
+	out := make([]inboxFullBlock, 0, len(filtered))
+	for _, im := range filtered {
+		b := inboxFullBlock{im: im}
+		msgs, loaded := m.fullThreads[im.ThreadID]
+		if !loaded || len(msgs) == 0 {
+			b.head = im.Message
+			b.loading = true
+			out = append(out, b)
+			continue
+		}
+		op, replies := threadSplit(sortedMessagesAsc(msgs))
+		b.head = *op
+		b.replies = replies
+		out = append(out, b)
+	}
+	return out
+}
+
+func inboxFullBlockRanges(blocks []inboxFullBlock) ([]int, []int) {
+	starts := make([]int, len(blocks))
+	ends := make([]int, len(blocks))
+	line := 0
+	for i, b := range blocks {
+		starts[i] = line
+		line++
+		line += len(b.replies)
+		if b.loading {
+			line++
+		}
+		ends[i] = line
+	}
+	return starts, ends
+}
+
+func inboxContentCol(idW int) int {
+	return inboxPrefixW + idW + 1 + inboxTimeW + inboxColGap + inboxChanW + inboxColGap + inboxThreadW + inboxColGap + inboxNameW + inboxColGap
+}
+
+func inboxRowLine(prefix string, id int64, idW int, im store.InboxMessage, createdAt, name, authorType, content, more string) string {
+	tStr := fmt.Sprintf("%*s", inboxTimeW, formatTime(createdAt))
+	chanS := truncate(im.ChannelName, inboxChanW)
+	thrS := truncate(im.ThreadTitle, inboxThreadW)
+	nameCell := truncate(name, inboxNameW)
+	contentRendered := content
+	if more != "" {
+		contentRendered = content + inboxMoreStyle.Render(more)
+	}
+	line := fmt.Sprintf("%s%0*d %s  %-*s  %-*s  %-*s  %s",
+		prefix, idW, id, tStr,
+		inboxChanW, chanS, inboxThreadW, thrS, inboxNameW, nameCell, contentRendered)
+	if nameCell != "" {
+		colored := getNameStyle(authorType).Render(nameCell)
+		line = strings.Replace(line, nameCell, colored, 1)
+	}
+	return line
+}
+
+func (m model) inboxPanelHeight() int {
+	h := m.height - 6
+	if h < 5 {
+		h = 5
+	}
+	return h
+}
+
+func (m model) inboxVisibleRows() int {
+	visible := m.inboxPanelHeight() - inboxChromeH
+	if visible < 1 {
+		visible = 1
+	}
+	return visible
+}
+
+// previewVisible reports whether the right-side preview pane is actually drawn.
+// It is suppressed in the detail view (the thread fills the terminal) and in the
+// full inbox layout (the rows already carry every reply, and the split pane is too
+// narrow to hold the content column).
+func (m model) previewVisible() bool {
+	if !m.preview || m.width < 80 || m.view == viewInboxDetail {
+		return false
+	}
+	return m.view != viewInbox || m.inboxLayout != inboxLayoutFull
+}
+
+func splitPaneWidths(totalW int) (int, int) {
+	leftW := totalW / 2
+	rightW := totalW - leftW
+	if leftW < 20 {
+		leftW = 20
+		rightW = totalW - leftW
+	}
+	if rightW < 20 {
+		rightW = 20
+		leftW = totalW - rightW
+	}
+	return leftW, rightW
+}
+
+func (m model) inboxListWidth() int {
+	if m.previewVisible() {
+		leftW, _ := splitPaneWidths(m.width - 2)
+		return leftW
+	}
+	contentW := m.width - 2
+	if contentW < 20 {
+		contentW = 20
+	}
+	return contentW
+}
+
+func (m model) inboxTitle() string {
+	filtered := m.inboxFilteredSorted()
+	totalGroups := m.inboxTotalGroups()
+	title := fmt.Sprintf("Inbox — %d messages", len(filtered))
+	if totalGroups > 0 && len(filtered) != totalGroups {
+		title = fmt.Sprintf("Inbox — %d/%d messages", len(filtered), totalGroups)
+	}
+	if m.inboxFilterChan != "" {
+		f := m.inboxFilterChan
+		if m.inboxFilterThread != "" {
+			f += "/" + m.inboxFilterThread
+		}
+		title += fmt.Sprintf(" · filter:%s", f)
+	}
+	title += fmt.Sprintf(" · sort:%s · layout:%s", inboxSortName(m.inboxSort), inboxLayoutName(m.inboxLayout))
+	return title
+}
+
+func (m *model) refreshInboxStatus() {
+	filtered := m.inboxFilteredSorted()
+	if len(m.inbox) == 0 {
+		m.status = "inbox — no messages · q quit"
+		return
+	}
+	if len(filtered) == 0 {
+		m.status = fmt.Sprintf("inbox — 0/%d messages (filtered)%s · q quit", m.inboxTotalGroups(), m.inboxStatusSuffix())
+		return
+	}
+	m.status = fmt.Sprintf("inbox — %d messages · ↑↓/j/k nav · r reply · v sort · f filter%s · q quit", len(filtered), m.inboxStatusSuffix())
+}
+
 func (m *model) maybeFetchPreview() tea.Cmd {
-	if !m.preview || m.width < 80 {
+	if !m.previewVisible() {
 		return nil
 	}
 	switch m.view {
@@ -857,18 +1124,9 @@ func (m model) baseView() string {
 		return full
 	}
 	var content string
-	if m.preview && m.width >= 80 && m.view != viewInboxDetail {
+	if m.previewVisible() {
 		contentW := m.width - 2
-		leftW := contentW / 2
-		rightW := contentW - leftW
-		if leftW < 20 {
-			leftW = 20
-			rightW = contentW - leftW
-		}
-		if rightW < 20 {
-			rightW = 20
-			leftW = contentW - rightW
-		}
+		leftW, rightW := splitPaneWidths(contentW)
 		contentH := m.height - 6
 		left := m.renderListWithWidth(leftW, contentH)
 		right := m.renderPreview(rightW, contentH)
@@ -1390,7 +1648,7 @@ func (m model) renderList() string {
 }
 
 func (m model) listHeight() int {
-	if m.preview && m.width >= 80 {
+	if m.previewVisible() {
 		h := m.height - 6
 		if h < 5 {
 			h = 5
@@ -1563,46 +1821,19 @@ func (m model) renderListWithWidth(w, h int) string {
 }
 
 func (m model) renderInboxWithWidth(w, h int) string {
+	if m.inboxLayout == inboxLayoutFull {
+		return m.renderInboxFullWithWidth(w, h)
+	}
 	if h < 5 {
 		h = 5
 	}
 	filtered := m.inboxFilteredSorted()
-	groupedAll, counts := groupInboxByChannelThread(m.inbox)
-	totalGroups := len(groupedAll)
-	title := fmt.Sprintf("Inbox — %d messages", len(filtered))
-	if totalGroups > 0 && len(filtered) != totalGroups {
-		title = fmt.Sprintf("Inbox — %d/%d messages", len(filtered), totalGroups)
-	}
-	if m.inboxFilterChan != "" {
-		f := m.inboxFilterChan
-		if m.inboxFilterThread != "" {
-			f += "/" + m.inboxFilterThread
-		}
-		title += fmt.Sprintf(" · filter:%s", f)
-	}
-	title += fmt.Sprintf(" · sort:%s", inboxSortName(m.inboxSort))
+	_, counts := groupInboxByChannelThread(m.inbox)
+	title := m.inboxTitle()
 	if len(filtered) == 0 {
-		boxW := max(20, w)
-		headerStyleNoMargin := chatHeaderStyle.MarginBottom(0)
-		sep := headerStyleNoMargin.Render(strings.Repeat("─", max(0, boxW-2)))
-		empty := "  (no messages)"
-		if len(m.inbox) > 0 {
-			empty = "  (no messages — filtered, press f to clear)"
-		}
-		lines := []string{headerStyleNoMargin.Render(title), sep, empty}
-		for len(lines) < h {
-			lines = append(lines, "")
-		}
-		if len(lines) > h {
-			lines = lines[:h]
-		}
-		return lipgloss.NewStyle().Width(max(20, w)).Render(strings.Join(lines, "\n"))
+		return renderInboxEmpty(w, h, title, len(m.inbox) > 0)
 	}
-	timeW := 11
-	chanW := 12
-	threadW := 16
-	nameW := 12
-	visibleCap := h - 3
+	visibleCap := h - inboxChromeH
 	if visibleCap < 1 {
 		visibleCap = 1
 	}
@@ -1630,12 +1861,9 @@ func (m model) renderInboxWithWidth(w, h int) string {
 	if idW < 1 {
 		idW = 1
 	}
-	contentW := max(minContentWidth, w-idW-timeW-chanW-threadW-nameW-14)
-	headerRowRaw := fmt.Sprintf("  %0*d %*s  %-12s  %-16s  %-12s  %s", idW, maxID, timeW, "TIME", "CHANNEL", "THREAD", "NAME", "CONTENT")
-	headerRowRaw = truncate(headerRowRaw, w)
-	headerRow := lipgloss.NewStyle().Foreground(chatHeaderFg).Bold(true).Render(headerRowRaw)
-	boxW := max(20, w)
-	sep2 := lipgloss.NewStyle().Foreground(chatHeaderFg).Render(strings.Repeat("─", max(0, boxW-2)))
+	contentW := max(minContentWidth, w-inboxContentCol(idW))
+	headerRow := renderInboxHeaderRow(idW, maxID, w)
+	sep := renderInboxSep(w)
 	var rows []string
 	for i, im := range visibleInbox {
 		globalIdx := start + i
@@ -1643,10 +1871,6 @@ func (m model) renderInboxWithWidth(w, h int) string {
 		if globalIdx == m.cursor {
 			prefix = "> "
 		}
-		tStr := fmt.Sprintf("%*s", timeW, formatTime(im.CreatedAt))
-		chanS := truncate(im.ChannelName, chanW)
-		thrS := truncate(im.ThreadTitle, threadW)
-		name := truncate(im.Name, nameW)
 		base := strings.ReplaceAll(im.Content, "\n", " ")
 		more := ""
 		if cnt := counts[inboxKey(im)]; cnt > 1 {
@@ -1664,43 +1888,242 @@ func (m model) renderInboxWithWidth(w, h int) string {
 		if more == "" {
 			baseTrunc = truncate(base, contentW)
 		}
-		var contentRendered string
-		if more != "" {
-			contentRendered = baseTrunc + inboxMoreStyle.Render(more)
-		} else {
-			contentRendered = baseTrunc
-		}
 		contentPlainLen := len(baseTrunc) + moreW
 		if contentPlainLen > contentW {
 			contentPlainLen = contentW
 		}
-		lineRendered := fmt.Sprintf("%s%0*d %s  %-12s  %-16s  %-12s  %s", prefix, idW, im.ID, tStr, chanS, thrS, name, contentRendered)
-		plainLen := 2 + idW + 1 + timeW + 2 + chanW + 2 + threadW + 2 + nameW + 2 + contentPlainLen
+		lineRendered := inboxRowLine(prefix, im.ID, idW, im, im.CreatedAt, im.Name, im.AuthorType, baseTrunc, more)
+		plainLen := inboxContentCol(idW) + contentPlainLen
 		if plainLen > w {
 			excess := plainLen - w
 			if excess < len(baseTrunc) {
 				baseTrunc = truncate(baseTrunc, max(0, len(baseTrunc)-excess))
-				if more != "" {
-					contentRendered = baseTrunc + inboxMoreStyle.Render(more)
-				} else {
-					contentRendered = baseTrunc
-				}
-				lineRendered = fmt.Sprintf("%s%0*d %s  %-12s  %-16s  %-12s  %s", prefix, idW, im.ID, tStr, chanS, thrS, name, contentRendered)
+				lineRendered = inboxRowLine(prefix, im.ID, idW, im, im.CreatedAt, im.Name, im.AuthorType, baseTrunc, more)
 			} else {
 				lineRendered = truncate(lineRendered, w)
 			}
 		}
-		var line string
-		coloredName := getNameStyle(im.AuthorType).Render(name)
-		lineRendered = strings.Replace(lineRendered, name, coloredName, 1)
 		if globalIdx == m.cursor {
-			line = chatMsgSelectedStyle.Width(w).Render(lineRendered)
+			rows = append(rows, chatMsgSelectedStyle.Width(w).Render(lineRendered))
 		} else {
-			line = chatMsgStyle.Render(lineRendered)
+			rows = append(rows, chatMsgStyle.Render(lineRendered))
 		}
-		rows = append(rows, line)
 	}
-	lines := []string{chatHeaderStyle.MarginBottom(0).Render(title), headerRow, sep2}
+	return renderInboxRows(w, h, title, headerRow, sep, rows)
+}
+
+type inboxFullGeom struct {
+	idW        int
+	timeW      int
+	chanW      int
+	threadW    int
+	nameW      int
+	showTime   bool
+	showChan   bool
+	showThread bool
+	showName   bool
+	contentW   int
+}
+
+func inboxFullGeometry(w, idW int) inboxFullGeom {
+	g := inboxFullGeom{
+		idW:        idW,
+		timeW:      inboxTimeW,
+		chanW:      inboxChanW,
+		threadW:    inboxThreadW,
+		nameW:      inboxNameW,
+		showTime:   true,
+		showChan:   true,
+		showThread: true,
+		showName:   true,
+	}
+	for g.contentW = w - g.contentCol(); g.contentW < minContentWidth; g.contentW = w - g.contentCol() {
+		if !g.dropColumn() {
+			break
+		}
+	}
+	if g.contentW < 1 {
+		g.contentW = 1
+	}
+	return g
+}
+
+func (g *inboxFullGeom) dropColumn() bool {
+	switch {
+	case g.showName:
+		g.showName = false
+		g.nameW = 0
+	case g.showChan:
+		g.showChan = false
+		g.chanW = 0
+	case g.showThread:
+		g.showThread = false
+		g.threadW = 0
+	case g.showTime:
+		g.showTime = false
+		g.timeW = 0
+	default:
+		return false
+	}
+	return true
+}
+
+func (g inboxFullGeom) contentCol() int {
+	col := inboxPrefixW + g.idW + 1
+	if g.showTime {
+		col += g.timeW
+	}
+	if g.showChan {
+		col += inboxColGap + g.chanW
+	}
+	if g.showThread {
+		col += inboxColGap + g.threadW
+	}
+	if g.showName {
+		col += inboxColGap + g.nameW
+	}
+	return col + inboxColGap
+}
+
+func (g inboxFullGeom) rowLine(prefix string, id int64, im store.InboxMessage, createdAt, name, authorType, content string) string {
+	head := fmt.Sprintf("%s%0*d", prefix, g.idW, id)
+	if g.showTime {
+		head += fmt.Sprintf(" %*s", g.timeW, formatTime(createdAt))
+	}
+	cells := []string{head}
+	if g.showChan {
+		cells = append(cells, formatFixedName(truncate(im.ChannelName, g.chanW), g.chanW))
+	}
+	if g.showThread {
+		cells = append(cells, formatFixedName(truncate(im.ThreadTitle, g.threadW), g.threadW))
+	}
+	if g.showName {
+		cells = append(cells, getNameStyle(authorType).Render(formatFixedName(truncate(name, g.nameW), g.nameW)))
+	}
+	cells = append(cells, content)
+	return strings.Join(cells, strings.Repeat(" ", inboxColGap))
+}
+
+func (g inboxFullGeom) headerLine(id int64, w int) string {
+	head := fmt.Sprintf("%s%0*d", inboxPrefixSpacer, g.idW, id)
+	if g.showTime {
+		head += fmt.Sprintf(" %*s", g.timeW, "TIME")
+	}
+	cells := []string{head}
+	if g.showChan {
+		cells = append(cells, formatFixedName("CHANNEL", g.chanW))
+	}
+	if g.showThread {
+		cells = append(cells, formatFixedName("THREAD", g.threadW))
+	}
+	if g.showName {
+		cells = append(cells, formatFixedName("NAME", g.nameW))
+	}
+	cells = append(cells, "CONTENT")
+	return truncate(strings.Join(cells, strings.Repeat(" ", inboxColGap)), w)
+}
+
+func (m model) renderInboxFullWithWidth(w, h int) string {
+	if h < 5 {
+		h = 5
+	}
+	blocks := m.inboxFullBlocks()
+	title := m.inboxTitle()
+	if len(blocks) == 0 {
+		return renderInboxEmpty(w, h, title, len(m.inbox) > 0)
+	}
+	var maxID int64
+	for _, b := range blocks {
+		if b.head.ID > maxID {
+			maxID = b.head.ID
+		}
+	}
+	idW := len(fmt.Sprintf("%d", maxID))
+	if idW < 1 {
+		idW = 1
+	}
+	g := inboxFullGeometry(w, idW)
+	indent := strings.Repeat(" ", g.contentCol())
+	replyW := g.contentW - len(inboxReplyPrefix)
+	if replyW < 1 {
+		replyW = 1
+	}
+	var rows []string
+	for i, b := range blocks {
+		prefix := "  "
+		if i == m.cursor {
+			prefix = "> "
+		}
+		selected := i == m.cursor
+		headContent := truncate(strings.ReplaceAll(b.head.Content, "\n", " "), g.contentW)
+		head := g.rowLine(prefix, b.head.ID, b.im, b.head.CreatedAt, b.head.Name, b.head.AuthorType, headContent)
+		rows = append(rows, inboxRowStyle(head, selected, w))
+		for _, r := range b.replies {
+			text := indent + inboxReplyPrefix + truncate(strings.ReplaceAll(r.Content, "\n", " "), replyW)
+			rows = append(rows, inboxRowStyle(inboxReplyStyle.Render(text), selected, w))
+		}
+		if b.loading {
+			rows = append(rows, inboxRowStyle(inboxReplyStyle.Render(indent+inboxLoadingReplies), selected, w))
+		}
+	}
+	visibleCap := h - inboxChromeH
+	if visibleCap < 1 {
+		visibleCap = 1
+	}
+	start := m.scroll
+	if start < 0 {
+		start = 0
+	}
+	if start >= len(rows) {
+		start = len(rows) - 1
+	}
+	if start < 0 {
+		start = 0
+	}
+	end := min(start+visibleCap, len(rows))
+	header := lipgloss.NewStyle().Foreground(chatHeaderFg).Bold(true).Render(g.headerLine(maxID, w))
+	return renderInboxRows(w, h, title, header, renderInboxSep(w), rows[start:end])
+}
+
+func inboxRowStyle(line string, selected bool, w int) string {
+	if selected {
+		return chatMsgSelectedStyle.Width(w).Render(line)
+	}
+	return chatMsgStyle.Render(line)
+}
+
+func renderInboxHeaderRow(idW int, id int64, w int) string {
+	raw := fmt.Sprintf("%s%0*d %*s  %-*s  %-*s  %-*s  %s",
+		inboxPrefixSpacer, idW, id, inboxTimeW, "TIME",
+		inboxChanW, "CHANNEL", inboxThreadW, "THREAD", inboxNameW, "NAME", "CONTENT")
+	raw = truncate(raw, w)
+	return lipgloss.NewStyle().Foreground(chatHeaderFg).Bold(true).Render(raw)
+}
+
+func renderInboxSep(w int) string {
+	return lipgloss.NewStyle().Foreground(chatHeaderFg).Render(strings.Repeat("─", max(0, max(20, w)-2)))
+}
+
+func renderInboxEmpty(w, h int, title string, filtered bool) string {
+	empty := "  (no messages)"
+	if filtered {
+		empty = "  (no messages — filtered, press f to clear)"
+	}
+	boxW := max(20, w)
+	headerStyleNoMargin := chatHeaderStyle.MarginBottom(0)
+	lines := []string{headerStyleNoMargin.Render(truncate(title, boxW)), renderInboxSep(w), empty}
+	for len(lines) < h {
+		lines = append(lines, "")
+	}
+	if len(lines) > h {
+		lines = lines[:h]
+	}
+	return lipgloss.NewStyle().Width(boxW).Render(strings.Join(lines, "\n"))
+}
+
+func renderInboxRows(w, h int, title, headerRow, sep string, rows []string) string {
+	boxW := max(20, w)
+	lines := []string{chatHeaderStyle.MarginBottom(0).Render(truncate(title, boxW)), headerRow, sep}
 	lines = append(lines, rows...)
 	for len(lines) < h {
 		lines = append(lines, "")
@@ -1931,6 +2354,10 @@ func (m *model) clampCursor() {
 	if m.cursor >= total {
 		m.cursor = total - 1
 	}
+	if m.view == viewInbox && m.inboxLayout == inboxLayoutFull {
+		m.clampInboxFullScroll()
+		return
+	}
 	h := m.listHeight()
 	visible := h - 2
 	if m.view == viewInbox {
@@ -1947,6 +2374,32 @@ func (m *model) clampCursor() {
 	}
 	if m.scroll < 0 {
 		m.scroll = 0
+	}
+	if m.scroll+visible > total {
+		m.scroll = total - visible
+	}
+	if m.scroll < 0 {
+		m.scroll = 0
+	}
+}
+
+func (m *model) clampInboxFullScroll() {
+	blocks := m.inboxFullBlocks()
+	if len(blocks) == 0 {
+		m.scroll = 0
+		return
+	}
+	if m.cursor >= len(blocks) {
+		m.cursor = len(blocks) - 1
+	}
+	starts, ends := inboxFullBlockRanges(blocks)
+	visible := m.inboxVisibleRows()
+	total := ends[len(ends)-1]
+	if m.scroll > starts[m.cursor] {
+		m.scroll = starts[m.cursor]
+	}
+	if ends[m.cursor] > m.scroll+visible {
+		m.scroll = ends[m.cursor] - visible
 	}
 	if m.scroll+visible > total {
 		m.scroll = total - visible
@@ -2187,13 +2640,13 @@ func (m *model) inboxStatusSuffix() string {
 
 func (m model) helpView() string {
 	var parts []string
-	previewHint := hintKeyStyle.Render("L") + " preview"
+	previewHint := hintKeyStyle.Render("p") + " preview"
 	if m.preview {
-		previewHint = hintKeyStyle.Render("L") + " hide preview"
+		previewHint = hintKeyStyle.Render("p") + " hide preview"
 	}
 	switch m.view {
 	case viewInbox:
-		parts = []string{hintKeyStyle.Render("↑↓/j/k") + " nav", hintKeyStyle.Render("Enter") + " view", hintKeyStyle.Render("r") + " reply", hintKeyStyle.Render("v") + " sort", hintKeyStyle.Render("f") + " filter", previewHint, hintKeyStyle.Render("q") + " quit"}
+		parts = []string{hintKeyStyle.Render("↑↓/j/k") + " nav", hintKeyStyle.Render("Enter") + " view", hintKeyStyle.Render("r") + " reply", hintKeyStyle.Render("v") + " sort", hintKeyStyle.Render("f") + " filter", hintKeyStyle.Render("l") + " layout", previewHint, hintKeyStyle.Render("q") + " quit"}
 	case viewInboxDetail:
 		parts = []string{hintKeyStyle.Render("↑↓/j/k") + " scroll", hintKeyStyle.Render("g/G") + " top/bottom", hintKeyStyle.Render("r") + " reply", hintKeyStyle.Render("Esc") + " back", previewHint, hintKeyStyle.Render("q") + " quit"}
 	case viewChannels:

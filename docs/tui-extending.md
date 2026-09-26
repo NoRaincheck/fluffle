@@ -49,7 +49,7 @@ Always update `helpView()` for relevant views.
 ## Modifying the Preview Panel
 
 - Content: edit `renderPreview()` — shows full message + last 5 replies
-- Fetch trigger: edit `maybeFetchPreview()` — debounced by thread ID
+- Fetch trigger: edit `maybeFetchPreview()` — debounced by thread ID; `syncVisibleData()` batches it with `maybeFetchFullRows()`
 - Dimensions: computed in `View()` — `leftW = m.width/2 - 1`, `rightW = m.width - leftW - 3`
 
 ## Modifying Styles
@@ -60,10 +60,11 @@ All styles in `styles.go`. Add color + style var, apply in rendering.
 
 | Feature | Files to touch |
 |---------|---------------|
-| New view | `model.go` (state, Update, View, render, helpView, maybeFetchPreview) |
+| New view | `model.go` (state, Update, View, render, helpView, syncVisibleData) |
 | New compose mode | `compose.go` (mode constant, View hints), `model.go` (handleComposeSend, handleKey) |
 | New key binding | `model.go` (handleKey, helpView) |
 | New API endpoint | `api.go` (wrapper), `model.go` (fetch, message type, Update handler) |
 | New data type | `store/store.go` (type + query), `apiserver/` (HTTP handler), `api.go` (wrapper) |
 | New style | `styles.go` (color + style var), `model.go` (apply in rendering) |
 | Preview changes | `model.go` (renderPreview, maybeFetchPreview, View layout) |
+| Inbox layout | `model.go` (`inboxLayout`, `renderInboxFullWithWidth`, `inboxFullGeometry`, `clampInboxFullScroll`) |
