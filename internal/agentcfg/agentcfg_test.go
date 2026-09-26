@@ -84,6 +84,7 @@ func TestParseRejectsInvalid(t *testing.T) {
 		{"bad reply", "[[agents]]\nname=\"a\"\ncommand=\"x\"\nreply=\"nope\"\n", "reply"},
 		{"zero timeout", "[[agents]]\nname=\"a\"\ncommand=\"x\"\ntimeout_secs=0\n", "timeout_secs"},
 		{"negative timeout", "[[agents]]\nname=\"a\"\ncommand=\"x\"\ntimeout_secs=-1\n", "timeout_secs"},
+		{"timeout overflows a duration", "[[agents]]\nname=\"a\"\ncommand=\"x\"\ntimeout_secs=9223372037\n", "timeout_secs"},
 		{"unknown key", "[[agents]]\nname=\"a\"\ncommand=\"x\"\ntimeout_second=5\n", "unknown"},
 		{"agents not a table", "agents = 1\n", "agents"},
 	} {
@@ -96,6 +97,31 @@ func TestParseRejectsInvalid(t *testing.T) {
 				t.Fatalf("error = %q, want it to contain %q", err.Error(), tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestParseRejectsTimeoutThatOverflowsADuration(t *testing.T) {
+	overflow := 9223372037
+	overflowed := time.Duration(overflow) * time.Second
+	if overflowed > 0 {
+		t.Fatalf("premise broken: %d seconds must overflow a duration", overflow)
+	}
+	_, err := Parse([]byte("[[agents]]\nname=\"a\"\ncommand=\"x\"\ntimeout_secs=9223372037\n"), "/tmp/x.toml")
+	if err == nil {
+		t.Fatalf("timeout_secs=%d must be rejected: it wraps negative, so the run would time out before it starts", overflow)
+	}
+	if !strings.Contains(err.Error(), "timeout_secs") {
+		t.Fatalf("error = %q, want it to name timeout_secs", err.Error())
+	}
+}
+
+func TestParseAcceptsLargestTimeoutThatFitsADuration(t *testing.T) {
+	entries, err := Parse([]byte("[[agents]]\nname=\"a\"\ncommand=\"x\"\ntimeout_secs=9223372036\n"), "/tmp/x.toml")
+	if err != nil {
+		t.Fatalf("the largest representable timeout must be accepted: %v", err)
+	}
+	if d := time.Duration(entries[0].TimeoutSecs) * time.Second; d <= 0 {
+		t.Fatalf("Duration = %d ns, want a positive deadline", int64(d))
 	}
 }
 

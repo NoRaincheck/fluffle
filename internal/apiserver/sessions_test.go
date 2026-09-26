@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -392,6 +393,86 @@ func TestListAgentsRefusesSymlinkedRepoConfig(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), target) || strings.Contains(rec.Body.String(), repoPath) {
 		t.Fatalf("response leaks a config path: %s", rec.Body.String())
+	}
+}
+
+func TestListAgentsWithoutRepoParamResolvesGlobalOnly(t *testing.T) {
+	_, h, _, _, _ := newSessionHandler(t, oneAgentCfg)
+	rec := serveRequest(t, h, http.MethodGet, "/v1/agents", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body %s", rec.Code, rec.Body.String())
+	}
+	assertGlobalOnlyAgents(t, rec)
+}
+
+func TestListAgentsWithEmptyRepoParamResolvesGlobalOnly(t *testing.T) {
+	_, h, _, _, _ := newSessionHandler(t, oneAgentCfg)
+	rec := serveRequest(t, h, http.MethodGet, "/v1/agents?repo=", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body %s", rec.Code, rec.Body.String())
+	}
+	assertGlobalOnlyAgents(t, rec)
+}
+
+func assertGlobalOnlyAgents(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	var out struct {
+		Agents []agentListItem `json:"agents"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Agents) != 1 || out.Agents[0].Name != "reviewer" {
+		t.Fatalf("agents = %+v, want only the global reviewer", out.Agents)
+	}
+}
+
+const (
+	agentListCwdEnv = "FLUFFLE_TEST_AGENT_LIST_CWD"
+	agentListCwdOK  = "FLUFFLE_TEST_AGENT_LIST_CWD_OK"
+)
+
+func TestListAgentsIgnoresCwdSymlinkWhenRepoAbsent(t *testing.T) {
+	cwd := os.Getenv(agentListCwdEnv)
+	if cwd == "" {
+		runAgentListCwdChild(t)
+		return
+	}
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Lstat(repoConfigFile); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("premise broken: the working directory must hold a %s symlink, got %v %v", repoConfigFile, info, err)
+	}
+	_, h, _, _, _ := newSessionHandler(t, oneAgentCfg)
+	for _, q := range []string{"/v1/agents", "/v1/agents?repo="} {
+		rec := serveRequest(t, h, http.MethodGet, q, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s = %d %s: an absent repo reads no %s, so the daemon's working directory must not be consulted", q, rec.Code, rec.Body.String(), repoConfigFile)
+		}
+		assertGlobalOnlyAgents(t, rec)
+	}
+	fmt.Println(agentListCwdOK)
+}
+
+func runAgentListCwdChild(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	target := filepath.Join(dir, "elsewhere.toml")
+	if err := os.WriteFile(target, []byte(oneAgentCfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, repoConfigFile)); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestListAgentsIgnoresCwdSymlinkWhenRepoAbsent$", "-test.v")
+	cmd.Env = append(os.Environ(), agentListCwdEnv+"="+dir)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("child process: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), agentListCwdOK) {
+		t.Fatalf("child process never reached the assertions:\n%s", out)
 	}
 }
 

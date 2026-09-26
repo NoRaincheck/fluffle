@@ -20,6 +20,8 @@ const (
 	DefaultTimeoutSecs = 300
 )
 
+const maxTimeoutSecs = 9223372036
+
 var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 
 type Agent struct {
@@ -132,6 +134,9 @@ func validate(a Agent, source string, i int) error {
 	}
 	if a.TimeoutSecs <= 0 {
 		return fmt.Errorf("%s: invalid timeout_secs %d: must be positive", where, a.TimeoutSecs)
+	}
+	if a.TimeoutSecs > maxTimeoutSecs {
+		return fmt.Errorf("%s: invalid timeout_secs %d: must be at most %d", where, a.TimeoutSecs, maxTimeoutSecs)
 	}
 	return nil
 }

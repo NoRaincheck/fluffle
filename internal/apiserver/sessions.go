@@ -150,10 +150,12 @@ func serveAgentList(d Deps, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	repo := r.URL.Query().Get("repo")
-	if info, err := os.Lstat(filepath.Join(repo, repoConfigFile)); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		slog.Error("refusing symlinked agent config", "repo", repo)
-		writeErr(w, http.StatusInternalServerError, "DAEMON_ERROR", "agent configuration could not be loaded")
-		return
+	if repo != "" {
+		if info, err := os.Lstat(filepath.Join(repo, repoConfigFile)); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			slog.Error("refusing symlinked agent config", "repo", repo)
+			writeErr(w, http.StatusInternalServerError, "DAEMON_ERROR", "agent configuration could not be loaded")
+			return
+		}
 	}
 	set, err := d.Agents.Resolve(repo)
 	if err != nil {

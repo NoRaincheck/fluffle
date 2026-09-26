@@ -136,12 +136,12 @@ description = "reviews diffs"
 command = "claude"          # required
 args = ["-p", "{prompt}"]  # optional
 reply = "auto"             # stdout | cli | auto, default auto
-timeout_secs = 300         # positive, default 300
+timeout_secs = 300         # 1..9223372036, default 300
 env = { ANTHROPIC_API_KEY = "…" }
 system_prompt = "You are a meticulous reviewer."
 ```
 
-`name` and `command` are required — a name must match `^[a-z0-9][a-z0-9_-]*$` and a command must be non-blank. `reply` defaults to `auto` and must be one of the three values when set; `timeout_secs` defaults to 300 and must be positive. An unknown key anywhere in the file is a hard error naming every unrecognized key, not a warning — a typo in `timeouts_secs` must not silently fall back to the default. Parsed files are cached by path and re-read when the file's mtime changes.
+`name` and `command` are required — a name must match `^[a-z0-9][a-z0-9_-]*$` and a command must be non-blank. `reply` defaults to `auto` and must be one of the three values when set; `timeout_secs` defaults to 300 and must be in `1..9223372036`. The upper bound is `math.MaxInt64` nanoseconds expressed in seconds: a larger value wraps `time.Duration` negative, and the run would then fail instantly with an unexplained `agent timed out` instead of reporting a config error. An unknown key anywhere in the file is a hard error naming every unrecognized key, not a warning — a typo in `timeouts_secs` must not silently fall back to the default. Parsed files are cached by path and re-read when the file's mtime changes.
 
 `~/.fluffle/daemon.json` stays JSON; only agent definitions are TOML.
 
@@ -187,6 +187,8 @@ On startup the daemon reconciles: any session still `queued` or `running` from a
 | `auto` | Both. After the subprocess exits, the daemon waits up to 2 s for an agent message with this agent's name at a sequence after the trigger; if one appears it is used as-is, otherwise stdout is posted for the agent. |
 
 A reply is posted as `author_type=agent` with the agent's name and the trigger as its parent, so it is an ordinary thread message and an agent's `flf agent read` sees it. A run whose captured output is empty finishes `succeeded` with no message rather than posting a blank one.
+
+**Known limitation — two live mentions of the same agent in one thread.** In `auto` mode the daemon decides a run replied itself by counting agent messages from that name at a sequence after the trigger, which is scoped per thread and per name and so cannot say *which* session a post belongs to. Two mentions of the same agent in one thread whose runs overlap can therefore cross: one run's reply is credited to the other, and a session can be left **silently unanswered and recorded as `succeeded` with `reply_message_id = NULL` and no message in the thread from its run**. The output is not lost — it is in that session's `agent_session_events` transcript — but nothing in the thread or the session row says so. Sequential mentions, and two *different* agents in one thread, are unaffected. Distinguishing the runs needs a session marker on the posted message, which is not implemented.
 
 ### A session transcript is never agent context
 
@@ -259,7 +261,7 @@ Returns `{"ok":true}` with status 200.
 
 **`POST /v1/sessions/:id/cancel`** — Cancel a non-terminal session: a running subprocess is killed, a queued one is finished `canceled` without running. Humans only — a request carrying `X-Fluffle-Agent` is `403 AGENT_FORBIDDEN`. A missing session is `404 SESSION_NOT_FOUND`, a session already `succeeded`/`failed`/`canceled` is `409 SESSION_FINISHED`, and a daemon with no execution wired is `503 DAEMON_ERROR`. Returns `{"ok":true}`.
 
-**`GET /v1/agents?repo=<abs path>`** — Resolved agent names for a repo scope, each with `description`, `command`, `reply`, and the config `source` file it came from. Returns `{"agents":[{"name","description","command","reply","source"}]}`, sorted by name, `[]` when the daemon has no agent config loaded. An absent or empty `repo` resolves the global file only. A config that fails to parse, or a `.flf.toml` that is a symlink, is `500 DAEMON_ERROR` with the reason logged, never returned. Readable by agents. The symlink refusal lives on this route only — a session started from a thread whose repo has a symlinked `.flf.toml` still resolves through it, so the two paths do not currently agree.
+**`GET /v1/agents?repo=<abs path>`** — Resolved agent names for a repo scope, each with `description`, `command`, `reply`, and the config `source` file it came from. Returns `{"agents":[{"name","description","command","reply","source"}]}`, sorted by name, `[]` when the daemon has no agent config loaded. An absent or empty `repo` resolves the global file only, and is not subject to the symlink refusal: a caller that named no repo has no `.flf.toml` path to check, so the daemon's own working directory is never consulted. A config that fails to parse, or a **named** repo whose `.flf.toml` is a symlink, is `500 DAEMON_ERROR` with the reason logged, never returned. Readable by agents. The symlink refusal lives on this route only — a session started from a thread whose repo has a symlinked `.flf.toml` still resolves through it, so the two paths do not currently agree.
 
 There is no `POST /v1/sessions` and no `flf agent invoke`: a session can only be started by a human mention.
 
