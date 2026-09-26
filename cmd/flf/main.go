@@ -1170,28 +1170,90 @@ func daemonCmd(args []string) int {
 	}
 }
 
+const (
+	daemonStopRequestTimeout = 2 * time.Second
+	daemonStopExitTimeout    = 5 * time.Second
+	daemonStopPollInterval   = 25 * time.Millisecond
+)
+
 func daemonStop() int {
-	b, err := os.ReadFile(filepath.Join(client.FluffleHome(), "daemon.json"))
+	home := client.FluffleHome()
+	runtimeFile := filepath.Join(home, "daemon.json")
+	b, err := os.ReadFile(runtimeFile)
 	if err != nil {
 		return fail("DAEMON_DOWN", "not running")
 	}
 	var df struct {
-		PID int `json:"pid"`
+		PID  int `json:"pid"`
+		Port int `json:"port"`
 	}
 	if err := json.Unmarshal(b, &df); err != nil {
+		return fail("DAEMON_DOWN", "bad daemon.json")
+	}
+	if df.PID <= 0 {
 		return fail("DAEMON_DOWN", "bad daemon.json")
 	}
 	proc, err := os.FindProcess(df.PID)
 	if err != nil {
 		return fail("DAEMON_DOWN", err.Error())
 	}
-	if err := proc.Kill(); err != nil {
-		os.Remove(filepath.Join(client.FluffleHome(), "daemon.json"))
-		return fail("DAEMON_DOWN", err.Error())
+	if !requestDaemonShutdown(df.Port) || !waitForProcessExit(df.PID, daemonStopExitTimeout) {
+		fmt.Fprintf(os.Stderr, "flf: daemon %d did not shut down gracefully; killing it\n", df.PID)
+		if err := proc.Kill(); err != nil {
+			os.Remove(runtimeFile)
+			return fail("DAEMON_DOWN", err.Error())
+		}
 	}
-	os.Remove(filepath.Join(client.FluffleHome(), "daemon.json"))
+	os.Remove(runtimeFile)
 	fmt.Println("daemon stopped")
 	return 0
+}
+
+// requestDaemonShutdown asks the daemon to run its own shutdown path, which is
+// the only route that reaches the session barrier. The request is a
+// human-initiated control operation, so it deliberately carries no
+// X-Fluffle-Agent header; the route rejects agent callers with 403.
+func requestDaemonShutdown(port int) bool {
+	if port <= 0 {
+		return false
+	}
+	req, err := http.NewRequest(http.MethodPost, "http://127.0.0.1:"+strconv.Itoa(port)+"/api/shutdown", nil)
+	if err != nil {
+		return false
+	}
+	resp, err := (&http.Client{Timeout: daemonStopRequestTimeout}).Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode == http.StatusOK
+}
+
+// processAlive reports whether a pid still exists. os.FindProcess always
+// succeeds on Unix, so the only usable probe is signal 0.
+func processAlive(pid int) bool {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return proc.Signal(syscall.Signal(0)) == nil
+}
+
+// waitForProcessExit blocks until the pid is gone, the deadline passes, or the
+// pid is already dead on arrival. A killed-but-unreaped child still answers
+// signal 0, so the daemon's own reaping is what makes this return.
+func waitForProcessExit(pid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if !processAlive(pid) {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(daemonStopPollInterval)
+	}
 }
 
 func daemonStart(background bool) int {

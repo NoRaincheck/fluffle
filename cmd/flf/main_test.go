@@ -5,15 +5,18 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1842,4 +1845,227 @@ func TestDaemonStartReconcilesStaleSessions(t *testing.T) {
 	if untouched.Status != store.SessionSucceeded {
 		t.Fatalf("terminal session was modified: %q", untouched.Status)
 	}
+}
+
+// TestDaemonStopSleepsUntilKilled is the child process used by the daemonStop
+// tests. It only does anything when re-executed with FLUFFLE_STOP_HELPER=1.
+func TestDaemonStopSleepsUntilKilled(t *testing.T) {
+	if os.Getenv("FLUFFLE_STOP_HELPER") != "1" {
+		t.Skip("helper process; only runs when re-executed by the daemonStop tests")
+	}
+	time.Sleep(2 * time.Minute)
+}
+
+// startFakeDaemon starts a real child process that stands in for a running
+// daemon, so the stop tests can assert on genuine process death rather than on
+// a mock. waitDead blocks until the child is killed and reaped, which is what
+// makes the assertions race-free: a killed-but-unreaped child still answers
+// signal 0 on Unix, so the tests must wait for the reap, not sample it.
+func startFakeDaemon(t *testing.T) (pid int, waitDead func() bool) {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=TestDaemonStopSleepsUntilKilled", "-test.timeout=3m")
+	cmd.Env = append(os.Environ(), "FLUFFLE_STOP_HELPER=1")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	reaped := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(reaped)
+	}()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		select {
+		case <-reaped:
+		case <-time.After(10 * time.Second):
+			t.Error("fake daemon was not reaped")
+		}
+	})
+	return cmd.Process.Pid, func() bool {
+		select {
+		case <-reaped:
+			return true
+		case <-time.After(10 * time.Second):
+			return false
+		}
+	}
+}
+
+func writeDaemonRuntimeFile(t *testing.T, home string, port, pid int) {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{"port": port, "pid": pid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "daemon.json"), payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func serverPort(t *testing.T, server *httptest.Server) int {
+	t.Helper()
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(parsed.Port())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return port
+}
+
+func TestDaemonStopRequestsGracefulShutdownBeforeKilling(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("FLUFFLE_HOME", home)
+	pid, waitDead := startFakeDaemon(t)
+
+	var mu sync.Mutex
+	var seen []recordedCLIRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, recordedCLIRequest{
+			Method: r.Method,
+			Path:   r.URL.Path,
+			Header: r.Header.Clone(),
+		})
+		mu.Unlock()
+		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+			t.Errorf("killing the fake daemon: %v", err)
+		}
+		waitDead()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	writeDaemonRuntimeFile(t, home, serverPort(t, server), pid)
+
+	code, stdout, stderr := captureOutput(t, daemonStop)
+
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (stderr %q)", code, stderr)
+	}
+	if !strings.Contains(stdout, "daemon stopped") {
+		t.Fatalf("stdout = %q, want the success message", stdout)
+	}
+
+	mu.Lock()
+	got := append([]recordedCLIRequest(nil), seen...)
+	mu.Unlock()
+	if len(got) != 1 {
+		t.Fatalf("daemon requests = %d, want exactly the graceful shutdown POST", len(got))
+	}
+	if got[0].Method != http.MethodPost || got[0].Path != "/api/shutdown" {
+		t.Fatalf("request = %s %s, want POST /api/shutdown", got[0].Method, got[0].Path)
+	}
+	if agent := got[0].Header.Get("X-Fluffle-Agent"); agent != "" {
+		t.Fatalf("X-Fluffle-Agent = %q, want the header absent: a human stop must not be spoofed as an agent", agent)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want a clean graceful stop with no forced-kill notice", stderr)
+	}
+	if !waitDead() {
+		t.Fatal("fake daemon survived the graceful stop")
+	}
+	if _, err := os.Stat(filepath.Join(home, "daemon.json")); !os.IsNotExist(err) {
+		t.Fatalf("daemon.json still present after a clean stop: %v", err)
+	}
+}
+
+func TestDaemonStopFallsBackToKillWhenGracefulShutdownFails(t *testing.T) {
+	t.Run("nothing listening on the recorded port", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("FLUFFLE_HOME", home)
+		pid, waitDead := startFakeDaemon(t)
+
+		dead, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		closedPort := dead.Addr().(*net.TCPAddr).Port
+		if err := dead.Close(); err != nil {
+			t.Fatal(err)
+		}
+		writeDaemonRuntimeFile(t, home, closedPort, pid)
+
+		code, stdout, _ := captureOutput(t, daemonStop)
+		if code != 0 {
+			t.Fatalf("exit = %d, want 0: an unreachable graceful path must still stop the daemon", code)
+		}
+		if !strings.Contains(stdout, "daemon stopped") {
+			t.Fatalf("stdout = %q, want the success message", stdout)
+		}
+		if !waitDead() {
+			t.Fatal("fake daemon survived the kill fallback")
+		}
+	})
+
+	t.Run("listener accepts but never answers", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("FLUFFLE_HOME", home)
+		pid, waitDead := startFakeDaemon(t)
+
+		release := make(chan struct{})
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			select {
+			case <-release:
+			case <-time.After(30 * time.Second):
+			}
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer func() {
+			close(release)
+			server.Close()
+		}()
+		writeDaemonRuntimeFile(t, home, serverPort(t, server), pid)
+
+		done := make(chan int, 1)
+		go func() { done <- daemonStop() }()
+		var code int
+		select {
+		case code = <-done:
+		case <-time.After(30 * time.Second):
+			t.Fatal("daemonStop hung on a non-responsive graceful endpoint")
+		}
+		if code != 0 {
+			t.Fatalf("exit = %d, want 0", code)
+		}
+		if !waitDead() {
+			t.Fatal("fake daemon survived the kill fallback")
+		}
+	})
+}
+
+func TestDaemonStopReportsDaemonDownForUnusableRuntimeFile(t *testing.T) {
+	t.Run("missing daemon.json", func(t *testing.T) {
+		t.Setenv("FLUFFLE_HOME", t.TempDir())
+		code, stderr := captureStderr(t, daemonStop)
+		if code != 2 {
+			t.Fatalf("exit = %d, want 2", code)
+		}
+		assertCLIErrorEnvelope(t, stderr, "DAEMON_DOWN")
+	})
+
+	t.Run("malformed daemon.json", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("FLUFFLE_HOME", home)
+		if err := os.WriteFile(filepath.Join(home, "daemon.json"), []byte("not json"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		code, stderr := captureStderr(t, daemonStop)
+		if code != 2 {
+			t.Fatalf("exit = %d, want 2", code)
+		}
+		assertCLIErrorEnvelope(t, stderr, "DAEMON_DOWN")
+	})
+
+	t.Run("daemon.json without a usable pid", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("FLUFFLE_HOME", home)
+		writeDaemonRuntimeFile(t, home, 65000, 0)
+		code, stderr := captureStderr(t, daemonStop)
+		if code != 2 {
+			t.Fatalf("exit = %d, want 2: pid 0 would signal the caller's own process group", code)
+		}
+		assertCLIErrorEnvelope(t, stderr, "DAEMON_DOWN")
+	})
 }
