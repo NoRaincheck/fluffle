@@ -1,15 +1,15 @@
 package session
 
 import (
+	"context"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/NoRaincheck/fluffle/internal/agentcfg"
 	"github.com/NoRaincheck/fluffle/internal/store"
 )
-
-const msStampLayout = "2006-01-02T15:04:05.000Z"
 
 func cfgWith(reply string) string {
 	return "[[agents]]\nname=\"probe\"\ncommand=\"/bin/probe\"\nreply=\"" + reply + "\"\ntimeout_secs=5\n"
@@ -78,7 +78,7 @@ func TestCliModeNeverPostsOnTheAgentsBehalf(t *testing.T) {
 }
 
 func TestCliModeWithSelfPostSucceeds(t *testing.T) {
-	s, m, thID, msgID := harness(t, cfgWith("cli"), &fakeRunner{})
+	s, m, thID, msgID := harness(t, cfgWith("cli"), &fakeRunner{exit: 3})
 	fr := m.runner.(*fakeRunner)
 	fr.onStart = func() { selfPost(t, s, thID, "probe", "my own reply") }
 	m.Start(thID, msgID, []string{"probe"})
@@ -86,13 +86,16 @@ func TestCliModeWithSelfPostSucceeds(t *testing.T) {
 	if got.Status != store.SessionSucceeded {
 		t.Fatalf("status = %q error %v", got.Status, got.Error)
 	}
+	if got.ExitCode == nil || *got.ExitCode != 3 {
+		t.Fatalf("exit code = %v, want 3", got.ExitCode)
+	}
 	if got.ReplyMessageID != nil {
 		t.Fatalf("cli mode recorded its own post as a reply: %d", *got.ReplyMessageID)
 	}
 }
 
 func TestCliModeWithSilentAgentFails(t *testing.T) {
-	s, m, thID, msgID := harness(t, cfgWith("cli"), &fakeRunner{stdout: "words but no post"})
+	s, m, thID, msgID := harness(t, cfgWith("cli"), &fakeRunner{stdout: "words but no post", exit: 4})
 	m.Start(thID, msgID, []string{"probe"})
 	got := waitSession(t, s, onlySession(t, s, thID).ID, 15*time.Second)
 	if got.Status != store.SessionFailed {
@@ -100,6 +103,9 @@ func TestCliModeWithSilentAgentFails(t *testing.T) {
 	}
 	if got.Error == nil || !strings.Contains(*got.Error, "did not reply") {
 		t.Fatalf("error = %v", got.Error)
+	}
+	if got.ExitCode == nil || *got.ExitCode != 4 {
+		t.Fatalf("exit code = %v, want a failure to carry the code 4", got.ExitCode)
 	}
 	if !eventsContain(s, got.ID, store.SessionEventError, "did not reply") {
 		t.Fatalf("no error event: %v", eventTypes(s, got.ID))
@@ -125,7 +131,7 @@ func TestAutoModeWithSelfPostDoesNotDuplicate(t *testing.T) {
 }
 
 func TestAutoModeFallsBackToStdoutWhenSilent(t *testing.T) {
-	s, m, thID, msgID := harness(t, cfgWith("auto"), &fakeRunner{stdout: "fallback reply"})
+	s, m, thID, msgID := harness(t, cfgWith("auto"), &fakeRunner{stdout: "fallback reply", exit: 5})
 	m.Start(thID, msgID, []string{"probe"})
 	got := waitSession(t, s, onlySession(t, s, thID).ID, 15*time.Second)
 	if got.ReplyMessageID == nil {
@@ -134,6 +140,9 @@ func TestAutoModeFallsBackToStdoutWhenSilent(t *testing.T) {
 	msg, _ := s.MessageByID(*got.ReplyMessageID)
 	if msg.Content != "fallback reply" {
 		t.Fatalf("content = %q", msg.Content)
+	}
+	if got.ExitCode == nil || *got.ExitCode != 5 {
+		t.Fatalf("exit code = %v, want 5", got.ExitCode)
 	}
 }
 
@@ -184,58 +193,7 @@ func TestHumanPostDoesNotCountAsSelfPost(t *testing.T) {
 	}
 }
 
-func TestSessionTimestampsSortExactlyAgainstMessageTimestamps(t *testing.T) {
-	s, m, thID, msgID := harness(t, cfgWith("stdout"), &fakeRunner{})
-	m.Start(thID, msgID, []string{"probe"})
-	got := waitSession(t, s, onlySession(t, s, thID).ID, 10*time.Second)
-
-	if got.StartedAt == nil || got.FinishedAt == nil {
-		t.Fatalf("timestamps = %v / %v", got.StartedAt, got.FinishedAt)
-	}
-	trigger, err := s.MessageByID(msgID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, ts := range []string{*got.StartedAt, *got.FinishedAt} {
-		if len(ts) != len(trigger.CreatedAt) {
-			t.Fatalf("session timestamp %q is %d chars, created_at %q is %d", ts, len(ts), trigger.CreatedAt, len(trigger.CreatedAt))
-		}
-		if _, err := time.Parse(msStampLayout, ts); err != nil {
-			t.Fatalf("session timestamp %q is not a fixed 3-digit millisecond stamp: %v", ts, err)
-		}
-	}
-
-	start, err := time.Parse(time.RFC3339, *got.StartedAt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	after := start.Add(time.Millisecond).Format(msStampLayout)
-	before := start.Add(-time.Millisecond).Format(msStampLayout)
-
-	if _, err := s.AppendMessageAt(thID, "probe", "agent", "assistant", "just after the start", after); err != nil {
-		t.Fatal(err)
-	}
-	n, err := s.CountAgentMessagesSince(thID, "probe", *got.StartedAt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n != 1 {
-		t.Fatalf("agent messages %d at or after the session start, want 1", n)
-	}
-
-	if _, err := s.AppendMessageAt(thID, "probe", "agent", "assistant", "just before the start", before); err != nil {
-		t.Fatal(err)
-	}
-	n, err = s.CountAgentMessagesSince(thID, "probe", *got.StartedAt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n != 1 {
-		t.Fatalf("agent messages %d, want the pre-session post to stay excluded", n)
-	}
-}
-
-func TestASecondSessionInTheSameSecondDoesNotCountTheFirstSessionsPost(t *testing.T) {
+func TestASecondSessionDoesNotCountTheFirstSessionsEarlierPost(t *testing.T) {
 	s, m, thID, msgID := harness(t, cfgWith("auto"), &fakeRunner{stdout: "second stdout"})
 	fr := m.runner.(*fakeRunner)
 	var once sync.Once
@@ -264,7 +222,6 @@ func TestASecondSessionInTheSameSecondDoesNotCountTheFirstSessionsPost(t *testin
 		t.Fatalf("sessions = %+v, want 2", sessions)
 	}
 	second := waitSession(t, s, sessions[1].ID, 15*time.Second)
-	t.Logf("first started_at = %s, second started_at = %s", *first.StartedAt, *second.StartedAt)
 
 	if second.Status != store.SessionSucceeded {
 		t.Fatalf("second status = %q error %v", second.Status, second.Error)
@@ -282,5 +239,122 @@ func TestASecondSessionInTheSameSecondDoesNotCountTheFirstSessionsPost(t *testin
 	msgs, _ := s.ListMessages(thID, 0)
 	if len(msgs) != 4 {
 		t.Fatalf("messages = %+v, want two triggers, the first post, and the second stdout fallback", msgs)
+	}
+}
+
+func TestDetectionIsBoundedBySeqNotByWallClock(t *testing.T) {
+	s, m, thID, msgID := harness(t, cfgWith("auto"), &fakeRunner{stdout: "second stdout"})
+	fr := m.runner.(*fakeRunner)
+	var once sync.Once
+	fr.onStart = func() {
+		once.Do(func() {
+			if _, err := s.AppendMessageAt(thID, "probe", "agent", "assistant", "first reply", "2999-01-01T00:00:00.000Z"); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+
+	m.Start(thID, msgID, []string{"probe"})
+	first := waitSession(t, s, onlySession(t, s, thID).ID, 10*time.Second)
+	if first.ReplyMessageID != nil {
+		t.Fatalf("first session = %+v", first)
+	}
+
+	seq, err := s.AppendMessage(thID, "alice", "human", "user", "@probe again")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondTrigger, err := s.MessageIDBySeq(thID, seq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Start(thID, secondTrigger, []string{"probe"})
+	sessions, err := s.ListSessions(thID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := waitSession(t, s, sessions[1].ID, 15*time.Second)
+
+	if second.ReplyMessageID == nil {
+		t.Fatal("detection is bounded by wall clock: a post stamped in the future suppressed the second session's reply")
+	}
+}
+
+func TestCancelDuringReplyGraceCancelsAndPostsNothing(t *testing.T) {
+	for _, reply := range []string{"auto", "cli"} {
+		t.Run(reply, func(t *testing.T) {
+			s, m, thID, msgID := harness(t, cfgWith(reply), &fakeRunner{stdout: "must not be posted", exit: 7})
+			m.Start(thID, msgID, []string{"probe"})
+			id := onlySession(t, s, thID).ID
+
+			time.Sleep(200 * time.Millisecond)
+			canceledAt := time.Now()
+			if err := m.Cancel(id); err != nil {
+				t.Fatal(err)
+			}
+			got := waitSession(t, s, id, 10*time.Second)
+			elapsed := time.Since(canceledAt)
+
+			if got.Status != store.SessionCanceled {
+				t.Fatalf("status = %q error %v", got.Status, got.Error)
+			}
+			if got.ReplyMessageID != nil {
+				t.Fatalf("reply %d was posted after the cancel", *got.ReplyMessageID)
+			}
+			msgs, _ := s.ListMessages(thID, 0)
+			if len(msgs) != 1 {
+				t.Fatalf("messages = %+v, want the trigger only", msgs)
+			}
+			if elapsed > time.Second {
+				t.Fatalf("took %s to unwind, want the grace poll to return promptly", elapsed)
+			}
+		})
+	}
+}
+
+func TestPostReplyOnACanceledContextCancelsAndAppendsNothing(t *testing.T) {
+	s, m, thID, msgID := harness(t, cfgWith("stdout"), &fakeRunner{})
+	entry := agentcfg.Entry{Agent: agentcfg.Agent{Name: "probe", Reply: "stdout", Command: "/bin/probe"}}
+	tc := store.ThreadContext{ThreadID: thID}
+	trigger, err := s.MessageByID(msgID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.CreateSession(thID, msgID, "probe", store.SessionQueued, "stdout", "/bin/probe", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	m.postReply(ctx, id, entry, tc, trigger, "must not be posted", int64ptr(9))
+
+	got, err := s.GetSession(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != store.SessionCanceled {
+		t.Fatalf("status = %q error %v", got.Status, got.Error)
+	}
+	if got.ReplyMessageID != nil {
+		t.Fatalf("reply %d was posted after the cancel", *got.ReplyMessageID)
+	}
+	msgs, _ := s.ListMessages(thID, 0)
+	if len(msgs) != 1 {
+		t.Fatalf("messages = %+v, want the trigger only", msgs)
+	}
+}
+
+func TestAgentPostedSurfacesAPersistentStoreError(t *testing.T) {
+	s, m, thID, _ := harness(t, cfgWith("cli"), &fakeRunner{})
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	posted, err := m.agentPosted(t.Context(), thID, "probe", 0)
+	if posted {
+		t.Fatal("a failing count must not read as a reply")
+	}
+	if err == nil {
+		t.Fatal("a persistent store error was swallowed")
 	}
 }

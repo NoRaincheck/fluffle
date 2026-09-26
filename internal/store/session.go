@@ -227,9 +227,9 @@ func (s *Store) ListSessionEvents(sessionID int64) ([]SessionEvent, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) CountAgentMessagesSince(threadID int64, name, since string) (int, error) {
+func (s *Store) CountAgentMessagesAfter(threadID int64, name string, afterSeq int64) (int, error) {
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE thread_id = ? AND name = ? AND author_type = 'agent' AND created_at >= ?`, threadID, name, since).Scan(&n)
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE thread_id = ? AND name = ? AND author_type = 'agent' AND seq > ?`, threadID, name, afterSeq).Scan(&n)
 	return n, err
 }
 

@@ -55,9 +55,7 @@ func NewManager(s *store.Store, agents *agentcfg.Loader, r runner.Runner) *Manag
 	}
 }
 
-const sessionStampLayout = "2006-01-02T15:04:05.000Z"
-
-func nowRFC3339() string { return time.Now().UTC().Format(sessionStampLayout) }
+func nowRFC3339() string { return time.Now().UTC().Format(time.RFC3339) }
 
 func stringPtr(s string) *string { return &s }
 
@@ -194,7 +192,7 @@ func (m *Manager) run(ctx context.Context, id int64, entry agentcfg.Entry, tc st
 	}
 
 	m.store.AppendSessionEvent(id, store.SessionEventExit, fmt.Sprintf("%d", result.ExitCode))
-	m.resolveReply(id, entry, tc, result)
+	m.resolveReply(ctx, id, entry, tc, trigger, result)
 }
 
 func (m *Manager) failSession(id int64, err error) {
@@ -298,13 +296,28 @@ func (m *Manager) Cancel(id int64) error {
 	return nil
 }
 
-func (m *Manager) resolveReply(id int64, entry agentcfg.Entry, tc store.ThreadContext, result runner.Result) {
+func (m *Manager) resolveReply(ctx context.Context, id int64, entry agentcfg.Entry, tc store.ThreadContext, trigger store.Message, result runner.Result) {
 	exit := int64ptr(int64(result.ExitCode))
-	if entry.Reply == "stdout" {
-		m.postReply(id, entry, tc, m.collectStdout(id), exit)
+	if ctx.Err() != nil {
+		m.finishCanceled(id, exit)
 		return
 	}
-	if m.agentPosted(tc.ThreadID, entry.Name, id) {
+	if entry.Reply == "stdout" {
+		m.postReply(ctx, id, entry, tc, trigger, m.collectStdout(id), exit)
+		return
+	}
+	posted, countErr := m.agentPosted(ctx, tc.ThreadID, entry.Name, trigger.Seq)
+	if ctx.Err() != nil {
+		m.finishCanceled(id, exit)
+		return
+	}
+	if countErr != nil {
+		msg := "could not count agent messages: " + countErr.Error()
+		m.store.AppendSessionEvent(id, store.SessionEventError, msg)
+		m.store.FinishSession(id, store.SessionFailed, exit, stringPtr(msg), nowRFC3339())
+		return
+	}
+	if posted {
 		m.store.FinishSession(id, store.SessionSucceeded, exit, nil, nowRFC3339())
 		return
 	}
@@ -314,7 +327,11 @@ func (m *Manager) resolveReply(id int64, entry agentcfg.Entry, tc store.ThreadCo
 		m.store.FinishSession(id, store.SessionFailed, exit, stringPtr(msg), nowRFC3339())
 		return
 	}
-	m.postReply(id, entry, tc, m.collectStdout(id), exit)
+	m.postReply(ctx, id, entry, tc, trigger, m.collectStdout(id), exit)
+}
+
+func (m *Manager) finishCanceled(id int64, exit *int64) {
+	m.store.FinishSession(id, store.SessionCanceled, exit, stringPtr("canceled"), nowRFC3339())
 }
 
 func (m *Manager) collectStdout(sessionID int64) string {
@@ -331,39 +348,36 @@ func (m *Manager) collectStdout(sessionID int64) string {
 	return strings.TrimSpace(b.String())
 }
 
-func (m *Manager) agentPosted(threadID int64, name string, sessionID int64) bool {
-	sess, err := m.store.GetSession(sessionID)
-	if err != nil {
-		return false
-	}
-	since := nowRFC3339()
-	if sess.StartedAt != nil {
-		since = *sess.StartedAt
-	}
+func (m *Manager) agentPosted(ctx context.Context, threadID int64, name string, afterSeq int64) (bool, error) {
 	deadline := time.Now().Add(ReplyGracePeriod)
+	var last error
 	for {
-		n, err := m.store.CountAgentMessagesSince(threadID, name, since)
-		if err == nil && n > 0 {
-			return true
+		n, err := m.store.CountAgentMessagesAfter(threadID, name, afterSeq)
+		if err == nil {
+			last = nil
+			if n > 0 {
+				return true, nil
+			}
+		} else {
+			last = err
 		}
-		if !time.Now().Before(deadline) {
-			return false
+		if ctx.Err() != nil || !time.Now().Before(deadline) {
+			return false, last
 		}
 		time.Sleep(ReplyGracePoll)
 	}
 }
 
-func (m *Manager) postReply(id int64, entry agentcfg.Entry, tc store.ThreadContext, content string, exit *int64) {
+func (m *Manager) postReply(ctx context.Context, id int64, entry agentcfg.Entry, tc store.ThreadContext, trigger store.Message, content string, exit *int64) {
+	if ctx.Err() != nil {
+		m.finishCanceled(id, exit)
+		return
+	}
 	if strings.TrimSpace(content) == "" {
 		m.store.FinishSession(id, store.SessionSucceeded, exit, nil, nowRFC3339())
 		return
 	}
-	sess, err := m.store.GetSession(id)
-	if err != nil {
-		m.store.FinishSession(id, store.SessionFailed, nil, stringPtr(err.Error()), nowRFC3339())
-		return
-	}
-	seq, err := m.store.AppendMessageWithParent(tc.ThreadID, entry.Name, "agent", "assistant", content, sess.TriggerMessageID)
+	seq, err := m.store.AppendMessageWithParent(tc.ThreadID, entry.Name, "agent", "assistant", content, trigger.ID)
 	if err != nil {
 		m.store.FinishSession(id, store.SessionFailed, exit, stringPtr(err.Error()), nowRFC3339())
 		return

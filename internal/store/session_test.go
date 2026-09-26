@@ -281,30 +281,36 @@ func TestListSessionsIsOldestFirstAndNeverNil(t *testing.T) {
 	}
 }
 
-func TestCountAgentMessagesSince(t *testing.T) {
+func TestCountAgentMessagesAfter(t *testing.T) {
 	s, thID := newSessionFixture(t)
-	if _, err := s.AppendMessage(thID, "alice", "human", "user", "human words"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.AppendMessage(thID, "probe", "agent", "assistant", "agent words"); err != nil {
-		t.Fatal(err)
-	}
+	humanSeq, _ := s.AppendMessage(thID, "alice", "human", "user", "human words")
+	agentSeq, _ := s.AppendMessage(thID, "probe", "agent", "assistant", "agent words")
 	if _, err := s.AppendMessage(thID, "probe", "human", "user", "human words"); err != nil {
 		t.Fatal(err)
 	}
-	n, err := s.CountAgentMessagesSince(thID, "probe", "1970-01-01T00:00:00Z")
+	if _, err := s.AppendMessage(thID, "other", "agent", "assistant", "other agent words"); err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.CountAgentMessagesAfter(thID, "probe", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {
-		t.Fatalf("count = %d, want 1", n)
+		t.Fatalf("count = %d, want 1: a human post by the agent's name and another agent's post must not count", n)
 	}
-	n, err = s.CountAgentMessagesSince(thID, "probe", "2999-01-01T00:00:00Z")
+	n, err = s.CountAgentMessagesAfter(thID, "probe", humanSeq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("count after the trigger = %d, want 1", n)
+	}
+	n, err = s.CountAgentMessagesAfter(thID, "probe", agentSeq)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if n != 0 {
-		t.Fatalf("future window count = %d, want 0", n)
+		t.Fatalf("count after the agent post = %d, want 0: the bound is exclusive", n)
 	}
 }
 

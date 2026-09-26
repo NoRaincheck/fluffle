@@ -51,8 +51,8 @@ func buildPrompt(in promptInput) (string, error) {
 You are agent %q in fluffle thread %d.
 Post your reply with:
 
-    flf message send --thread %d --text "<your reply>" --agent-id %s
-`, in.Agent.Name, in.Thread.ThreadID, in.Thread.ThreadID, in.Agent.Name)
+    flf message send --thread %d --reply-to-seq %d --text "<your reply>" --agent-id %s
+`, in.Agent.Name, in.Thread.ThreadID, in.Thread.ThreadID, in.Trigger.Seq, in.Agent.Name)
 		if in.Agent.Reply == "auto" {
 			b.WriteString("\nIf you do not post, whatever you write to stdout is posted for you.\n")
 		}

@@ -47,6 +47,24 @@ func TestBuildPromptContainsContextAndRequest(t *testing.T) {
 	}
 }
 
+func TestBuildPromptThreadsTheReplyToTheTrigger(t *testing.T) {
+	got, err := buildPrompt(promptInput{
+		Agent:         entryFor("probe", "cli"),
+		Thread:        store.ThreadContext{ThreadID: 7, ThreadTitle: "t", ChannelName: "c"},
+		Trigger:       store.Message{ID: 9, ThreadID: 7, Seq: 3, Content: "@probe hi"},
+		NeedsReplying: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "--reply-to-seq 3") {
+		t.Fatalf("prompt must thread the reply to the trigger seq:\n%s", got)
+	}
+	if strings.Contains(got, "--reply-to ") {
+		t.Fatalf("reply-to and reply-to-seq are mutually exclusive:\n%s", got)
+	}
+}
+
 func TestBuildPromptOmitsReplyingBlockForStdout(t *testing.T) {
 	got, err := buildPrompt(promptInput{
 		Agent:         entryFor("probe", "stdout"),
