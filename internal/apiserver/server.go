@@ -167,7 +167,7 @@ func listThreadMessages(s *store.Store, threadID int64, w http.ResponseWriter, r
 	writeJSON(w, http.StatusOK, messages)
 }
 
-func appendThreadMessage(s *store.Store, threadID int64, w http.ResponseWriter, r *http.Request) {
+func appendThreadMessage(s *store.Store, deps Deps, threadID int64, w http.ResponseWriter, r *http.Request) {
 	var raw map[string]json.RawMessage
 	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 		writeErr(w, http.StatusBadRequest, "BAD_JSONL", err.Error())
@@ -229,6 +229,11 @@ func appendThreadMessage(s *store.Store, threadID int64, w http.ResponseWriter, 
 		writeThreadMutationError(w, err)
 		return
 	}
+	if !isAgent(r) {
+		if triggerMessageID, idErr := s.MessageIDBySeq(threadID, seq); idErr == nil {
+			deps.startSessionForMessage(threadID, triggerMessageID, body.Content)
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"seq": seq})
 }
 
@@ -278,7 +283,7 @@ func appendThreadReaction(s *store.Store, threadID, messageSeq int64, w http.Res
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-func appendThreadEvents(s *store.Store, threadID int64, w http.ResponseWriter, r *http.Request) {
+func appendThreadEvents(s *store.Store, deps Deps, threadID int64, w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeErr(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
 		return
@@ -347,6 +352,9 @@ func appendThreadEvents(s *store.Store, threadID int64, w http.ResponseWriter, r
 		writeThreadMutationError(w, err)
 		return
 	}
+	if !agentRequest {
+		deps.startSessionsForBatch(s, threadID, results)
+	}
 	writeJSON(w, http.StatusOK, results)
 }
 
@@ -364,6 +372,10 @@ func writeThreadMutationError(w http.ResponseWriter, err error) {
 }
 
 func NewHandler(s *store.Store) http.Handler {
+	return NewHandlerWithDeps(s, Deps{})
+}
+
+func NewHandlerWithDeps(s *store.Store, d Deps) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
@@ -487,7 +499,7 @@ func NewHandler(s *store.Store) http.Handler {
 			writeErr(w, http.StatusNotFound, "THREAD_NOT_FOUND", "unknown route")
 			return
 		}
-		knownRoute := len(parts) == 2 && (parts[1] == "messages" || parts[1] == "reactions" || parts[1] == "events")
+		knownRoute := len(parts) == 2 && (parts[1] == "messages" || parts[1] == "reactions" || parts[1] == "events" || parts[1] == "sessions")
 		knownRoute = knownRoute || (len(parts) == 4 && parts[1] == "messages" && parts[3] == "reactions")
 		if !knownRoute {
 			writeErr(w, http.StatusNotFound, "THREAD_NOT_FOUND", "unknown route")
@@ -504,14 +516,29 @@ func NewHandler(s *store.Store) http.Handler {
 			case http.MethodGet:
 				listThreadMessages(s, threadID, w, r)
 			case http.MethodPost:
-				appendThreadMessage(s, threadID, w, r)
+				appendThreadMessage(s, d, threadID, w, r)
 			default:
 				writeErr(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
 			}
 		case len(parts) == 2 && parts[1] == "reactions":
 			listThreadReactions(s, threadID, w, r)
 		case len(parts) == 2 && parts[1] == "events":
-			appendThreadEvents(s, threadID, w, r)
+			appendThreadEvents(s, d, threadID, w, r)
+		case len(parts) == 2 && parts[1] == "sessions":
+			if r.Method != http.MethodGet {
+				writeErr(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
+				return
+			}
+			if _, err := s.ThreadContext(threadID); err != nil {
+				writeThreadMutationError(w, err)
+				return
+			}
+			list, err := s.ListSessions(threadID)
+			if err != nil {
+				writeSessionError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, list)
 		case len(parts) == 4 && parts[1] == "messages" && parts[3] == "reactions":
 			messageSeq, err := strconv.ParseInt(parts[2], 10, 64)
 			if err != nil || messageSeq <= 0 {
@@ -574,5 +601,6 @@ func NewHandler(s *store.Store) http.Handler {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
 	mux.HandleFunc("/api/shutdown", shutdownHandler(s))
+	registerSessionRoutes(mux, s, d)
 	return jsonMuxHandler(mux)
 }
