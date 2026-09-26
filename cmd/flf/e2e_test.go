@@ -1879,3 +1879,353 @@ func TestE2E_AgentSessionCmdRequiresID(t *testing.T) {
 		}
 	}
 }
+
+// jsonIDField reads one id out of a --json response. flf channel create --json
+// emits "id" from the anonymous struct it falls back to and "ID" from a
+// store.Channel with no json tag, so either key is a real answer. runCLI only
+// logs a non-zero exit, so parsing the output is what catches a failed create.
+func jsonIDField(t *testing.T, out, field string) string {
+	t.Helper()
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		t.Fatalf("unmarshal %q: %v", out, err)
+	}
+	if v, ok := payload[field]; ok {
+		return fmt.Sprintf("%v", v)
+	}
+	if field == "id" {
+		if v, ok := payload["ID"]; ok {
+			return fmt.Sprintf("%v", v)
+		}
+	}
+	t.Fatalf("field %q missing from %q", field, out)
+	return ""
+}
+
+// e2eProcessGroupAlive reports whether any process remains in pgid.
+// os.FindProcess always succeeds on Unix and never sees a grandchild, so the
+// only usable probe for a reaped-but-orphaned agent is the group itself.
+func e2eProcessGroupAlive(pgid int) bool {
+	return syscall.Kill(-pgid, syscall.Signal(0)) == nil
+}
+
+func e2eGetJSON(t *testing.T, url string, into any) {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s: status %d", url, resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(into); err != nil {
+		t.Fatalf("GET %s: decode: %v", url, err)
+	}
+}
+
+func TestE2E_AgentMentionRunsAgentAndStoresSession(t *testing.T) {
+	tmpDir := t.TempDir()
+	home := filepath.Join(tmpDir, "fluffle")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := buildTestBinary(t, tmpDir)
+	env := []string{"FLUFFLE_HOME=" + home}
+
+	probe := filepath.Join(tmpDir, "probe-agent")
+	if err := os.WriteFile(probe, []byte("#!/bin/sh\ncat > /dev/null\nprintf 'the answer'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	config := "[[agents]]\nname=\"probe\"\ncommand=\"" + probe + "\"\nreply=\"stdout\"\ntimeout_secs=20\n"
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	repo := t.TempDir()
+	gitInit(t, repo)
+	// The daemon persists the canonicalized repo path while t.TempDir hands
+	// back the symlinked one on macOS, so the assertion compares canonical forms.
+	canonicalRepo, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stop := startAgentDaemon(t, bin, home)
+	port := waitForDaemonReady(t, home, 10*time.Second)
+
+	channelID := jsonIDField(t, runCLI(t, env, bin, "channel", "create", "--name", "eng", "--repo", repo, "--json"), "id")
+	threadArg := jsonIDField(t, runCLI(t, env, bin, "thread", "new", "--channel", "eng", "--repo", repo, "--title", "review", "--json"), "id")
+	threadID, err := strconv.ParseInt(threadArg, 10, 64)
+	if err != nil || channelID == "0" || threadID <= 0 {
+		t.Fatalf("channel = %q thread = %q: %v", channelID, threadArg, err)
+	}
+
+	triggerOut := runCLI(t, env, bin, "message", "send", "--thread", threadArg, "--text", "@probe what is the status?", "--as", "alice", "--json")
+	var trigger struct {
+		Seq int64 `json:"seq"`
+	}
+	if err := json.Unmarshal([]byte(triggerOut), &trigger); err != nil || trigger.Seq <= 0 {
+		t.Fatalf("trigger message: err=%v out=%s", err, triggerOut)
+	}
+
+	var replySeq int64
+	if !waitFor(t, 40*time.Second, func() bool {
+		out := runCLI(t, env, bin, "agent", "read", "--thread", threadArg, "--json")
+		for _, line := range strings.Split(out, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			var entry struct {
+				Type       string `json:"type"`
+				Name       string `json:"name"`
+				AuthorType string `json:"author_type"`
+				Content    string `json:"content"`
+				Seq        int64  `json:"seq"`
+			}
+			if err := json.Unmarshal([]byte(line), &entry); err != nil {
+				t.Fatalf("bad agent read line %q: %v", line, err)
+			}
+			if entry.Type == "message" && entry.AuthorType == "agent" && entry.Name == "probe" {
+				if entry.Content != "the answer" {
+					t.Fatalf("agent reply content = %q", entry.Content)
+				}
+				replySeq = entry.Seq
+				return true
+			}
+		}
+		return false
+	}) {
+		t.Fatalf("agent never replied within 40s: %s", runCLI(t, env, bin, "agent", "read", "--thread", threadArg, "--json"))
+	}
+	if replySeq <= trigger.Seq {
+		t.Fatalf("reply seq = %d, want greater than the trigger seq %d", replySeq, trigger.Seq)
+	}
+
+	// The reply message is appended before the session goes terminal, so a
+	// single read here can still see a running session.
+	var (
+		last    cliResult
+		payload sessionPayload
+	)
+	if !waitFor(t, 40*time.Second, func() bool {
+		last = runCLIResult(t, env, bin, "", "agent", "session", "--id", "1", "--json")
+		if last.exitCode != 0 {
+			return false
+		}
+		payload = sessionPayload{}
+		if err := json.Unmarshal([]byte(last.stdout), &payload); err != nil {
+			return false
+		}
+		return payload.Session.Status == store.SessionSucceeded
+	}) {
+		t.Fatalf("session never succeeded: exit=%d stdout=%q stderr=%q", last.exitCode, last.stdout, last.stderr)
+	}
+	sess := payload.Session
+	if sess.Status != store.SessionSucceeded {
+		t.Fatalf("session status = %q error %v", sess.Status, sess.Error)
+	}
+	if sess.AgentName != "probe" || sess.ReplyMode != "stdout" {
+		t.Fatalf("session = %+v", sess)
+	}
+	if sess.ReplyMessageID == nil {
+		t.Fatalf("session has no reply message id: %+v", sess)
+	}
+	if !strings.Contains(sess.Command, probe) {
+		t.Fatalf("session command = %q, want it to contain %q", sess.Command, probe)
+	}
+	if sess.Cwd == nil || *sess.Cwd != canonicalRepo {
+		t.Fatalf("session cwd = %v, want %q", sess.Cwd, canonicalRepo)
+	}
+	types := map[string]bool{}
+	for _, event := range payload.Events {
+		types[event.Type] = true
+	}
+	for _, want := range []string{store.SessionEventPrompt, store.SessionEventStdout, store.SessionEventExit} {
+		if !types[want] {
+			t.Fatalf("missing %q event; got %v", want, types)
+		}
+	}
+
+	human := runCLI(t, env, bin, "agent", "session", "--id", "1")
+	if !strings.Contains(human, "probe") || !strings.Contains(human, "the answer") {
+		t.Fatalf("human session output = %q", human)
+	}
+
+	// The pane the TUI renders is driven by the thread-scoped list, which
+	// carries no events: the TUI fetches the detail for a session it keys on.
+	base := "http://127.0.0.1:" + strconv.Itoa(port)
+	var listed []store.Session
+	e2eGetJSON(t, base+"/v1/threads/"+strconv.FormatInt(threadID, 10)+"/sessions", &listed)
+	var found *store.Session
+	for i := range listed {
+		if listed[i].ID == sess.ID {
+			found = &listed[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("thread %d sessions = %+v, want session %d", threadID, listed, sess.ID)
+	}
+	if found.AgentName != "probe" || found.Status != store.SessionSucceeded ||
+		found.TriggerMessageID != sess.TriggerMessageID || found.ThreadID != threadID {
+		t.Fatalf("listed session = %+v", *found)
+	}
+	var detail sessionPayload
+	e2eGetJSON(t, base+"/v1/sessions/"+strconv.FormatInt(sess.ID, 10), &detail)
+	if detail.Session.ID != sess.ID || len(detail.Events) == 0 {
+		t.Fatalf("session detail = %+v, want session %d with events", detail, sess.ID)
+	}
+
+	stop()
+}
+
+func TestE2E_AgentMentionWithMissingBinaryFailsVisibly(t *testing.T) {
+	tmpDir := t.TempDir()
+	home := filepath.Join(tmpDir, "fluffle")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := buildTestBinary(t, tmpDir)
+	env := []string{"FLUFFLE_HOME=" + home}
+
+	repo := t.TempDir()
+	gitInit(t, repo)
+	config := "[[agents]]\nname=\"ghost\"\ncommand=\"/definitely/not/here\"\nreply=\"stdout\"\ntimeout_secs=5\n"
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stop := startAgentDaemon(t, bin, home)
+
+	channelID := jsonIDField(t, runCLI(t, env, bin, "channel", "create", "--name", "eng", "--repo", repo, "--json"), "id")
+	threadArg := jsonIDField(t, runCLI(t, env, bin, "thread", "new", "--channel", "eng", "--repo", repo, "--title", "t", "--json"), "id")
+	if channelID == "0" || threadArg == "0" {
+		t.Fatalf("channel = %q thread = %q, want real ids", channelID, threadArg)
+	}
+	runCLI(t, env, bin, "message", "send", "--thread", threadArg, "--text", "@ghost hello", "--as", "alice", "--json")
+
+	var (
+		last   cliResult
+		failed store.Session
+	)
+	if !waitFor(t, 30*time.Second, func() bool {
+		last = runCLIResult(t, env, bin, "", "agent", "session", "--id", "1", "--json")
+		if last.exitCode != 0 {
+			return false
+		}
+		var payload sessionPayload
+		if err := json.Unmarshal([]byte(last.stdout), &payload); err != nil {
+			return false
+		}
+		failed = payload.Session
+		return failed.Status == store.SessionFailed && failed.Error != nil
+	}) {
+		t.Fatalf("a missing agent binary must fail the session visibly; got exit=%d stdout=%q stderr=%q", last.exitCode, last.stdout, last.stderr)
+	}
+	if !strings.Contains(*failed.Error, "/definitely/not/here") {
+		t.Fatalf("session error = %q, want it to name the missing command", *failed.Error)
+	}
+
+	stop()
+}
+
+func TestE2E_AgentDaemonStopReapsRunningAgent(t *testing.T) {
+	tmpDir := t.TempDir()
+	home := filepath.Join(tmpDir, "fluffle")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := buildTestBinary(t, tmpDir)
+	env := []string{"FLUFFLE_HOME=" + home}
+	repo := t.TempDir()
+	gitInit(t, repo)
+
+	pidFile := filepath.Join(tmpDir, "probe.pid")
+	probe := filepath.Join(tmpDir, "blocking-agent")
+	if err := os.WriteFile(probe, []byte("#!/bin/sh\necho $$ > \""+pidFile+"\"\nsleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	config := "[[agents]]\nname=\"blocker\"\ncommand=\"" + probe + "\"\nreply=\"stdout\"\ntimeout_secs=60\n"
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stop := startAgentDaemon(t, bin, home)
+	_, daemonPID := readDaemonJSON(t, home)
+
+	channelID := jsonIDField(t, runCLI(t, env, bin, "channel", "create", "--name", "eng", "--repo", repo, "--json"), "id")
+	threadArg := jsonIDField(t, runCLI(t, env, bin, "thread", "new", "--channel", "eng", "--repo", repo, "--title", "t", "--json"), "id")
+	if channelID == "0" || threadArg == "0" {
+		t.Fatalf("channel = %q thread = %q, want real ids", channelID, threadArg)
+	}
+	runCLI(t, env, bin, "message", "send", "--thread", threadArg, "--text", "@blocker go", "--as", "alice", "--json")
+
+	var (
+		last cliResult
+		sess store.Session
+	)
+	if !waitFor(t, 20*time.Second, func() bool {
+		last = runCLIResult(t, env, bin, "", "agent", "session", "--id", "1", "--json")
+		if last.exitCode != 0 {
+			return false
+		}
+		var payload sessionPayload
+		if err := json.Unmarshal([]byte(last.stdout), &payload); err != nil {
+			return false
+		}
+		sess = payload.Session
+		return sess.Status == store.SessionRunning
+	}) {
+		t.Fatalf("session never reached running: exit=%d stdout=%q stderr=%q", last.exitCode, last.stdout, last.stderr)
+	}
+
+	probePID := 0
+	if !waitFor(t, 20*time.Second, func() bool {
+		data, err := os.ReadFile(pidFile)
+		if err != nil {
+			return false
+		}
+		probePID, err = strconv.Atoi(strings.TrimSpace(string(data)))
+		return err == nil && probePID > 0
+	}) {
+		t.Fatalf("probe never published its pid to %s", pidFile)
+	}
+	if !e2eProcessGroupAlive(probePID) {
+		t.Fatalf("probe process group %d is already gone: the test would prove nothing", probePID)
+	}
+	t.Cleanup(func() {
+		if e2eProcessGroupAlive(probePID) {
+			_ = syscall.Kill(-probePID, syscall.SIGKILL)
+		}
+	})
+
+	stopResult := runCLIResult(t, env, bin, "", "daemon", "stop")
+	if stopResult.exitCode != 0 {
+		t.Fatalf("daemon stop: exit=%d stdout=%q stderr=%q", stopResult.exitCode, stopResult.stdout, stopResult.stderr)
+	}
+	if !waitFor(t, 10*time.Second, func() bool { return !e2eProcessGroupAlive(daemonPID) }) {
+		t.Fatalf("daemon %d survived flf daemon stop", daemonPID)
+	}
+	if !waitFor(t, 10*time.Second, func() bool { return !e2eProcessGroupAlive(probePID) }) {
+		t.Fatalf("agent process group %d survived flf daemon stop: the Setpgid/Kill(-pgid) path leaks subprocesses", probePID)
+	}
+	stop()
+
+	startAgentDaemon(t, bin, home)
+	restarted := runCLIResult(t, env, bin, "", "agent", "session", "--id", "1", "--json")
+	if restarted.exitCode != 0 {
+		t.Fatalf("session after restart: exit=%d stdout=%q stderr=%q", restarted.exitCode, restarted.stdout, restarted.stderr)
+	}
+	var payload sessionPayload
+	if err := json.Unmarshal([]byte(restarted.stdout), &payload); err != nil {
+		t.Fatalf("session after restart: err=%v out=%s", err, restarted.stdout)
+	}
+	if payload.Session.ID != sess.ID {
+		t.Fatalf("session after restart = %+v, want session %d", payload.Session, sess.ID)
+	}
+	if payload.Session.Status != store.SessionCanceled {
+		t.Fatalf("session status after restart = %q, want %q: a session left in %q means daemon stop skipped the session barrier",
+			payload.Session.Status, store.SessionCanceled, store.SessionRunning)
+	}
+}
