@@ -4,27 +4,32 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/NoRaincheck/fluffle/internal/store"
 )
 
+type eventAppender interface {
+	AppendSessionEvent(sessionID int64, eventType, content string) (int64, int64, error)
+}
+
 type streamWriter struct {
-	store   *store.Store
+	store   eventAppender
 	session int64
 
-	mu   sync.Mutex
-	bufs map[string]*strings.Builder
-	done bool
+	mu      sync.Mutex
+	bufs    map[string]*strings.Builder
+	flushes map[string]*sync.Mutex
+	done    bool
 
 	stop chan struct{}
 	wg   sync.WaitGroup
+	once sync.Once
 }
 
-func newStreamWriter(s *store.Store, sessionID int64) *streamWriter {
+func newStreamWriter(s eventAppender, sessionID int64) *streamWriter {
 	w := &streamWriter{
 		store:   s,
 		session: sessionID,
 		bufs:    map[string]*strings.Builder{"stdout": {}, "stderr": {}},
+		flushes: map[string]*sync.Mutex{"stdout": {}, "stderr": {}},
 		stop:    make(chan struct{}),
 	}
 	w.wg.Add(1)
@@ -62,6 +67,12 @@ func (w *streamWriter) write(stream string, b []byte) {
 }
 
 func (w *streamWriter) flush(stream string) {
+	flushMu, known := w.flushes[stream]
+	if !known {
+		return
+	}
+	flushMu.Lock()
+	defer flushMu.Unlock()
 	w.mu.Lock()
 	buf, ok := w.bufs[stream]
 	if !ok || w.done || buf.Len() == 0 {
@@ -81,16 +92,12 @@ func (w *streamWriter) flushAll() {
 }
 
 func (w *streamWriter) closeAll() {
-	w.mu.Lock()
-	if w.done {
+	w.once.Do(func() {
+		close(w.stop)
+		w.wg.Wait()
+		w.flushAll()
+		w.mu.Lock()
+		w.done = true
 		w.mu.Unlock()
-		return
-	}
-	w.mu.Unlock()
-	close(w.stop)
-	w.wg.Wait()
-	w.flushAll()
-	w.mu.Lock()
-	w.done = true
-	w.mu.Unlock()
+	})
 }

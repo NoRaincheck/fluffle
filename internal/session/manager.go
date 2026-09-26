@@ -32,6 +32,7 @@ type Manager struct {
 	sem    chan struct{}
 	ctx    context.Context
 	cancel context.CancelFunc
+	wg     sync.WaitGroup
 
 	mu      sync.Mutex
 	running map[int64]context.CancelFunc
@@ -101,12 +102,14 @@ func (m *Manager) Start(threadID, triggerMessageID int64, names []string) {
 			continue
 		}
 		m.queued[id] = true
+		m.wg.Add(1)
 		m.mu.Unlock()
 		go m.dispatch(id, entry, tc, trigger)
 	}
 }
 
 func (m *Manager) dispatch(id int64, entry agentcfg.Entry, tc store.ThreadContext, trigger store.Message) {
+	defer m.wg.Done()
 	select {
 	case m.sem <- struct{}{}:
 	case <-m.ctx.Done():
@@ -146,7 +149,7 @@ func (m *Manager) dropQueued(id int64) {
 
 func (m *Manager) run(ctx context.Context, id int64, entry agentcfg.Entry, tc store.ThreadContext, trigger store.Message) {
 	if err := m.store.MarkSessionRunning(id, nowRFC3339()); err != nil {
-		m.failSession(id, err)
+		m.failIfStillQueued(id, err)
 		return
 	}
 	prompt, err := buildPrompt(promptInput{
@@ -194,6 +197,13 @@ func (m *Manager) run(ctx context.Context, id int64, entry agentcfg.Entry, tc st
 func (m *Manager) failSession(id int64, err error) {
 	m.store.AppendSessionEvent(id, store.SessionEventError, err.Error())
 	m.store.FinishSession(id, store.SessionFailed, nil, stringPtr(err.Error()), nowRFC3339())
+}
+
+func (m *Manager) failIfStillQueued(id int64, err error) {
+	if sess, getErr := m.store.GetSession(id); getErr == nil && sess.Status != store.SessionQueued {
+		return
+	}
+	m.failSession(id, err)
 }
 
 func (m *Manager) historyFor(threadID int64) []jsonl.Line {
@@ -251,6 +261,7 @@ func (m *Manager) Shutdown() {
 	m.mu.Unlock()
 
 	m.cancel()
+	m.wg.Wait()
 	for _, id := range queued {
 		m.store.FinishSession(id, store.SessionCanceled, nil, stringPtr("daemon shut down before start"), nowRFC3339())
 	}

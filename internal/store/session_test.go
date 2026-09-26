@@ -152,6 +152,26 @@ func TestSessionLifecycle(t *testing.T) {
 	}
 }
 
+func TestMarkSessionRunningRejectsNonQueuedRow(t *testing.T) {
+	s, thID := newSessionFixture(t)
+	msgID := triggerMessage(t, s, thID, "@probe hi")
+	id, _ := s.CreateSession(thID, msgID, "probe", SessionQueued, "auto", "c", nil)
+	if err := s.MarkSessionRunning(id, "2026-01-01T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	code := int64(0)
+	if err := s.FinishSession(id, SessionSucceeded, &code, nil, "2026-01-01T00:01:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkSessionRunning(id, "2026-01-01T00:02:00Z"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("MarkSessionRunning on a succeeded row = %v, want ErrNotFound", err)
+	}
+	got, _ := s.GetSession(id)
+	if got.Status != SessionSucceeded {
+		t.Fatalf("status = %q, want succeeded: a finished session must not be resurrected", got.Status)
+	}
+}
+
 func TestSessionUpdatesRejectMissingRow(t *testing.T) {
 	s, _ := newSessionFixture(t)
 	if err := s.MarkSessionRunning(9999, "t"); !errors.Is(err, ErrNotFound) {

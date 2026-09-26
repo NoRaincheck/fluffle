@@ -23,6 +23,7 @@ type fakeRunner struct {
 	stdout      string
 	stderr      string
 	chunk       int
+	chunkDelay  time.Duration
 	exit        int
 	err         error
 	delay       time.Duration
@@ -83,6 +84,9 @@ func (f *fakeRunner) Run(ctx context.Context, req runner.Request) (runner.Result
 			end = len(f.stdout)
 		}
 		req.OnChunk("stdout", []byte(f.stdout[i:end]))
+		if f.chunkDelay > 0 {
+			time.Sleep(f.chunkDelay)
+		}
 	}
 	if f.stderr != "" {
 		req.OnChunk("stderr", []byte(f.stderr))
@@ -409,6 +413,123 @@ func TestCoalescedOutputLosesNothing(t *testing.T) {
 	}
 }
 
+func stdoutEventContents(t *testing.T, s *store.Store, id int64) []string {
+	t.Helper()
+	events, err := s.ListSessionEvents(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, e := range events {
+		if e.Type == store.SessionEventStdout {
+			out = append(out, e.Content)
+		}
+	}
+	return out
+}
+
+func TestStreamWriterFlushesOnByteThreshold(t *testing.T) {
+	const chunk = 1024
+	fr := &fakeRunner{stdout: strings.Repeat("0123456789", 32*chunk/10), chunk: chunk}
+	s, m, thID, msgID := harness(t, probeCfg, fr)
+	m.Start(thID, msgID, []string{"probe"})
+	got := waitSession(t, s, onlySession(t, s, thID).ID, 10*time.Second)
+
+	events := stdoutEventContents(t, s, got.ID)
+	if len(events) < 2 {
+		t.Fatalf("stdout events = %d, want at least 2: the byte threshold must flush before the stream closes", len(events))
+	}
+	for i, e := range events {
+		if len(e) > StreamFlushBytes+chunk {
+			t.Fatalf("stdout event %d is %d bytes, want at most %d", i, len(e), StreamFlushBytes+chunk)
+		}
+	}
+}
+
+func TestStreamWriterFlushesOnTimer(t *testing.T) {
+	fr := &fakeRunner{stdout: strings.Repeat("x", 2048), chunk: 512, chunkDelay: 100 * time.Millisecond}
+	s, m, thID, msgID := harness(t, probeCfg, fr)
+	m.Start(thID, msgID, []string{"probe"})
+	got := waitSession(t, s, onlySession(t, s, thID).ID, 10*time.Second)
+
+	events := stdoutEventContents(t, s, got.ID)
+	if len(events) < 2 {
+		t.Fatalf("stdout events = %d, want at least 2: output below the byte threshold must still be flushed every %v", len(events), StreamFlushInterval)
+	}
+	var joined strings.Builder
+	for _, e := range events {
+		joined.WriteString(e)
+	}
+	if joined.String() != fr.stdout {
+		t.Fatalf("timer flush lost data: got %d bytes, want %d", joined.Len(), len(fr.stdout))
+	}
+}
+
+func TestHistoryForOrdersMessagesThenReactions(t *testing.T) {
+	fr := &fakeRunner{stdout: "x"}
+	s, m, thID, firstMsgID := harness(t, probeCfg, fr)
+	second, _ := s.AppendMessage(thID, "bob", "human", "user", "beta")
+	third, _ := s.AppendMessage(thID, "probe", "agent", "assistant", "gamma")
+	if err := s.AddReaction(firstMsgID, "👀", "carol", "human"); err != nil {
+		t.Fatal(err)
+	}
+
+	lines := m.historyFor(thID)
+	if len(lines) != 4 {
+		t.Fatalf("history lines = %d, want 4: %+v", len(lines), lines)
+	}
+	for i, wantSeq := range []int64{1, second, third} {
+		if lines[i].Type != "message" || lines[i].Seq != wantSeq {
+			t.Fatalf("line %d = %+v, want a message with seq %d", i, lines[i], wantSeq)
+		}
+	}
+	if lines[3].Type != "reaction" {
+		t.Fatalf("line 3 = %+v, want the reaction after every message", lines[3])
+	}
+	if lines[3].MessageSeq != 1 {
+		t.Fatalf("reaction message_seq = %d, want 1", lines[3].MessageSeq)
+	}
+	if lines[3].Emoji != "👀" || lines[3].Name != "carol" || lines[3].AuthorType != "human" {
+		t.Fatalf("reaction = %+v", lines[3])
+	}
+}
+
+func TestPromptCarriesHistoryInOrder(t *testing.T) {
+	fr := &fakeRunner{stdout: "x"}
+	s, m, thID, firstMsgID := harness(t, probeCfg, fr)
+	s.AppendMessage(thID, "bob", "human", "user", "beta")
+	s.AppendMessage(thID, "probe", "agent", "assistant", "gamma")
+	if err := s.AddReaction(firstMsgID, "👀", "carol", "human"); err != nil {
+		t.Fatal(err)
+	}
+	m.Start(thID, firstMsgID, []string{"probe"})
+	got := waitSession(t, s, onlySession(t, s, thID).ID, 10*time.Second)
+
+	var prompt string
+	events, err := s.ListSessionEvents(got.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range events {
+		if e.Type == store.SessionEventPrompt {
+			prompt = e.Content
+		}
+	}
+	start := strings.Index(prompt, "## History")
+	end := strings.Index(prompt, "## Request")
+	if start < 0 || end < start {
+		t.Fatalf("prompt is missing its history section:\n%s", prompt)
+	}
+	section := prompt[start:end]
+	idx := func(needle string) int { return strings.Index(section, needle) }
+	if idx("do xyz") < 0 || idx("beta") < 0 || idx("gamma") < 0 || idx("👀") < 0 {
+		t.Fatalf("history section is missing content:\n%s", section)
+	}
+	if !(idx("do xyz") < idx("beta") && idx("beta") < idx("gamma") && idx("gamma") < idx("👀")) {
+		t.Fatalf("history section is out of order:\n%s", section)
+	}
+}
+
 func TestReconcileTerminatesStaleRows(t *testing.T) {
 	fr := &fakeRunner{stdout: "x"}
 	s, m, thID, msgID := harness(t, probeCfg, fr)
@@ -446,26 +567,97 @@ func TestShutdownCancelsRunningAndQueuedSessions(t *testing.T) {
 	}
 	m.Shutdown()
 	m.Shutdown()
+	list, _ := s.ListSessions(thID)
+	if len(list) != MaxConcurrentSessions+2 {
+		t.Fatalf("sessions = %d, want %d", len(list), MaxConcurrentSessions+2)
+	}
+	for _, sess := range list {
+		if sess.Status != store.SessionCanceled {
+			t.Fatalf("session %d status = %q, want canceled the moment Shutdown returns", sess.ID, sess.Status)
+		}
+		if sess.StartedAt != nil && *sess.StartedAt == "" {
+			t.Fatalf("session %d has an empty started_at", sess.ID)
+		}
+	}
+}
+
+func waitForStatus(t *testing.T, s *store.Store, id int64, want string, timeout time.Duration) store.Session {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last store.Session
+	for time.Now().Before(deadline) {
+		got, err := s.GetSession(id)
+		if err == nil {
+			last = got
+			if got.Status == want {
+				return got
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("session %d status = %q, want %q", id, last.Status, want)
+	return store.Session{}
+}
+
+func splitRunningAndQueued(t *testing.T, s *store.Store, thID int64) (running, queued []int64) {
+	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		list, _ := s.ListSessions(thID)
-		all := len(list) > 0
+		list, err := s.ListSessions(thID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		running, queued = nil, nil
 		for _, sess := range list {
-			if sess.Status == store.SessionQueued || sess.Status == store.SessionRunning {
-				all = false
+			switch sess.Status {
+			case store.SessionRunning:
+				running = append(running, sess.ID)
+			case store.SessionQueued:
+				queued = append(queued, sess.ID)
 			}
 		}
-		if all {
-			for _, sess := range list {
-				if sess.Status != store.SessionCanceled {
-					t.Fatalf("session %d status = %q, want canceled", sess.ID, sess.Status)
-				}
-			}
-			return
+		if len(running) == MaxConcurrentSessions && len(queued) == 1 {
+			return running, queued
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("sessions did not all reach canceled after Shutdown")
+	t.Fatalf("running = %d queued = %d, want %d and 1", len(running), len(queued), MaxConcurrentSessions)
+	return nil, nil
+}
+
+func TestCancelQueuedSessionNeverRunsIt(t *testing.T) {
+	fr := &fakeRunner{delay: 30 * time.Second}
+	s, m, thID, _ := harness(t, probeCfg, fr)
+	for i := 0; i < MaxConcurrentSessions+1; i++ {
+		seq, _ := s.AppendMessage(thID, "alice", "human", "user", "@probe hi")
+		id, _ := s.MessageIDBySeq(thID, seq)
+		m.Start(thID, id, []string{"probe"})
+	}
+	running, queued := splitRunningAndQueued(t, s, thID)
+	callsBefore := fr.callCount()
+
+	if err := m.Cancel(queued[0]); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.GetSession(queued[0]); got.Status != store.SessionCanceled {
+		t.Fatalf("status = %q, want canceled", got.Status)
+	}
+	if err := m.Cancel(running[0]); err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, s, running[0], store.SessionCanceled, 10*time.Second)
+	time.Sleep(200 * time.Millisecond)
+
+	if got := fr.callCount(); got != callsBefore {
+		t.Fatalf("runner calls = %d, want %d: a canceled queued session must not spawn an agent", got, callsBefore)
+	}
+	got, _ := s.GetSession(queued[0])
+	if got.Status != store.SessionCanceled {
+		t.Fatalf("session %d status = %q, want canceled", got.ID, got.Status)
+	}
+	if got.StartedAt != nil {
+		t.Fatalf("started_at = %q, want NULL for a session that never ran", *got.StartedAt)
+	}
 }
 
 func TestCancelUnknownIsNotFound(t *testing.T) {

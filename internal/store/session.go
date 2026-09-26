@@ -138,7 +138,7 @@ func (s *Store) GetSession(id int64) (Session, error) {
 }
 
 func (s *Store) MarkSessionRunning(id int64, startedAt string) error {
-	return s.execSessionUpdate(`UPDATE agent_sessions SET status = ?, started_at = ? WHERE id = ?`, SessionRunning, startedAt, id)
+	return s.execSessionUpdate(`UPDATE agent_sessions SET status = ?, started_at = ? WHERE id = ? AND status = ?`, SessionRunning, startedAt, id, SessionQueued)
 }
 
 func (s *Store) SetSessionReply(id int64, replyMessageID int64) error {
