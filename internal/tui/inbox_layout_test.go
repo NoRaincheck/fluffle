@@ -118,14 +118,14 @@ func TestInboxLayoutToggleWithL(t *testing.T) {
 
 func TestInboxLayoutToggleWithUppercaseL(t *testing.T) {
 	m := layoutModel(t, "http://127.0.0.1:0", 140, 24)
-	m.preview = true
+	m.preview = false
 	nm, _ := m.Update(keyRunes("L"))
 	m = toModel(nm)
 	if m.inboxLayout != inboxLayoutFull {
 		t.Fatalf("L should switch to full, got %v", m.inboxLayout)
 	}
-	if !m.preview {
-		t.Fatalf("L should no longer toggle preview")
+	if m.preview {
+		t.Fatalf("L should not enable preview")
 	}
 }
 
@@ -421,9 +421,6 @@ func TestInboxFullLayoutSuppressesPreviewSplit(t *testing.T) {
 	m = toModel(nm)
 	nm, _ = m.Update(fullRowsFetchedMsg{rows: layoutFullRows()})
 	m = toModel(nm)
-	if !m.preview {
-		t.Fatalf("toggling layout should not clear the preview preference")
-	}
 	if m.previewVisible() {
 		t.Fatalf("full layout should suppress the preview split")
 	}
@@ -439,8 +436,13 @@ func TestInboxFullLayoutSuppressesPreviewSplit(t *testing.T) {
 	}
 	nm, _ = m.Update(keyRunes("l"))
 	m = toModel(nm)
+	if m.previewVisible() {
+		t.Fatalf("returning to compact should not silently re-enable preview")
+	}
+	nm, _ = m.Update(keyRunes("p"))
+	m = toModel(nm)
 	if !m.previewVisible() {
-		t.Fatalf("compact layout should restore the preview split")
+		t.Fatalf("p in compact should restore the preview split")
 	}
 }
 
@@ -480,6 +482,86 @@ func TestInboxFullLayoutDoesNotFetchPreview(t *testing.T) {
 	defer mu.Unlock()
 	if hits["/v1/threads/10/messages"] != 1 || hits["/v1/threads/11/messages"] != 1 {
 		t.Fatalf("expected exactly one fetch per thread, got %v", hits)
+	}
+}
+
+func TestLayoutFullTurnsPreviewOff(t *testing.T) {
+	m := layoutModel(t, "http://127.0.0.1:0", 140, 24)
+	m.preview = true
+	if !m.previewVisible() {
+		t.Fatalf("precondition: preview should be visible in compact")
+	}
+	nm, _ := m.Update(keyRunes("l"))
+	m = toModel(nm)
+	if m.inboxLayout != inboxLayoutFull {
+		t.Fatalf("l should switch to full, got %v", m.inboxLayout)
+	}
+	if m.preview {
+		t.Fatalf("switching to full should treat preview as off")
+	}
+	if m.previewVisible() {
+		t.Fatalf("preview should not be visible in full layout")
+	}
+}
+
+func TestLayoutToggleRoundTripWithPreview(t *testing.T) {
+	m := layoutModel(t, "http://127.0.0.1:0", 140, 24)
+	m.preview = false
+	press := func(k string) model {
+		nm, _ := m.Update(keyRunes(k))
+		return toModel(nm)
+	}
+	m = press("p")
+	if !m.preview || m.inboxLayout != inboxLayoutCompact {
+		t.Fatalf("p on: preview=%v layout=%v", m.preview, m.inboxLayout)
+	}
+	m = press("l")
+	if m.preview || m.inboxLayout != inboxLayoutFull {
+		t.Fatalf("l to full: preview=%v layout=%v", m.preview, m.inboxLayout)
+	}
+	m = press("p")
+	if !m.preview || m.inboxLayout != inboxLayoutCompact {
+		t.Fatalf("p on: preview=%v layout=%v", m.preview, m.inboxLayout)
+	}
+	m = press("L")
+	if m.preview || m.inboxLayout != inboxLayoutFull {
+		t.Fatalf("L to full: preview=%v layout=%v", m.preview, m.inboxLayout)
+	}
+	m = press("l")
+	if m.preview || m.inboxLayout != inboxLayoutCompact {
+		t.Fatalf("l to compact: preview=%v layout=%v", m.preview, m.inboxLayout)
+	}
+}
+
+func TestPreviewOnInvariantHoldsAcrossKeySequence(t *testing.T) {
+	keys := []string{"l", "p", "L", "p", "l", "l", "p", "L", "p", "p"}
+	m := layoutModel(t, "http://127.0.0.1:0", 140, 24)
+	m.preview = false
+	for i, k := range keys {
+		nm, _ := m.Update(keyRunes(k))
+		m = toModel(nm)
+		if m.preview && m.inboxLayout != inboxLayoutCompact {
+			t.Fatalf("after %d presses (%q): preview on in %v layout", i+1, k, inboxLayoutName(m.inboxLayout))
+		}
+	}
+}
+
+func TestResizeDoesNotReEnablePreviewInFullLayout(t *testing.T) {
+	m := layoutFullModel(t, 140, 24)
+	if m.preview {
+		t.Fatalf("precondition: preview should be off in full layout")
+	}
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: 200, Height: 30})
+	m = toModel(nm)
+	if m.preview {
+		t.Fatalf("resize must not re-enable preview while the full layout is active")
+	}
+	nm, _ = m.Update(keyRunes("l"))
+	m = toModel(nm)
+	nm, _ = m.Update(tea.WindowSizeMsg{Width: 200, Height: 30})
+	m = toModel(nm)
+	if !m.preview {
+		t.Fatalf("resize should still auto-enable preview in compact layout")
 	}
 }
 

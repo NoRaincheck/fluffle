@@ -53,7 +53,7 @@ Grouped table: one row per channel/thread, showing that group's most recent mess
 | `n` | New thread: opens compose, uses channel from cursor position |
 | `v` | Toggle sort: latest-desc ↔ channel/thread + time desc |
 | `f` | Open filter (substring match on channel, then channel/thread) |
-| `l` / `L` | Toggle layout: compact ↔ full (switching to full hides the preview pane) |
+| `l` / `L` | Toggle layout: compact ↔ full (switching to full turns the preview off) |
 | `p` | Toggle preview panel (turning it on also switches to compact) |
 | `q` | Quit |
 | `Ctrl+C` | Quit |
@@ -103,7 +103,7 @@ Toggled by `p`. Shows a right-side panel with preview content for the cursor-hig
 | Terminal < 80 cols | Preview forced off, `p` has no effect |
 | Terminal 80-99 cols | Preview available, off by default, `p` toggles |
 | Terminal ≥ 100 cols | Preview auto-enabled on startup, `p` toggles |
-| Full inbox layout | Panel suppressed (rows take the full width); restored in compact |
+| Full inbox layout | Never drawn — switching to full turns the preview off |
 
 **Preview content:**
 - Title: `#channel › thread · last <time> · N replies`
@@ -113,7 +113,19 @@ Toggled by `p`. Shows a right-side panel with preview content for the cursor-hig
 
 **Not shown in full layout.** The preview panel is suppressed while the full layout is active, the same way it is suppressed in the detail view — the rows already carry the original post and every reply, and a split pane leaves too little room for the content column.
 
-**`p` implies compact.** Turning the preview **on** always switches the layout to compact, so `p` is never a silent no-op: enabling the preview guarantees you can see it. Turning the preview **off** leaves the layout alone, so `p` twice in a row is a no-op and `l` still gets you back to full.
+**Layout and preview are mutually exclusive.** Exactly one of these is true at any moment:
+
+| | compact | full |
+|---|---|---|
+| Preview off | yes | yes |
+| Preview on | yes | **never** |
+
+- `p` (preview **on**) switches to compact, so the key is never a silent no-op.
+- `l` (switching to **full**) turns the preview off, reporting `layout: full — preview off`.
+- `p` (preview **off**) leaves the layout alone, so `p` twice in a row is a no-op.
+- Resizing to ≥100 cols auto-enables the preview only in compact; it is never auto-enabled in full.
+
+In other words `preview == true` implies `layout == compact`, always.
 
 ## Compose Modal
 
@@ -147,6 +159,7 @@ Always visible at the bottom. Shows:
 - **Normal**: `inbox — N messages · ↑↓/j/k nav · r reply · v sort · f filter · q quit`
 - **Layout toggle**: `layout: full — l to switch`
 - **Preview toggle**: `preview on — p to hide` (or `preview on — p to hide · layout:compact` when `p` also switched layout)
+- **Layout toggle**: `layout: full — l to switch` (or `layout: full — preview off · l to switch` when `l` also turned the preview off)
 - **Error**: `error: DAEMON_DOWN: ...` (unreachable daemon), `error: DAEMON_ERROR: ...` (undecodable response), or `error: DELIVERY_UNKNOWN: ...` (a write that may have committed)
 - **Empty state**: `no messages — press n for new thread`
 - **Action feedback**: `sent`, `thread "name" created`

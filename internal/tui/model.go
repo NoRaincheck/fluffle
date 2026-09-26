@@ -353,7 +353,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.compose.height = 4
 		m.filter.width = max(30, msg.Width*80/100)
 		m.filter.height = 4
-		if msg.Width >= 100 && !m.preview {
+		if msg.Width >= 100 && !m.preview && m.inboxLayout != inboxLayoutFull {
 			m.preview = true
 			return m, m.syncVisibleData()
 		}
@@ -654,13 +654,19 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if m.inboxLayout == inboxLayoutFull {
 			m.inboxLayout = inboxLayoutCompact
+			m.status = "layout: compact — l to switch"
 		} else {
 			m.inboxLayout = inboxLayoutFull
+			if m.preview {
+				m.preview = false
+				m.status = "layout: full — preview off · l to switch"
+			} else {
+				m.status = "layout: full — l to switch"
+			}
 		}
 		m.cursor = 0
 		m.scroll = 0
 		m.clampCursor()
-		m.status = fmt.Sprintf("layout: %s — l to switch", inboxLayoutName(m.inboxLayout))
 		return m, m.syncVisibleData()
 	case "p":
 		m.preview = !m.preview
