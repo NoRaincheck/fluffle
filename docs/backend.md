@@ -251,7 +251,7 @@ Returns `{"ok":true}` with status 200.
 
 ### Events
 
-**`POST /v1/threads/:id/events`** — Append a complete JSONL event batch. Body: `{"events":[...],"import":false}`. Each element is normalized by the same JSONL codec the CLI uses: a missing `type` defaults to `message`, the legacy `author` key is accepted as a name alias, and per-type required fields (`name` plus `role`/`content` for messages, `name` plus `message_seq`/`emoji` for reactions) are enforced before any write. Bounded decoding is unchanged: a 1 MiB body cap, a 1000-event cap, and rejection of trailing JSON. The daemon then validates and commits the batch in one transaction. `import=true` is reserved for a human-controlled import and preserves serialized attribution as provenance; it does not grant permissions. Live agent requests derive every event's `author_type` from `X-Fluffle-Agent`. A human batch whose committed messages carry a leading mention starts agent sessions after the commit.
+**`POST /v1/threads/:id/events`** — Append a complete JSONL event batch. Body: `{"events":[...],"import":false}`. Each element is normalized by the same JSONL codec the CLI uses: a missing `type` defaults to `message`, the legacy `author` key is accepted as a name alias, and per-type required fields (`name` plus `role`/`content` for messages, `name` plus `message_seq`/`emoji` for reactions) are enforced before any write. Bounded decoding is unchanged: a 1 MiB body cap, a 1000-event cap, and rejection of trailing JSON. The daemon then validates and commits the batch in one transaction. `import=true` is reserved for a human-controlled import and preserves serialized attribution as provenance; it does not grant permissions. Live agent requests derive every event's `author_type` from `X-Fluffle-Agent`. A human batch whose committed messages carry a leading mention starts agent sessions after the commit. An `import=true` batch never does, in either direction: it is a data operation, so a human line inside an imported file does not start a session.
 
 ### Sessions
 
@@ -326,6 +326,8 @@ Fetches the thread's messages and reactions through the daemon, projects them to
 ### `thread import`
 
 Reads and parses the complete JSONL file before starting daemon work. With `--channel` (and `--repo` or `--orphaned`), it resolves or creates that channel and creates a new thread titled `import <basename>`. With `--thread ID`, it appends the batch to that explicit existing thread without creating a channel or thread. In both modes it sends one `import=true` event batch. Source message sequences are remapped to the destination thread; `parent_seq` and `message_seq` are resolved through that map. The event batch is atomic.
+
+Import is a **data operation only**: an `import=true` batch never starts an agent session, even when a human-authored line in the file opens with `@name`. The mention trigger is live-message behavior, so a shared `.jsonl` file cannot cause a subprocess to launch on the importing machine. To run an agent against an imported thread, post the request as a live message afterwards.
 
 ### `agent read`
 

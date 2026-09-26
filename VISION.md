@@ -93,6 +93,8 @@ $ flf thread export --thread 42 --format jsonl > session.jsonl
 $ flf thread import --file session.jsonl --channel "local-context"   # or --thread 42 to append
 ```
 
+Import is inert with respect to agent runs: a human `@mention` inside an imported file does not start a session, so receiving a shared thread cannot launch a subprocess on your machine. Post the request as a live message to run an agent.
+
 There is deliberately no `flf agent invoke`. An agent run is started by a human `@mention` in a message and is cancelled only by a human.
 
 ---
