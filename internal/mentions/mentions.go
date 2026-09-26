@@ -2,9 +2,8 @@ package mentions
 
 import "strings"
 
-func Parse(content string) ([]string, string) {
+func Parse(content string) (names []string, request string) {
 	rest := content
-	var names []string
 	seen := map[string]bool{}
 	for {
 		trimmed := strings.TrimLeft(rest, " \t\n\r")
