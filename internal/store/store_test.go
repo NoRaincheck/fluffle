@@ -981,3 +981,62 @@ func TestListChannelsCombinations(t *testing.T) {
 		})
 	}
 }
+
+func TestListChannelsPreservesRepoMetadata(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	const (
+		remote = "rem1abcdef"
+		sha    = "sha2bcdefg"
+		branch = "br3cdefghi"
+	)
+	if _, err := s.CreateChannel("c", "/repo", remote, sha, branch, false); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name            string
+		repoAbsPath     string
+		includeOrphaned bool
+	}{
+		{"by repo", "/repo", true},
+		{"by repo non orphaned", "/repo", false},
+		{"non orphaned", "", false},
+		{"all", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := s.ListChannels(tc.repoAbsPath, tc.includeOrphaned)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 1 {
+				t.Fatalf("got %d channels, want 1", len(got))
+			}
+			c := got[0]
+			if c.Name != "c" {
+				t.Fatalf("name = %q, want %q", c.Name, "c")
+			}
+			if c.RepoAbsPath != "/repo" {
+				t.Fatalf("repo_abs_path = %q, want %q", c.RepoAbsPath, "/repo")
+			}
+			if c.RepoRemote != remote {
+				t.Fatalf("repo_remote = %q, want %q", c.RepoRemote, remote)
+			}
+			if c.RepoHeadSHA != sha {
+				t.Fatalf("repo_head_sha = %q, want %q", c.RepoHeadSHA, sha)
+			}
+			if c.RepoHeadBranch != branch {
+				t.Fatalf("repo_head_branch = %q, want %q", c.RepoHeadBranch, branch)
+			}
+			if c.IsOrphaned {
+				t.Fatalf("is_orphaned = true, want false")
+			}
+			if c.CreatedAt == "" {
+				t.Fatalf("created_at is empty")
+			}
+		})
+	}
+}
