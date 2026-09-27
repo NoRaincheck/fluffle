@@ -5,6 +5,8 @@ rules:
     message: "agents are append-only: DELETE is not permitted in query files"
     rule: |
       query.sql.contains("DELETE")
+  # Note: sqlc's SQLite parser drops PRAGMA statements before rules are evaluated, so
+  # this rule can never fire. It is documentation, not a guarantee. See docs/backend.md.
   - name: no-pragma
     message: "PRAGMA belongs in migrate.go, not in query files"
     rule: |

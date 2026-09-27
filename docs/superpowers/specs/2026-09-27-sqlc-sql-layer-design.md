@@ -39,7 +39,13 @@ the compiled binary.
 ## 3. Non-goals
 
 - No change to the HTTP API, CLI surface, TUI layout, or agent protocol.
-- No ORM, no query builder, no `context`-free convenience wrappers.
+- No ORM, no query builder, no `context`-free convenience wrappers — with one
+  documented exception. `session.Manager`'s store calls necessarily pass
+  `context.Background()` rather than `m.ctx`: `Shutdown()` calls `m.cancel()`
+  *before* writing the terminal `agent_sessions` rows, so passing `m.ctx` to
+  those writes returns `context.Canceled` and strands sessions in a
+  non-terminal state. Five existing tests catch that. `m.ctx` is still used for
+  the runner and for cancellation checks, which is what it is for (§10).
 - No `sqlc batch*` queries (PostgreSQL-only upstream; `AppendBatch` uses `WithTx`).
 - No `sqlc verify` / `sqlc push`. Both require sqlc Cloud, which is out of scope for a
   localhost-only daemon.
@@ -250,8 +256,8 @@ additive path and would keep the column forever. And SQLite has no
 migration that is also correct on a fresh database.
 
 It runs once, after migrations are applied, in `migrate.go`. It is not a migration and
-is not visible to sqlc. `TestFileStoreDropsArchivedAtColumnsAndKeepsRows`
-(`store_test.go:851`) continues to pass unchanged.
+is not visible to sqlc. `TestFileStoreDropsArchivedAtColumnsAndKeepsRows` continues to
+pass unchanged.
 
 ### 6.5 Foreign key enforcement
 
@@ -295,11 +301,11 @@ rules:
   - name: append-only
     message: "agents are append-only: DELETE is not permitted in query files"
     rule: |
-      !query.sql.contains("DELETE")
+      query.sql.contains("DELETE")
   - name: no-pragma
     message: "PRAGMA belongs in migrate.go, not in query files"
     rule: |
-      !query.sql.contains("PRAGMA")
+      query.sql.contains("PRAGMA")
 
 sql:
   - engine: "sqlite"
@@ -341,6 +347,12 @@ contents, so a file containing one `DELETE` fails the rule for every query in th
 file. This is coarser than ideal but is a correct and useful gate: it means a query
 file either contains no `DELETE` at all or it does not belong in `queries/`.
 
+A sqlc vet rule states the **offending** condition: sqlc reports a violation when
+the expression evaluates to true. The `!`-negated form shown in earlier drafts of
+this spec was therefore inverted — it would have failed every query file in a clean
+tree. `sqlc.yaml` as written above is the correct polarity; the rules carry no `!`
+prefix.
+
 ### 7.2 Why each emit setting
 
 | Setting | Value | Reason |
@@ -367,9 +379,10 @@ Two settings deliberately **not** used:
 | Column | sqlc type | Wire type today | Resolution |
 |---|---|---|---|
 | `channels.is_orphaned` | `int64` | `bool` | Converted in the facade. SQLite has no boolean type; a per-column override to `bool` would be fragile because `is_orphaned` is the only such column today and a future `INTEGER` column would inherit it. |
-| `messages.parent_id` | `sql.NullInt64` | `sql.NullInt64` | Matched by override. |
-| `channels.repo_*` | `*string` | `string` | `COALESCE(col,'')` retained in every read query, per §8. |
+| `channels.repo_*` | `*string` | `string` | `COALESCE(col,'')` retained in the read queries, per §8, except on the two `sql.NullInt64` read paths below. |
 | `agent_sessions.*` nullable | `*string` / `*int64` | same | Matched. |
+| `messages.parent_id` | `sql.NullInt64` | `sql.NullInt64` | Matched by override, and deliberately **not** coalesced on the read side: `store.Message.ParentID` is `sql.NullInt64`, so coalescing would yield `0` and the TUI's `.Valid` check would read a real parent as absent. |
+| `p.seq AS parent_seq` | `sql.NullInt64` | `sql.NullInt64` | Matched, and deliberately **not** coalesced: "no parent" arrives as NULL, and coalescing to `0` would invent a `seq = 0` message that never existed. |
 
 `IsOrphaned` is the only `bool` on the wire. The conversion is one line in the facade
 and is asserted by existing tests.
@@ -431,8 +444,8 @@ Mitigation, in three parts:
    types and converts from generated row structs.
 2. `emit_json_tags: false` ensures generated types carry no tags, so no accidental
    promotion could change a field name.
-3. `apiserver/server_test.go:126`, which asserts `ParentSeq` never appears in a
-   response, continues to guard the contract.
+3. `apiserver.TestListMessagesAfterSequenceReturnsStrictlyNewerMessages`, which asserts
+   `ParentSeq` never appears in a response, continues to guard the contract.
 
 Nullable columns keep the existing `COALESCE(col, '')` treatment in every read query.
 This is deliberate and must be preserved verbatim when queries move: it is what keeps
@@ -563,12 +576,15 @@ not a 500 and not a driver error.
 
 ### 11.2 Existing tests that constrain the design
 
-- `store_test.go:783` — asserts the destructive rebuild still destroys legacy rows.
-- `store_test.go:851-882` — reaches into `s.db` for `PRAGMA table_info`; compiles only
-  because §5.3 retains the `*sql.DB` field.
-- `store_test.go:209` — file-backed persistence across the parent-sequence projection.
-- `cmd/flf/main_test.go:1817-1833` — reopen and verify data survived.
-- `apiserver/server_test.go:126` — asserts `ParentSeq` is absent from responses.
+- `TestFileStoreMigrationRebuildsLegacySchemaWithoutParentColumn` — asserts the
+  destructive rebuild still destroys legacy rows.
+- `TestFileStoreDropsArchivedAtColumnsAndKeepsRows` — reaches into `s.db` for
+  `PRAGMA table_info`; compiles only because §5.3 retains the `*sql.DB` field.
+- `TestFileStorePersistsParentSequenceProjection` — file-backed persistence across the
+  parent-sequence projection.
+- `TestDaemonStartReconcilesStaleSessions` — reopen and verify data survived.
+- `apiserver.TestListMessagesAfterSequenceReturnsStrictlyNewerMessages` — asserts
+  `ParentSeq` is absent from responses.
 - 12 call sites use `newStoreWithThread(t, ":memory:")`, which depends on
   `SetMaxOpenConns(1)` being retained (§6.5).
 

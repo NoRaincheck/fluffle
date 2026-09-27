@@ -56,10 +56,10 @@ Integer IDs (`--thread 42`). Live write identity is derived by the daemon from a
 
 ### Foreign keys are enforced
 
-`prepare` issues `PRAGMA foreign_keys=ON` and then reads the pragma back, so a
-database that refuses it fails `Open` rather than silently running unenforced. SQLite
-does not enforce foreign keys by default, so this is what makes a write against a
-missing parent an error instead of an orphan row. `internal/store/classify.go` maps
+`enableForeignKeys` in `migrate.go` issues `PRAGMA foreign_keys=ON` and then reads the
+pragma back, so a database that refuses it fails `Open` rather than silently running
+unenforced. SQLite does not enforce foreign keys by default, so this is what makes a
+write against a missing parent an error instead of an orphan row. `internal/store/classify.go` maps
 `SQLITE_CONSTRAINT_FOREIGNKEY` to `store.ErrNotFound`, and the API renders that as a
 404 — `THREAD_NOT_FOUND` on a thread-scoped append, `MESSAGE_NOT_FOUND` on the legacy
 reaction route — not a 500.
@@ -143,10 +143,9 @@ generate and a hand-edit are the same mismatch, and `diff` cannot tell them apar
   `PRAGMA` in a query file produces no generated code, no rule violation, and a
   `sqlc generate` that still exits 0. The real guard is structural rather than
   mechanical: the only `PRAGMA` statements in the store are in
-  `internal/store/store.go` (`prepare`) and `internal/store/migrate.go`
-  (`assertForeignKeys`, `hasColumn`), both outside `queries/` and neither of them read
-  by sqlc. Do not read a passing `no-pragma` as evidence that no pragma slipped into a
-  query file.
+  `internal/store/migrate.go` (`enableForeignKeys`, `assertForeignKeys`, `hasColumn`),
+  outside `queries/` and not read by sqlc. Do not read a passing `no-pragma` as
+  evidence that no pragma slipped into a query file.
 
 ### Adding a migration
 
