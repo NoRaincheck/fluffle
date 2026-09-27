@@ -239,13 +239,6 @@ type AppendResult struct {
 	ReactionID int64
 }
 
-type InboxMessage struct {
-	Message
-	ChannelName string `json:"channel_name"`
-	ChannelID   int64  `json:"channel_id"`
-	ThreadTitle string `json:"thread_title"`
-}
-
 func (s *Store) CreateThread(ctx context.Context, channelID int64, title string) (int64, error) {
 	if err := names.Slug(title); err != nil {
 		return 0, invalid("%v", err)
@@ -444,44 +437,93 @@ func reactionFromRow(r db.ListReactionsRow) Reaction {
 	}
 }
 
-func inboxFromRow(r db.ListInboxRow) InboxMessage {
-	return InboxMessage{
-		Message: Message{
-			ID:         r.ID,
-			ThreadID:   r.ThreadID,
-			Seq:        r.Seq,
-			ParentID:   r.ParentID,
-			Name:       r.Name,
-			AuthorType: r.AuthorType,
-			Role:       r.Role,
-			Content:    r.Content,
-			CreatedAt:  r.CreatedAt,
-		},
-		ChannelName: r.ChannelName,
-		ChannelID:   r.ChannelID,
-		ThreadTitle: r.ThreadTitle,
-	}
+// Granularity selects what one row of a ListRows result is.
+const (
+	GranularityMessage = "message"
+	GranularityThread  = "thread"
+	GranularityChannel = "channel"
+)
+
+const (
+	defaultRowLimit = 200
+	maxRowLimit     = 500
+)
+
+// Row is one line of the cross-channel feed. ID is the message, thread, or
+// channel id depending on the granularity. ThreadID is 0 at channel
+// granularity. Name is the author of the group's newest message, except at
+// message granularity where it is that message's own author. Content is the
+// whole representative message, not its first line: choosing a line is a
+// rendering decision. Count is the group's message count, and 1 at message
+// granularity.
+type Row struct {
+	ID       int64
+	ThreadID int64
+	Time     string
+	Channel  string
+	Thread   string
+	Name     string
+	Content  string
+	Count    int
 }
 
-func (s *Store) ListInbox(ctx context.Context, limit int) ([]InboxMessage, error) {
+// ListRows returns the feed at one granularity, newest first. Grouping,
+// representative selection, and reply counts are the query's job, so the
+// caller holds no rule about which message represents a group.
+func (s *Store) ListRows(ctx context.Context, granularity string, limit int) ([]Row, error) {
 	if limit <= 0 {
-		limit = 100
+		limit = defaultRowLimit
 	}
-	if limit > 200 {
-		limit = 200
+	if limit > maxRowLimit {
+		limit = maxRowLimit
 	}
-	rows, err := s.q.ListInbox(ctx, db.ListInboxParams{Limit: int64(limit)})
-	if err != nil {
-		return nil, err
+	switch granularity {
+	case GranularityMessage:
+		rows, err := s.q.ListMessageRows(ctx, db.ListMessageRowsParams{Limit: int64(limit)})
+		if err != nil {
+			return nil, err
+		}
+		out := make([]Row, 0, len(rows))
+		for _, r := range rows {
+			out = append(out, Row{
+				ID: r.ID, ThreadID: r.ThreadID, Time: r.CreatedAt,
+				Channel: r.Channel, Thread: r.Thread, Name: r.Name,
+				Content: r.Content, Count: 1,
+			})
+		}
+		return out, nil
+	case GranularityThread:
+		rows, err := s.q.ListThreadRows(ctx, db.ListThreadRowsParams{Limit: int64(limit)})
+		if err != nil {
+			return nil, err
+		}
+		out := make([]Row, 0, len(rows))
+		for _, r := range rows {
+			out = append(out, Row{
+				ID: r.ID, ThreadID: r.ThreadID, Time: r.CreatedAt,
+				Channel: r.Channel, Thread: r.Thread, Name: r.Name,
+				Content: r.Content, Count: int(r.MsgCount),
+			})
+		}
+		return out, nil
+	case GranularityChannel:
+		rows, err := s.q.ListChannelRows(ctx, db.ListChannelRowsParams{Limit: int64(limit)})
+		if err != nil {
+			return nil, err
+		}
+		out := make([]Row, 0, len(rows))
+		for _, r := range rows {
+			out = append(out, Row{
+				ID: r.ID, ThreadID: r.ThreadID, Time: r.CreatedAt,
+				Channel: r.Channel, Thread: r.Thread, Name: r.Name,
+				Content: r.Content, Count: int(r.MsgCount),
+			})
+		}
+		return out, nil
+	default:
+		return nil, invalid("granularity %q must be %s, %s, or %s",
+			granularity, GranularityMessage, GranularityThread, GranularityChannel)
 	}
-	out := []InboxMessage{}
-	for _, r := range rows {
-		out = append(out, inboxFromRow(r))
-	}
-	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
-		out[i], out[j] = out[j], out[i]
-	}
-	return out, nil
 }
 
 func (s *Store) AddReaction(ctx context.Context, messageID int64, emoji, name, authorType string) error {

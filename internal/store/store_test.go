@@ -99,41 +99,6 @@ func TestAppendMessageAtPreservesTimestamp(t *testing.T) {
 	}
 }
 
-func TestListInbox(t *testing.T) {
-	s, err := Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	ch1, _ := s.CreateChannel(context.Background(), "general", "", "", "", "", true)
-	ch2, _ := s.CreateChannel(context.Background(), "random", "", "", "", "", true)
-	th1, _ := s.CreateThread(context.Background(), ch1, "hello")
-	th2, _ := s.CreateThread(context.Background(), ch2, "world")
-	_, _ = s.AppendMessageAt(context.Background(), th1, "alice", "human", "user", "first", "2026-09-23T10:00:00Z")
-	_, _ = s.AppendMessageAt(context.Background(), th2, "bob", "human", "user", "second", "2026-09-23T11:00:00Z")
-	_, _ = s.AppendMessageAt(context.Background(), th1, "alice", "human", "user", "third", "2026-09-23T12:00:00Z")
-	msgs, err := s.ListInbox(context.Background(), 10)
-	if err != nil {
-		t.Fatalf("ListInbox: %v", err)
-	}
-	if len(msgs) != 3 {
-		t.Fatalf("want 3 got %d", len(msgs))
-	}
-	if msgs[0].Content != "first" || msgs[1].Content != "second" || msgs[2].Content != "third" {
-		t.Fatalf("order wrong: %+v", msgs)
-	}
-	if msgs[0].ChannelName != "general" || msgs[0].ThreadTitle != "hello" {
-		t.Fatalf("enrichment wrong: %+v", msgs[0])
-	}
-	msgs2, _ := s.ListInbox(context.Background(), 1)
-	if len(msgs2) != 1 {
-		t.Fatalf("limit 1: got %d", len(msgs2))
-	}
-	if msgs2[0].Content != "third" {
-		t.Fatalf("limit should return newest last when reversed to ASC, got %q", msgs2[0].Content)
-	}
-}
-
 func TestListMessagesAfterUsesExclusiveCursor(t *testing.T) {
 	s, _, threadID := newStoreWithThread(t, ":memory:")
 	defer s.Close()
@@ -1108,20 +1073,6 @@ func TestListMessagesLastNKeepsAscendingOrder(t *testing.T) {
 	}
 }
 
-func TestListInboxReturnsEmptySliceNotNil(t *testing.T) {
-	s, _, _ := newStoreWithThread(t, ":memory:")
-	got, err := s.ListInbox(context.Background(), 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got == nil {
-		t.Fatal("ListInbox returned nil for an empty inbox; the handler writes the slice straight to JSON, so it must be an empty slice to render [] and not null")
-	}
-	if len(got) != 0 {
-		t.Fatalf("got %d messages, want 0 for an empty inbox", len(got))
-	}
-}
-
 func TestListReactionsReturnsNilForEmptyThread(t *testing.T) {
 	s, _, threadID := newStoreWithThread(t, ":memory:")
 	got, err := s.ListReactions(context.Background(), threadID)
@@ -1226,5 +1177,138 @@ func TestAddReactionRejectsBadName(t *testing.T) {
 	}
 	if err := s.AddReaction(context.Background(), id, "\U0001F440", "ci-bot", "agent"); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("AddReaction = %v, want ErrInvalid", err)
+	}
+}
+
+func TestListRowsGranularityCounts(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	eng, err := s.CreateChannel(context.Background(), "eng", "", "", "", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateChannel(context.Background(), "dev", "", "", "", "", true); err != nil {
+		t.Fatal(err)
+	}
+	alpha, err := s.CreateThread(context.Background(), eng, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	beta, err := s.CreateThread(context.Background(), eng, "beta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateThread(context.Background(), eng, "empty"); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range []struct {
+		thread int64
+		name   string
+		body   string
+		at     string
+	}{
+		{alpha, "alice", "first line of alpha\nsecond line", "2027-01-02T10:00:00Z"},
+		{alpha, "bob", "reply in alpha", "2027-01-03T10:00:00Z"},
+		{alpha, "ci.bot", "another reply in alpha", "2027-01-04T10:00:00Z"},
+		{beta, "alice", "only line in beta", "2027-01-01T10:00:00Z"},
+	} {
+		if _, err := s.AppendMessageAt(context.Background(), m.thread, m.name, "human", "user", m.body, m.at); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	msgs, err := s.ListRows(context.Background(), GranularityMessage, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 4 {
+		t.Fatalf("message rows = %d, want 4", len(msgs))
+	}
+	for _, r := range msgs {
+		if r.Count != 1 {
+			t.Errorf("message row count = %d, want 1", r.Count)
+		}
+		if r.Channel != "eng" {
+			t.Errorf("message row channel = %q, want eng", r.Channel)
+		}
+	}
+
+	threads, err := s.ListRows(context.Background(), GranularityThread, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(threads) != 3 {
+		t.Fatalf("thread rows = %d, want 3", len(threads))
+	}
+	if threads[0].Thread != "alpha" || threads[0].Count != 3 {
+		t.Errorf("first thread row = %q/%d, want alpha/3", threads[0].Thread, threads[0].Count)
+	}
+	if threads[0].Content != "first line of alpha\nsecond line" {
+		t.Errorf("thread row content = %q, want the original post", threads[0].Content)
+	}
+	if threads[0].Name != "ci.bot" {
+		t.Errorf("thread row name = %q, want the newest reply's author", threads[0].Name)
+	}
+	if threads[0].ID != alpha || threads[0].ThreadID != alpha {
+		t.Errorf("thread row ids = %d/%d, want %d", threads[0].ID, threads[0].ThreadID, alpha)
+	}
+	var sawEmpty bool
+	for _, r := range threads {
+		if r.Thread == "empty" {
+			sawEmpty = true
+			if r.Count != 0 {
+				t.Errorf("an empty thread must report 0, got %d", r.Count)
+			}
+			if r.Content != "" || r.Name != "" {
+				t.Errorf("an empty thread must carry no content or name: %+v", r)
+			}
+		}
+	}
+	if !sawEmpty {
+		t.Error("a thread with no messages must still appear")
+	}
+
+	channels, err := s.ListRows(context.Background(), GranularityChannel, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(channels) != 2 {
+		t.Fatalf("channel rows = %d, want 2", len(channels))
+	}
+	if channels[0].Channel != "eng" || channels[0].Count != 4 {
+		t.Errorf("first channel row = %q/%d, want eng/4", channels[0].Channel, channels[0].Count)
+	}
+	if channels[0].Thread != "" || channels[0].ThreadID != 0 {
+		t.Errorf("a channel row must carry no thread, got %q/%d", channels[0].Thread, channels[0].ThreadID)
+	}
+	if channels[0].Name != "ci.bot" {
+		t.Errorf("channel row name = %q, want the newest message's author", channels[0].Name)
+	}
+}
+
+func TestListRowsRejectsUnknownGranularity(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.ListRows(context.Background(), "folder", 0); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("ListRows(folder) = %v, want ErrInvalid", err)
+	}
+}
+
+func TestListRowsClampsLimit(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for _, limit := range []int{0, -5, 100000} {
+		if _, err := s.ListRows(context.Background(), GranularityMessage, limit); err != nil {
+			t.Fatalf("limit %d must not error: %v", limit, err)
+		}
 	}
 }
