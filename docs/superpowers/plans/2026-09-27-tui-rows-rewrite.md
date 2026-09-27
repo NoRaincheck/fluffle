@@ -129,7 +129,8 @@ func TestSmokeWidthIsWidestLine(t *testing.T) {
 }
 
 func TestSmokeOverlayCenteredReplacesCells(t *testing.T) {
-	if got := OverlayCentered("aaaa\nbbbb\ncccc", "ZZ", 4, 3); got != "aaaa\nZZbb\ncccc" {
+	// A 2-cell panel centred in 4 cells lands at column 1, not 0.
+	if got := OverlayCentered("aaaa\nbbbb\ncccc", "ZZ", 4, 3); got != "aaaa\nbZZb\ncccc" {
 		t.Fatalf("OverlayCentered = %q", got)
 	}
 }
