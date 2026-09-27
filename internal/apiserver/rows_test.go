@@ -93,12 +93,3 @@ func TestRowsMapsStoreFailureToDaemonError(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/rows?g=message", nil))
 	assertErrorEnvelope(t, rec, http.StatusInternalServerError, "DAEMON_ERROR")
 }
-
-func TestRowsEndpointCoexistsWithInbox(t *testing.T) {
-	h := NewHandler(seedRows(t))
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/inbox", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatal("/v1/inbox must keep answering until the CLI migrates")
-	}
-}

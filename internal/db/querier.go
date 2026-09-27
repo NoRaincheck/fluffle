@@ -31,7 +31,6 @@ type Querier interface {
 	ListChannelsByRepo(ctx context.Context, arg ListChannelsByRepoParams) ([]ListChannelsByRepoRow, error)
 	ListChannelsByRepoNonOrphaned(ctx context.Context, arg ListChannelsByRepoNonOrphanedParams) ([]ListChannelsByRepoNonOrphanedRow, error)
 	ListChannelsNonOrphaned(ctx context.Context) ([]ListChannelsNonOrphanedRow, error)
-	ListInbox(ctx context.Context, arg ListInboxParams) ([]ListInboxRow, error)
 	ListMessageRows(ctx context.Context, arg ListMessageRowsParams) ([]ListMessageRowsRow, error)
 	ListMessages(ctx context.Context, arg ListMessagesParams) ([]ListMessagesRow, error)
 	ListMessagesAfter(ctx context.Context, arg ListMessagesAfterParams) ([]ListMessagesAfterRow, error)

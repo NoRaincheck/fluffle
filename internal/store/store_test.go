@@ -99,41 +99,6 @@ func TestAppendMessageAtPreservesTimestamp(t *testing.T) {
 	}
 }
 
-func TestListInbox(t *testing.T) {
-	s, err := Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	ch1, _ := s.CreateChannel(context.Background(), "general", "", "", "", "", true)
-	ch2, _ := s.CreateChannel(context.Background(), "random", "", "", "", "", true)
-	th1, _ := s.CreateThread(context.Background(), ch1, "hello")
-	th2, _ := s.CreateThread(context.Background(), ch2, "world")
-	_, _ = s.AppendMessageAt(context.Background(), th1, "alice", "human", "user", "first", "2026-09-23T10:00:00Z")
-	_, _ = s.AppendMessageAt(context.Background(), th2, "bob", "human", "user", "second", "2026-09-23T11:00:00Z")
-	_, _ = s.AppendMessageAt(context.Background(), th1, "alice", "human", "user", "third", "2026-09-23T12:00:00Z")
-	msgs, err := s.ListInbox(context.Background(), 10)
-	if err != nil {
-		t.Fatalf("ListInbox: %v", err)
-	}
-	if len(msgs) != 3 {
-		t.Fatalf("want 3 got %d", len(msgs))
-	}
-	if msgs[0].Content != "first" || msgs[1].Content != "second" || msgs[2].Content != "third" {
-		t.Fatalf("order wrong: %+v", msgs)
-	}
-	if msgs[0].ChannelName != "general" || msgs[0].ThreadTitle != "hello" {
-		t.Fatalf("enrichment wrong: %+v", msgs[0])
-	}
-	msgs2, _ := s.ListInbox(context.Background(), 1)
-	if len(msgs2) != 1 {
-		t.Fatalf("limit 1: got %d", len(msgs2))
-	}
-	if msgs2[0].Content != "third" {
-		t.Fatalf("limit should return newest last when reversed to ASC, got %q", msgs2[0].Content)
-	}
-}
-
 func TestListMessagesAfterUsesExclusiveCursor(t *testing.T) {
 	s, _, threadID := newStoreWithThread(t, ":memory:")
 	defer s.Close()
@@ -1105,20 +1070,6 @@ func TestListMessagesLastNKeepsAscendingOrder(t *testing.T) {
 	}
 	if got[1].Seq != 5 {
 		t.Fatalf("last seq = %d, want 5 (last 2 of 1..5)", got[1].Seq)
-	}
-}
-
-func TestListInboxReturnsEmptySliceNotNil(t *testing.T) {
-	s, _, _ := newStoreWithThread(t, ":memory:")
-	got, err := s.ListInbox(context.Background(), 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got == nil {
-		t.Fatal("ListInbox returned nil for an empty inbox; the handler writes the slice straight to JSON, so it must be an empty slice to render [] and not null")
-	}
-	if len(got) != 0 {
-		t.Fatalf("got %d messages, want 0 for an empty inbox", len(got))
 	}
 }
 

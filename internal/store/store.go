@@ -239,13 +239,6 @@ type AppendResult struct {
 	ReactionID int64
 }
 
-type InboxMessage struct {
-	Message
-	ChannelName string `json:"channel_name"`
-	ChannelID   int64  `json:"channel_id"`
-	ThreadTitle string `json:"thread_title"`
-}
-
 func (s *Store) CreateThread(ctx context.Context, channelID int64, title string) (int64, error) {
 	if err := names.Slug(title); err != nil {
 		return 0, invalid("%v", err)
@@ -442,46 +435,6 @@ func reactionFromRow(r db.ListReactionsRow) Reaction {
 		AuthorType: r.AuthorType,
 		CreatedAt:  r.CreatedAt,
 	}
-}
-
-func inboxFromRow(r db.ListInboxRow) InboxMessage {
-	return InboxMessage{
-		Message: Message{
-			ID:         r.ID,
-			ThreadID:   r.ThreadID,
-			Seq:        r.Seq,
-			ParentID:   r.ParentID,
-			Name:       r.Name,
-			AuthorType: r.AuthorType,
-			Role:       r.Role,
-			Content:    r.Content,
-			CreatedAt:  r.CreatedAt,
-		},
-		ChannelName: r.ChannelName,
-		ChannelID:   r.ChannelID,
-		ThreadTitle: r.ThreadTitle,
-	}
-}
-
-func (s *Store) ListInbox(ctx context.Context, limit int) ([]InboxMessage, error) {
-	if limit <= 0 {
-		limit = 100
-	}
-	if limit > 200 {
-		limit = 200
-	}
-	rows, err := s.q.ListInbox(ctx, db.ListInboxParams{Limit: int64(limit)})
-	if err != nil {
-		return nil, err
-	}
-	out := []InboxMessage{}
-	for _, r := range rows {
-		out = append(out, inboxFromRow(r))
-	}
-	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
-		out[i], out[j] = out[j], out[i]
-	}
-	return out, nil
 }
 
 // Granularity selects what one row of a ListRows result is.
