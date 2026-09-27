@@ -342,7 +342,7 @@ func TestMigrateUpAppliesInitialSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(channels) != 0 {
-		t.Fatalf("want empty, got %d", channels)
+		t.Fatalf("want empty, got %d", len(channels))
 	}
 }
 
@@ -637,7 +637,7 @@ func legacyRebuildRequired(conn *sql.DB) (bool, error) {
 	if err != nil || !present {
 		return false, err
 	}
-	return !hasColumnChecked(conn, "messages", "parent_id")
+	return !hasColumnChecked(conn, "messages", "parent_id"), nil
 }
 
 func tableExists(conn *sql.DB, table string) (bool, error) {
