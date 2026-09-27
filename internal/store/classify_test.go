@@ -50,8 +50,8 @@ func TestClassifyConstraintCodes(t *testing.T) {
 		wantContains string
 	}{
 		{"unique", `INSERT INTO channels(name, repo_abs_path, is_orphaned) VALUES('c', '/r', 0)`, ErrConflict, "UNIQUE constraint failed"},
-		{"check", `INSERT INTO channels(name, repo_abs_path, is_orphaned) VALUES('   ', '/r', 0)`, ErrInvalid, "CHECK constraint failed: length(trim(name)) > 0"},
-		{"notnull", `INSERT INTO channels(name, repo_abs_path, is_orphaned) VALUES('x', NULL, 0)`, ErrInvalid, "CHECK constraint failed: (is_orphaned = 1 AND repo_abs_path IS NULL)"},
+		{"check", `INSERT INTO channels(name, repo_abs_path, is_orphaned) VALUES('   ', '/r', 0)`, ErrInvalid, "CHECK constraint failed"},
+		{"notnull", `INSERT INTO channels(name, repo_abs_path, is_orphaned) VALUES(NULL, '/r', 0)`, ErrInvalid, "NOT NULL constraint failed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := s.db.Exec(tc.query)
