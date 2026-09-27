@@ -93,7 +93,7 @@ Consequences, all intended:
   named `ci.bot.` could never be resolved — the trim would strip the dot and look
   up `ci.bot` — so it would silently never trigger. Doubled dots inside a name
   stay legal: `ci..bot` round-trips through the trim unchanged.
-- All three list columns are 12 wide, so column width is a single constant.
+- All four list columns are 12 wide, so column width is a single constant.
 - Digits are legal in a slug and illegal in a name. That asymmetry is
   deliberate: slugs need collision suffixes, names need to stay pronounceable
   and typeable.
@@ -188,7 +188,7 @@ internal/tui/
 ├── rows.go       rowLine, renderRows, the width constants
 ├── thread.go     renderThread — the one thread renderer
 ├── compose.go    the one compose mode
-├── api.go        ListRows, ListMessages, SendMessage, EnsureDaemon
+├── api.go        ListRows, ListMessages, SendReply
 ├── styles.go
 ├── screen/       vendored from go.kenn.io/kit/tui/screen
 └── termtext/     vendored from go.kenn.io/kit/tui/termtext
@@ -238,8 +238,11 @@ thread, each identified by the field that selects it.
 
 One unconditional 2s tick, replacing the six-field session poll. On each tick
 the TUI re-reads its rows and the selected thread's messages. The cursor is
-preserved by matching the previous `Row.ID`. New messages append, so row and
-line indices are stable and no scroll is reset.
+preserved by matching the previous `Row.ID`. The feed is newest-first, so a new
+message *prepends*: the row the cursor is on is still in the list but has moved
+down by however many arrived, which is why the cursor is carried by id and not
+by index. The window follows the carried cursor, so a message arriving at the
+top pushes the row you are reading down rather than off the screen.
 
 The clock is armed by the rows response and by nothing else, so a steady state
 holds exactly one tick per outstanding refetch; a key that triggers its own

@@ -14,7 +14,7 @@ Every key the TUI (`flf tui`) answers. There are no unbound-but-documented keys,
 | `Esc` | Back to the list, with the cursor where it was |
 | `r` | Reply: open the compose box and show the thread being answered |
 | `q` | Quit |
-| `ctrl+c` | Quit, on any key the TUI is reading — including a terminal too narrow to draw the list, and excluding the open reply box |
+| `ctrl+c` | Quit, on any key the TUI is reading — including a terminal too narrow to draw the list, and including the open reply box |
 
 `↑`/`k` and `↓`/`j` move the row cursor, in both geometries. There is no thread scroll: a thread longer than the pane is cut from the top, so the newest messages are the ones on screen and the pane has no keys of its own. In the detail geometry the list is not drawn, so the cursor marker is invisible — but the keys still move the selection, and the pane follows the row you land on.
 
@@ -30,7 +30,7 @@ Every other key does nothing. `l`, `p`, `s`, `n`, `C`, `e`, `f`, and `c` are unb
 | `thread` | a thread | the original post | replies | Reply to it; open it |
 | `channel` | a channel | the newest message | messages | `no thread on this row — press g` |
 
-`g` resets the cursor to the top and drops the loaded thread, because a message row has no counterpart at channel granularity. `v` keeps the cursor: the same rows in the other order, so the row under the cursor is still there. The title line names the granularity, the row count, and the order.
+`g` drops the rows it was showing, resets the cursor to the top, and drops the loaded thread, because a message row has no counterpart at channel granularity — and the id namespaces differ per granularity, so a row left behind would be matched against the next list by a number that means something else. `v` keeps the cursor: the same rows in the other order, so the row under the cursor is still there. The title line names the granularity, the row count, and the order.
 
 ## Geometry
 
@@ -58,7 +58,7 @@ Opened by `r`; the thread is shown behind it.
 | `←` / `→` | Move the cursor one rune |
 | `Enter` | Send the reply |
 | `Esc` | Cancel and close |
-| `ctrl+c` | **Not bound.** `Update` routes every key to the box while it is open and the box has no `ctrl+c` case, so the keystroke is swallowed. `Esc` is the way out of a box you cannot send. |
+| `ctrl+c` | Quit. `Update` takes it before it routes the key to the box, because the box has no `ctrl+c` case and would otherwise swallow the keystroke. `Esc` is the way to cancel a reply you still want; `ctrl+c` is the way to leave. |
 
 The box is 80% of the terminal width, titled `reply in <channel> › <thread>`, and draws a caret at the cursor. Positions are rune indices, so a multi-byte character is edited whole. Whitespace-only text is refused in the box with `cannot be empty`. A send appends to the thread and never sets `parent_id`.
 
