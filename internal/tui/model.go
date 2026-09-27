@@ -309,6 +309,8 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.syncThread()
 	case "enter":
 		return m.openThread()
+	case "r":
+		return m.openReply()
 	case "esc":
 		m.detail = false
 		return m, nil
@@ -337,12 +339,33 @@ func (m *model) openThread() (tea.Model, tea.Cmd) {
 func (m *model) handleComposeSend(msg composeSendMsg) (tea.Model, tea.Cmd) {
 	m.compose.close()
 	if m.threadID == 0 {
+		// A failed thread load clears the id, so there is nowhere to send. The
+		// typed text is gone either way; say so rather than dropping it in
+		// silence.
+		m.status = "cannot reply — the thread is not loaded"
 		return m, nil
 	}
 	threadID, text := m.threadID, msg.text
 	return m, func() tea.Msg {
 		return sentMsg{err: m.api.SendReply(nil, threadID, text)}
 	}
+}
+
+// openReply starts a reply to the selected row's thread. A channel row has no
+// thread, so there is nothing to reply to.
+func (m *model) openReply() (tea.Model, tea.Cmd) {
+	row, ok := m.selectedRow()
+	if !ok {
+		m.status = "no row selected"
+		return m, nil
+	}
+	if row.ThreadID == 0 {
+		m.status = "no thread on this row — press g"
+		return m, nil
+	}
+	m.detail = true
+	m.compose.open("reply in " + row.Channel + " › " + row.Thread)
+	return m, m.syncThread()
 }
 
 // tick is the poll clock. Task 10 replaces this stub with the real tick.
