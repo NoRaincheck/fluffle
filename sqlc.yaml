@@ -1,0 +1,38 @@
+version: "2"
+
+rules:
+  - name: append-only
+    message: "agents are append-only: DELETE is not permitted in query files"
+    rule: |
+      query.sql.contains("DELETE")
+  - name: no-pragma
+    message: "PRAGMA belongs in migrate.go, not in query files"
+    rule: |
+      query.sql.contains("PRAGMA")
+
+sql:
+  - engine: "sqlite"
+    name: "store"
+    schema: "internal/store/migrations"
+    queries: "internal/store/queries"
+    rules:
+      - append-only
+      - no-pragma
+    gen:
+      go:
+        package: "db"
+        out: "internal/db"
+        sql_package: "database/sql"
+        emit_json_tags: false
+        emit_pointers_for_null_types: true
+        emit_empty_slices: false
+        emit_exact_table_names: false
+        emit_interface: true
+        query_parameter_limit: 0
+        rename:
+          repo_head_sha: "RepoHeadSHA"
+        overrides:
+          - column: "messages.parent_id"
+            go_type:
+              import: "database/sql"
+              type: "NullInt64"
