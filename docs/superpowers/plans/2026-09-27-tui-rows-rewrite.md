@@ -696,7 +696,7 @@ Grouping, representative selection, and reply counts move into SQL, where they a
 
 **Interfaces:**
 - Consumes: nothing from earlier tasks.
-- Produces: `store.Row`, `store.GranularityMessage`, `store.GranularityThread`, `store.GranularityChannel`, `(*Store).ListRows(ctx context.Context, granularity string, limit int) ([]Row, error)`. Deletes `store.InboxMessage` and `(*Store).ListInbox`.
+- Produces: `store.Row`, `store.GranularityMessage`, `store.GranularityThread`, `store.GranularityChannel`, `(*Store).ListRows(ctx context.Context, granularity string, limit int) ([]Row, error)`. Deletes nothing: `store.InboxMessage` and `(*Store).ListInbox` stay until Task 7 removes their last consumer.
 
 - [ ] **Step 1: Write the queries**
 
