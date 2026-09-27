@@ -1,0 +1,7 @@
+{"seq":1,"role":"user","name":"alice","content":"Welcome to Fluffle! This thread is the place for the 14-day-old backlog.","timestamp":"@T-14d"}
+{"seq":2,"parent_seq":1,"role":"user","name":"bob","content":"Hey everyone, glad this exists.","timestamp":"@T-14d"}
+{"seq":3,"parent_seq":1,"role":"user","name":"carol","content":"Quick etiquette note: keep general on-topic, send feature ideas to tui-testing and bug reports to dev.","timestamp":"@T-13d"}
+{"type":"reaction","message_seq":1,"emoji":"🎉","name":"carol","author_type":"human","timestamp":"@T-14d"}
+{"type":"reaction","message_seq":1,"emoji":"+1","name":"bob","author_type":"human","timestamp":"@T-14d"}
+{"type":"reaction","message_seq":1,"emoji":"🎉","name":"dave","author_type":"human","timestamp":"@T-13d"}
+{"type":"reaction","message_seq":1,"emoji":"🤖","name":"replacer","author_type":"agent","timestamp":"@T-12d"}

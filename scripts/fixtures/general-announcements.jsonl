@@ -1,0 +1,9 @@
+{"seq":1,"role":"user","name":"alice","content":"Fluffle v0.1 is out. Repo-anchored channels, threads with threaded replies, reactions, and an agent-readable JSONL view. Feedback welcome.","timestamp":"@T-12d"}
+{"seq":2,"parent_seq":1,"role":"user","name":"bob","content":"When can we expect the TUI? Having a native terminal client would be great for quick checks without opening a browser.","timestamp":"@T-12d"}
+{"seq":3,"parent_seq":1,"role":"assistant","name":"summarizer","author_type":"agent","content":"Digest: 1 announcement, 1 question about the TUI, 0 open bugs.","timestamp":"@T-11d"}
+{"seq":4,"parent_seq":1,"role":"user","name":"carol","content":"Timestamps below all land in the same minute on purpose.","timestamp":"@T-2h"}
+{"seq":5,"parent_seq":4,"role":"user","name":"dave","content":"Tie one.","timestamp":"@T-2h"}
+{"seq":6,"parent_seq":4,"role":"user","name":"erin","content":"Tie two.","timestamp":"@T-2h"}
+{"seq":7,"parent_seq":4,"role":"user","name":"frank","content":"Tie three, same minute as the two above.","timestamp":"@T-2h"}
+{"type":"reaction","message_seq":1,"emoji":"🚀","name":"carol","author_type":"human","timestamp":"@T-12d"}
+{"type":"reaction","message_seq":3,"emoji":"📊","name":"summarizer","author_type":"agent","timestamp":"@T-11d"}

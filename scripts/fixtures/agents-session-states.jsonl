@@ -1,0 +1,8 @@
+{"seq":1,"role":"user","name":"alice","content":"@replacer the inbox wraps on bytes, not display width. Can you look?","timestamp":"@T-2d"}
+{"seq":2,"role":"user","name":"bob","content":"@replacer @summarizer the filter matches on channel but not on thread. Two bugs, one message.","timestamp":"@T-2d"}
+{"seq":3,"role":"user","name":"carol","content":"@replacer please re-run the full test suite on main.","timestamp":"@T-1d"}
+{"seq":4,"role":"user","name":"dave","content":"@summarizer what is the state of the wrap bug?","timestamp":"@T-1d"}
+{"seq":5,"role":"user","name":"erin","content":"@replacer this one is stale, tell me if it is still worth fixing.","timestamp":"@T-1d"}
+{"seq":6,"parent_seq":3,"role":"assistant","name":"replacer","author_type":"agent","content":"Full suite green on main at 9717ecd. The wrap bug is a display-width issue, not a byte issue.","timestamp":"@T-1d"}
+{"type":"reaction","message_seq":1,"emoji":"👀","name":"bob","timestamp":"@T-2d"}
+{"type":"reaction","message_seq":6,"emoji":"✅","name":"carol","timestamp":"@T-1d"}

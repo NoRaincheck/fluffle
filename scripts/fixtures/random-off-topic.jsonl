@@ -1,0 +1,8 @@
+{"seq":1,"role":"user","name":"dave","content":"Anyone up for a game night on Friday?","timestamp":"@T-11d"}
+{"seq":2,"parent_seq":1,"role":"user","name":"eve","content":"I'm in.","timestamp":"@T-10d"}
+{"seq":3,"parent_seq":1,"role":"user","name":"frank","content":"Count me in too.","timestamp":"@T-10d"}
+{"seq":4,"parent_seq":1,"role":"user","name":"dave","content":"Fridays at 8pm then. Party games first, then a strategy round.","timestamp":"@T-3d"}
+{"type":"reaction","message_seq":1,"emoji":"👀","name":"eve","author_type":"human","timestamp":"@T-11d"}
+{"type":"reaction","message_seq":1,"emoji":"😂","name":"frank","author_type":"human","timestamp":"@T-11d"}
+{"type":"reaction","message_seq":1,"emoji":"🤣","name":"grace","author_type":"human","timestamp":"@T-10d"}
+{"type":"reaction","message_seq":1,"emoji":"👀","name":"henry","author_type":"human","timestamp":"@T-10d"}

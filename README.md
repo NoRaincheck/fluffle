@@ -54,4 +54,6 @@ printf '[[agents]]\nname="reviewer"\ncommand="claude"\nargs=["-p","{prompt}"]\n'
 
 Docs: `VISION.md` for scope and the `kata`/`roborev` division of labor · `docs/backend.md` for the daemon, API, and CLI reference · `docs/agent-sessions.md` for why local agent runs are shaped the way they are, and what is out of scope · `docs/tui-architecture.md` and `docs/tui-keybindings.md` for the TUI.
 
-Manual QA: `scripts/seed-tui.sh` seeds orphan and repo-anchored channels, threads, replies, and reactions across ~14 days of timestamps, then `./flf tui`. It needs `FLUFFLE_HOME` and `HOME_TMP` set to a scratch dir, with the daemon already running.
+Manual QA: `./scripts/seed-tui.sh` builds a scratch install under `.tui-seed/`, seeds orphan and repo-anchored channels, threads, replies, reactions, and agent sessions across a 14-day timestamp spread, fires one live `@mention`, verifies the result, and execs the TUI. No environment setup, no daemon to start by hand. `--no-tui` stops after seeding; `SEED_AGENT_SLEEP` tunes how long the live agent runs.
+
+Thread data lives in `scripts/fixtures/*.jsonl`, where `@T-14d` style tokens are resolved against the clock at seed time. Agent sessions are staged by `scripts/seed-sessions.go` through `internal/store`, which needs the daemon stopped — the store has no WAL and no `busy_timeout`. `queued` and `running` sessions are deliberately never staged: the daemon reconciles both to `canceled` on startup, so only the live `@mention` can show those states.

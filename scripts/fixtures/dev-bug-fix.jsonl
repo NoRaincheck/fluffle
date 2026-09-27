@@ -1,0 +1,6 @@
+{"seq":1,"role":"user","name":"carol","content":"Found a race: the channel map is read while another goroutine writes it.","timestamp":"@T-5d"}
+{"seq":2,"parent_seq":1,"role":"user","name":"dave","content":"Also a TOCTOU in the append handler: we check the thread exists, then append, and it can be gone in between.","timestamp":"@T-5d"}
+{"seq":3,"parent_seq":2,"role":"user","name":"carol","content":"Both need a single atomic operation. I'll add a -race -cpu=4 integration test first.","timestamp":"@T-4d"}
+{"seq":4,"parent_seq":1,"role":"assistant","name":"replacer","author_type":"agent","content":"Triage: race condition in channel map, plus TOCTOU in the append handler. Severity high. Assignee carol.","timestamp":"@T-1d"}
+{"type":"reaction","message_seq":1,"emoji":"🔧","name":"dave","author_type":"human","timestamp":"@T-5d"}
+{"type":"reaction","message_seq":4,"emoji":"👀","name":"alice","author_type":"human","timestamp":"@T-1d"}

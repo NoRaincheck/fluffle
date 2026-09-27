@@ -1,0 +1,5 @@
+{"seq":1,"role":"user","name":"文字列アライナー","content":"全角のテキストは半角の2倍の幅を持つため、折り返し位置がバイト数ではなく表示幅で計算されることを確認したい。","timestamp":"@T-3d"}
+{"seq":2,"parent_seq":1,"role":"user","name":"🧑‍💻 dev","content":"emoji and ZWJ sequences: 👨‍👩‍👧‍👦 🏳️‍🌈 👩🏽‍💻 — each of these is one grapheme but many terminal columns.","timestamp":"@T-3d"}
+{"seq":3,"parent_seq":1,"role":"user","name":"ｆｕｌｌｗｉｄｔｈ ｎａｍｅ","content":"fullwidth latin inside the author name column","timestamp":"@T-2d"}
+{"seq":4,"parent_seq":1,"role":"assistant","name":"replacer","author_type":"agent","content":"Checked display-width handling on 4 messages: combining marks, ZWJ families, and fullwidth latin all align.","timestamp":"@T-1d"}
+{"type":"reaction","message_seq":1,"emoji":"✅","name":"🧑‍💻 dev","timestamp":"@T-1d"}
