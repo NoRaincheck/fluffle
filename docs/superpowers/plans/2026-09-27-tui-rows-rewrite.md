@@ -1038,11 +1038,12 @@ interface{} for a bare COALESCE over one."
 
 **Files:**
 - Modify: `internal/apiserver/server.go:383-400`
-- Replace: `internal/apiserver/inbox_test.go` with `internal/apiserver/rows_test.go`
+- Keep: `internal/apiserver/inbox_test.go` (its route survives)
+- Create: `internal/apiserver/rows_test.go`
 
 **Interfaces:**
 - Consumes: `(*Store).ListRows` from Task 4.
-- Produces: `GET /v1/rows?g=<granularity>&limit=<n>` → `[]store.Row`. Deletes `GET /v1/inbox`.
+- Produces: `GET /v1/rows?g=<granularity>&limit=<n>` → `[]store.Row`. Adds the route; `GET /v1/inbox` survives here and is removed in Task 6 with its last consumer.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1123,24 +1124,24 @@ func TestRowsRejectsBadGranularity(t *testing.T) {
 	}
 }
 
-func TestInboxEndpointIsGone(t *testing.T) {
+func TestRowsEndpointCoexistsWithInbox(t *testing.T) {
 	h := NewHandler(seedRows(t))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/inbox", nil))
-	if rec.Code == http.StatusOK {
-		t.Fatal("/v1/inbox still answers")
+	if rec.Code != http.StatusOK {
+		t.Fatal("/v1/inbox must keep answering until the CLI migrates")
 	}
 }
 ```
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `go test ./internal/apiserver/ -run 'TestRows|TestInboxEndpointIsGone'`
-Expected: FAIL — `/v1/rows` is an unknown route and `/v1/inbox` still answers 200.
+Run: `go test ./internal/apiserver/ -run 'TestRows'`
+Expected: FAIL — `/v1/rows` is an unknown route. The `/v1/inbox` half of the coexistence test should already pass.
 
 - [ ] **Step 3: Replace the handler**
 
-Delete the `/v1/inbox` handler block in `internal/apiserver/server.go` and add, in its place:
+**Add** a `/v1/rows` handler in `internal/apiserver/server.go`, alongside the existing `/v1/inbox` one. Do not delete `/v1/inbox` in this task: `cmd/flf`'s `inbox` command still calls it, and removing the route now would break that command at runtime until Task 6. Task 6 migrates the CLI and removes the route in the same commit.
 
 ```go
 	mux.HandleFunc("/v1/rows", func(w http.ResponseWriter, r *http.Request) {
@@ -1175,13 +1176,15 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git rm -q internal/apiserver/inbox_test.go
 git add internal/apiserver
-git commit -m "feat(api): replace GET /v1/inbox with GET /v1/rows?g=
+git commit -m "feat(api): add GET /v1/rows?g=
 
 One endpoint, three granularities, one row type shared with the CLI. A
 missing or unknown g is a 400 with the standard error envelope rather than a
-silently defaulted feed."
+silently defaulted feed.
+
+/v1/inbox stays until the CLI migrates, so the branch is never broken at
+runtime mid-sequence."
 ```
 
 ---
