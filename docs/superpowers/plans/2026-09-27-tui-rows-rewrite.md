@@ -3066,7 +3066,7 @@ Add `"time"` to `model.go`'s imports.
 
 - [ ] **Step 4: Run the gate**
 
-Run: `go vet ./... && test -z "$(gofmt -l .)" && go test ./... && go tool sqlc diff`
+Run: `go vet ./... && test -z "$(gofmt -l .)" && go test ./... && go test -tags e2e ./... && go tool sqlc diff`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -3163,10 +3163,26 @@ find . -name '*.go' -not -path './.git/*' -exec wc -l {} + | tail -1
 
 Expected: tui non-test well under 1200, tui test well under 800, vendored around 250, repo total below 26081.
 
-- [ ] **Step 2: Run the full gate**
+- [ ] **Step 2: Close the gate gap, then run the full gate**
 
-Run: `go vet ./... && test -z "$(gofmt -l .)" && go test ./... && go tool sqlc diff`
-Expected: all clean.
+`cmd/flf/e2e_test.go` is behind the `e2e` build tag, so `go test ./...` never runs it. Six e2e tests were broken by two earlier tasks in this plan while the gate reported green, and that gap is how it stayed hidden for six commits. Add it to the repo's gate in `justfile`:
+
+```
+# The gate: go vet, gofmt, tests.
+test:
+    go vet ./...
+    @test -z "$(gofmt -l .)" || { echo "gofmt -l reported unformatted files:"; gofmt -l .; exit 1; }
+    go test ./...
+    go test -tags e2e ./...
+
+# Bare `just` runs the gate.
+default: test
+```
+
+Keep `go tool sqlc diff` out of it: that is a separate recipe already, and folding it in would make every gate run depend on a code generator.
+
+Then run: `go vet ./... && test -z "$(gofmt -l .)" && go test ./... && go test -tags e2e ./... && go tool sqlc diff`
+Expected: all clean. If the e2e run is flaky, re-run it once and report both results rather than hiding the flake.
 
 - [ ] **Step 3: Smoke the real binary**
 
