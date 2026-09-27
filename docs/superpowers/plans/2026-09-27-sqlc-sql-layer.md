@@ -89,7 +89,7 @@ The complete set of 35 queries, all previously inline. Annotation is `:execlasti
 |---|---|---|---|
 | 10 | `InsertMessage` | `:execlastid` | `store.go:439` |
 | 11 | `InsertMessageDefaultCreatedAt` | `:execlastid` | `store.go:444` |
-| 12 | `GetMessageMaxSeq` | `:one` | `store.go:417`, `store.go:787` |
+| 12 | `GetLastMessageSeq` | `:one` | `store.go:417`, `store.go:787` |
 | 13 | `GetMessageThreadIDByID` | `:one` | `store.go:426`, `store.go:609` |
 | 14 | `GetMessageIDByThreadSeq` | `:one` | `store.go:478`, `store.go:490` |
 | 15 | `ListMessages` | `:many` | `store.go:512` |
@@ -125,7 +125,7 @@ The complete set of 35 queries, all previously inline. Annotation is `:execlasti
 
 | # | sqlc name | Annotation | Replaces |
 |---|---|---|---|
-| 33 | `GetSessionEventMaxSeq` | `:one` | `session.go:192` |
+| 33 | `GetLastSessionEventSeq` | `:one` | `session.go:192` |
 | 34 | `InsertSessionEvent` | `:execlastid` | `session.go:199` |
 | 35 | `ListSessionEvents` | `:many` | `session.go:214` |
 
@@ -1005,11 +1005,11 @@ rules:
   - name: append-only
     message: "agents are append-only: DELETE is not permitted in query files"
     rule: |
-      !query.sql.contains("DELETE")
+      query.sql.contains("DELETE")
   - name: no-pragma
     message: "PRAGMA belongs in migrate.go, not in query files"
     rule: |
-      !query.sql.contains("PRAGMA")
+      query.sql.contains("PRAGMA")
 
 sql:
   - engine: "sqlite"
@@ -1040,6 +1040,12 @@ sql:
 ```
 
 Both `rules` blocks are required. The top-level block defines the CEL rules; the per-package list enables them by name. Omitting the per-package list silently disables both.
+
+**A CEL rule states the offending condition, not the passing one.** sqlc reports a violation when the expression evaluates to true, so the rule body must be `query.sql.contains("DELETE")` with **no** leading `!`. Writing `!query.sql.contains("DELETE")` makes `make vet` fail on a pristine tree, because a query that correctly contains no `DELETE` then trips the rule.
+
+The `no-pragma` rule is decorative and cannot fire: sqlc's SQLite parser drops `PRAGMA` statements before rules are evaluated, so such a query never reaches the rule engine and `generate` does not even error. It is kept because it costs four lines and would catch a `PRAGMA` that does parse under a future sqlc version, but the real guard is that `PRAGMA` lives in `migrate.go`, which is outside `queries/`.
+
+**The two `MAX(seq)` queries are deliberately aggregate-free.** sqlc's SQLite engine types no aggregate: `MAX(seq)` generates an `interface{}` return, and neither `COALESCE(MAX(seq), 0)` nor `cast(MAX(seq) as integer)` fixes it — the latter generates a plain `int64` scan that then fails at runtime with `converting NULL to int64 is unsupported` on every empty thread, breaking first-message appends. `SELECT seq ... ORDER BY seq DESC LIMIT 1` generates `(int64, error)`, is covered by the existing `idx_messages_thread_seq` / `idx_session_events` indexes, and signals the empty case as `sql.ErrNoRows` instead of a NULL. Any facade reading it **must** treat `sql.ErrNoRows` as "no rows yet, so the next seq is 1"; a bare `if err != nil` would turn the legitimate first-append into a spurious `ErrNotFound`.
 
 - [ ] **Step 2: Write queries/channels.sql**
 
@@ -1128,8 +1134,8 @@ VALUES(?, ?, ?, ?, ?, ?, ?, ?);
 INSERT INTO messages(thread_id, seq, parent_id, name, author_type, role, content)
 VALUES(?, ?, ?, ?, ?, ?, ?);
 
--- name: GetMessageMaxSeq :one
-SELECT MAX(seq) FROM messages WHERE thread_id = ?;
+-- name: GetLastMessageSeq :one
+SELECT seq FROM messages WHERE thread_id = ? ORDER BY seq DESC LIMIT 1;
 
 -- name: GetMessageThreadIDByID :one
 SELECT thread_id FROM messages WHERE id = ?;
@@ -1256,8 +1262,8 @@ WHERE t.id = ?;
 - [ ] **Step 7: Write queries/agent_session_events.sql**
 
 ```sql
--- name: GetSessionEventMaxSeq :one
-SELECT MAX(seq) FROM agent_session_events WHERE session_id = ?;
+-- name: GetLastSessionEventSeq :one
+SELECT seq FROM agent_session_events WHERE session_id = ? ORDER BY seq DESC LIMIT 1;
 
 -- name: InsertSessionEvent :execlastid
 INSERT INTO agent_session_events(session_id, seq, type, content)
@@ -1687,13 +1693,9 @@ func (s *Store) appendMessage(q *db.Queries, threadID int64, name, authorType, r
 	if n == 0 {
 		return 0, 0, ErrNotFound
 	}
-	maxSeq, err := q.GetMessageMaxSeq(ctx, threadID)
+	seq, err := nextMessageSeq(ctx, q, threadID)
 	if err != nil {
 		return 0, 0, err
-	}
-	seq := int64(1)
-	if maxSeq.Valid {
-		seq = maxSeq.Int64 + 1
 	}
 	if parentID > 0 {
 		parentThreadID, err := q.GetMessageThreadIDByID(ctx, parentID)
@@ -1879,14 +1881,18 @@ func nextThreadSeq(q *db.Queries, threadID int64) (int64, error) {
 	if n == 0 {
 		return 0, ErrNotFound
 	}
-	maxSeq, err := q.GetMessageMaxSeq(ctx, threadID)
+	return nextMessageSeq(ctx, q, threadID)
+}
+
+func nextMessageSeq(ctx context.Context, q *db.Queries, threadID int64) (int64, error) {
+	last, err := q.GetLastMessageSeq(ctx, threadID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 1, nil
+	}
 	if err != nil {
 		return 0, err
 	}
-	if maxSeq.Valid {
-		return maxSeq.Int64 + 1, nil
-	}
-	return 1, nil
+	return last + 1, nil
 }
 ```
 
@@ -2456,13 +2462,9 @@ func (s *Store) AppendSessionEvent(sessionID int64, eventType, content string) (
 	if exists == 0 {
 		return 0, 0, ErrNotFound
 	}
-	maxSeq, err := q.GetSessionEventMaxSeq(ctx, sessionID)
+	seq, err := nextSessionEventSeq(ctx, q, sessionID)
 	if err != nil {
 		return 0, 0, err
-	}
-	seq := int64(1)
-	if maxSeq.Valid {
-		seq = maxSeq.Int64 + 1
 	}
 	id, err := q.InsertSessionEvent(ctx, db.InsertSessionEventParams{
 		SessionID: sessionID,
@@ -2477,6 +2479,17 @@ func (s *Store) AppendSessionEvent(sessionID int64, eventType, content string) (
 		return 0, 0, err
 	}
 	return seq, id, nil
+}
+
+func nextSessionEventSeq(ctx context.Context, q *db.Queries, sessionID int64) (int64, error) {
+	last, err := q.GetLastSessionEventSeq(ctx, sessionID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 1, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return last + 1, nil
 }
 
 func (s *Store) ListSessionEvents(sessionID int64) ([]SessionEvent, error) {
