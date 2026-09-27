@@ -54,6 +54,25 @@ printf '[[agents]]\nname="reviewer"\ncommand="claude"\nargs=["-p","{prompt}"]\n'
 
 Docs: `VISION.md` for scope and the `kata`/`roborev` division of labor · `docs/backend.md` for the daemon, API, and CLI reference · `docs/agent-sessions.md` for why local agent runs are shaped the way they are, and what is out of scope · `docs/tui-architecture.md` and `docs/tui-keybindings.md` for the TUI.
 
+## Development
+
+Tasks run through [`justfile`](justfile); there is no `Makefile`. Install it once with `brew install just`. Bare `just` runs the gate — `go vet`, then `gofmt -l`, then `go test ./...` — and `just --list` shows the recipes.
+
+| Command | When |
+|---------|------|
+| `just test` | Before committing. |
+| `just generate` | After **any** change under `internal/store/queries/` or `internal/store/migrations/`. |
+| `just diff` | Before committing. Must be clean, and `just test` does not run it for you. |
+| `just vet` | After changing a query file. |
+
+The SQL layer is owned by [sqlc](https://sqlc.dev), pinned as a Go tool in `go.mod`, so there is nothing to install and no version drift. The schema lives in `internal/store/migrations/` as versioned, goose-formatted files, every statement lives in `internal/store/queries/` as an annotated `.sql` file, and `internal/db/` is **generated and committed** — never hand-edited. To change the schema:
+
+1. Add `internal/store/migrations/00002_add_message_edited_at.sql` with the `-- +goose Up` statements and a `-- +goose Down` that undoes them. The numeric prefix is zero-padded — `00002_`, `00010_`, never `10_` — because sqlc reads the directory in lexicographic order, so an unpadded `10_` would sort before `9_`.
+2. `just generate` — until the generator runs, nothing sees the new column.
+3. `just test`, then commit the migration and the regenerated `internal/db/` **in the same commit**.
+
+A query change is the same three beats against the matching file in `internal/store/queries/`, plus `just vet`; the generated methods are listed in `internal/db/querier.go`. Never edit a migration that has already been applied — write a new numbered one, or the schema on disk silently diverges from the migration set. The full rules, including why the `no-pragma` vet rule can never actually fire, are in [docs/backend.md](docs/backend.md#sql-layer).
+
 Manual QA: `./scripts/seed-tui.sh` builds a scratch install under `.tui-seed/`, seeds orphan and repo-anchored channels, threads, replies, reactions, and agent sessions across a 14-day timestamp spread, fires one live `@mention`, verifies the result, and execs the TUI. No environment setup, no daemon to start by hand. `--no-tui` stops after seeding; `SEED_AGENT_SLEEP` tunes how long the live agent runs.
 
 Thread data lives in `scripts/fixtures/*.jsonl`, where `@T-14d` style tokens are resolved against the clock at seed time. Agent sessions are staged by `scripts/seed-sessions.go` through `internal/store`, which needs the daemon stopped — the store has no WAL and no `busy_timeout`. `queued` and `running` sessions are deliberately never staged: the daemon reconciles both to `canceled` on startup, so only the live `@mention` can show those states.

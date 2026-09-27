@@ -42,7 +42,7 @@ migrations for the authoritative column list, constraints, and indexes.
 Migrations are versioned. `schema_migrations` records the highest applied version and
 `internal/store/migrate.go` applies pending files in ascending order, each in its own
 transaction. Adding a schema change means adding a new `NNNNN_name.sql` file and
-running `make generate`; never edit an already-applied migration.
+running `just generate`; never edit an already-applied migration.
 
 `migrateUp` applies each pending migration inside `applyMigration`, which opens a
 transaction, executes the file's Up section, and inserts the version row before
@@ -113,23 +113,28 @@ table, each query carrying a sqlc annotation such as `-- name: ListMessages :man
 | `sqlc.yaml` | Engine, paths, per-column `rename`/`overrides`, and the vet rules. |
 
 `internal/db/` is generated **and** committed. Committing it is what lets a reader of
-the history see the Go that a query change produced, and what makes `make diff`
-meaningful; hand-editing it is what makes `make diff` fail. The generator is
+the history see the Go that a query change produced, and what makes `just diff`
+meaningful; hand-editing it is what makes `just diff` fail. The generator is
 `sqlc-dev/sqlc`, pinned as a Go tool in `go.mod`, so the invocation is
 `go tool sqlc generate` — no `go install`, and no version drift away from the module.
 
 ### Workflow
 
+Every task in this repo runs through [`justfile`](../justfile); there is no `Makefile`.
+Run `just` for the gate, `just --list` to see the recipes.
+
 | Command | When |
 |---------|------|
-| `make generate` | After **any** change under `queries/` or `migrations/`. |
-| `make diff` | Before committing. Must be clean. |
-| `make vet` | After changing a query file. |
+| `just generate` | After **any** change under `queries/` or `migrations/`. |
+| `just diff` | Before committing. Must be clean. |
+| `just vet` | After changing a query file. |
+| `just test` | Before committing. `go vet`, then `gofmt`, then the suite. |
 
-`make diff` is the guard that matters, and it is the only one. It regenerates into a
+`just diff` is the guard that matters, and it is the only one. It regenerates into a
 temporary tree and diffs that against the committed `internal/db/`, so it fails both
-for a forgotten `make generate` and for a hand-edit of generated code — a forgotten
+for a forgotten `just generate` and for a hand-edit of generated code — a forgotten
 generate and a hand-edit are the same mismatch, and `diff` cannot tell them apart.
+Note that `just test` does **not** run `diff`; run both before committing.
 
 ### Vet rules, and one that cannot fire
 
@@ -137,7 +142,7 @@ generate and a hand-edit are the same mismatch, and `diff` cannot tell them apar
 
 - **`append-only`** — `query.sql.contains("DELETE")`. This works, and it is the
   mechanical half of the append-only contract: no query file may delete. A `DELETE`
-  anywhere in a query file fails `make vet`.
+  anywhere in a query file fails `just vet`.
 - **`no-pragma`** — `query.sql.contains("PRAGMA")`. This rule **can never fire.**
   sqlc's SQLite parser drops `PRAGMA` statements before rules are evaluated, so a
   `PRAGMA` in a query file produces no generated code, no rule violation, and a
@@ -149,7 +154,29 @@ generate and a hand-edit are the same mismatch, and `diff` cannot tell them apar
 
 ### Adding a migration
 
-Name the file `NNNNN_name.sql` with a **zero-padded** numeric prefix — `00002_`,
+A schema change and a query change are the same three-beat procedure; only the file you
+edit differs. For a **schema** change, for example a new column on `messages`:
+
+1. Add `internal/store/migrations/00002_add_message_edited_at.sql` containing the
+   `-- +goose Up` statements and a `-- +goose Down` that undoes them.
+2. `just generate` — the migration directory is sqlc's schema input, so the new column
+   is not visible to the generator until this runs.
+3. `just test`, then commit the migration **and** the regenerated `internal/db/`
+   together in one commit.
+
+For a **query** change, edit the annotated file for that table under
+`internal/store/queries/` instead, then run the same `just generate` → `just test`, and
+`just vet` as well since you touched a query file. Then switch the call site in
+`internal/store/` to the newly generated method; `internal/db/querier.go` is the list of
+what is available. `just diff` must be clean before you commit.
+
+Two things never to do: never hand-edit `internal/db/`, and never edit a migration that
+has already been applied — a database that already ran version N will never re-run it,
+so the schema on disk and the schema in the migration set silently diverge. Write a new
+numbered migration instead.
+
+The naming rules are strict, not stylistic. Name the file `NNNNN_name.sql` with a
+**zero-padded** numeric prefix — `00002_`,
 `00010_`, never `10_`. `parseMigrationVersion` in `migrate.go` reads the digits before
 the first `_` and rejects anything else, so the prefix is mandatory; padding is what
 keeps the two consumers of the directory in agreement. The runtime loader sorts by the
