@@ -363,6 +363,53 @@ func TestMarkSessionRunningUnknownIDIsNotFound(t *testing.T) {
 	}
 }
 
+func TestMarkSessionRunningEmptyStartedAtStoresEmptyString(t *testing.T) {
+	s, thID := newSessionFixture(t)
+	msgID := triggerMessage(t, s, thID, "@probe hi")
+	id, err := s.CreateSession(thID, msgID, "probe", SessionQueued, "auto", "c", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkSessionRunning(id, ""); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetSession(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != SessionRunning {
+		t.Fatalf("status = %q, want running", got.Status)
+	}
+	if got.StartedAt == nil {
+		t.Fatal("started_at is NULL, want the empty string: a zero timestamp must store '' and not SQL NULL")
+	}
+	if *got.StartedAt != "" {
+		t.Fatalf("started_at = %q, want %q", *got.StartedAt, "")
+	}
+}
+
+func TestSetSessionReplyZeroStoresZeroNotNull(t *testing.T) {
+	s, thID := newSessionFixture(t)
+	msgID := triggerMessage(t, s, thID, "@probe hi")
+	id, err := s.CreateSession(thID, msgID, "probe", SessionQueued, "auto", "c", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSessionReply(id, 0); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetSession(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ReplyMessageID == nil {
+		t.Fatal("reply_message_id is NULL, want 0: a zero reply id must store 0 and not SQL NULL")
+	}
+	if *got.ReplyMessageID != 0 {
+		t.Fatalf("reply_message_id = %d, want 0", *got.ReplyMessageID)
+	}
+}
+
 func TestCountAgentMessagesAfter(t *testing.T) {
 	s, thID := newSessionFixture(t)
 	humanSeq, _ := s.AppendMessage(thID, "alice", "human", "user", "human words")
@@ -484,5 +531,34 @@ func TestReconcileSessionsTerminatesOnlyNonTerminal(t *testing.T) {
 	untouched, _ := s.GetSession(done)
 	if untouched.Status != SessionSucceeded {
 		t.Fatalf("terminal session was modified: %q", untouched.Status)
+	}
+}
+
+func TestReconcileSessionsEmptyFinishedAtStoresEmptyString(t *testing.T) {
+	s, thID := newSessionFixture(t)
+	msgID := triggerMessage(t, s, thID, "@probe hi")
+	id, err := s.CreateSession(thID, msgID, "probe", SessionQueued, "auto", "c", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.ReconcileSessions("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("reconciled = %d, want 1", n)
+	}
+	got, err := s.GetSession(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != SessionCanceled {
+		t.Fatalf("status = %q, want canceled", got.Status)
+	}
+	if got.FinishedAt == nil {
+		t.Fatal("finished_at is NULL, want the empty string: a zero timestamp must store '' and not SQL NULL")
+	}
+	if *got.FinishedAt != "" {
+		t.Fatalf("finished_at = %q, want %q", *got.FinishedAt, "")
 	}
 }
