@@ -19,6 +19,19 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
+func TestParseAcceptsEveryNameTheRuleAdmits(t *testing.T) {
+	for _, name := range []string{"a", "Reviewer", "bob.smith", "ci..bot", "X"} {
+		entries, err := Parse([]byte("[[agents]]\nname = \""+name+"\"\ncommand = \"/bin/probe\"\n"), "/tmp/x.toml")
+		if err != nil {
+			t.Errorf("Parse(name=%q) = %v, want no error", name, err)
+			continue
+		}
+		if len(entries) != 1 || entries[0].Name != name {
+			t.Errorf("Parse(name=%q) = %+v", name, entries)
+		}
+	}
+}
+
 func TestParseAppliesDefaults(t *testing.T) {
 	entries, err := Parse([]byte("[[agents]]\nname = \"probe\"\ncommand = \"/bin/probe\"\n"), "/tmp/x.toml")
 	if err != nil {
@@ -78,7 +91,11 @@ func TestParseRejectsInvalid(t *testing.T) {
 		{"missing name", "[[agents]]\ncommand = \"x\"\n", "name"},
 		{"blank name", "[[agents]]\nname = \"   \"\ncommand = \"x\"\n", "name"},
 		{"missing command", "[[agents]]\nname = \"a\"\n", "command"},
-		{"uppercase name", "[[agents]]\nname = \"Reviewer\"\ncommand = \"x\"\n", "name"},
+		{"name with a dash", "[[agents]]\nname = \"ci-bot\"\ncommand = \"x\"\n", "name"},
+		{"name with an underscore", "[[agents]]\nname = \"ci_bot\"\ncommand = \"x\"\n", "name"},
+		{"name with a digit", "[[agents]]\nname = \"ci2\"\ncommand = \"x\"\n", "name"},
+		{"name ending with a dot", "[[agents]]\nname = \"ci.\"\ncommand = \"x\"\n", "name"},
+		{"name over 12 bytes", "[[agents]]\nname = \"thirteenchars\"\ncommand = \"x\"\n", "name"},
 		{"name starting with dash", "[[agents]]\nname = \"-a\"\ncommand = \"x\"\n", "name"},
 		{"name starting with underscore", "[[agents]]\nname = \"_a\"\ncommand = \"x\"\n", "name"},
 		{"bad reply", "[[agents]]\nname=\"a\"\ncommand=\"x\"\nreply=\"nope\"\n", "reply"},
@@ -232,7 +249,7 @@ func TestResolveMissingGlobalIsNotAnError(t *testing.T) {
 func TestResolvePropagatesParseError(t *testing.T) {
 	dir := t.TempDir()
 	global := filepath.Join(dir, "config.toml")
-	writeFile(t, global, "[[agents]]\nname=\"BAD\"\ncommand=\"x\"\n")
+	writeFile(t, global, "[[agents]]\nname=\"bad_agent\"\ncommand=\"x\"\n")
 	if _, err := NewLoader(global).Resolve(""); err == nil {
 		t.Fatal("expected a validation error from Resolve")
 	}

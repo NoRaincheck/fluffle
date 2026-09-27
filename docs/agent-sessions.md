@@ -166,12 +166,20 @@ separator. Requiring whitespace-or-end after the name would also accept it, and
 would additionally reject `@reviewer-x`, which the name charset already allows.
 **The name charset, not the delimiter, defines the token.**
 
-The parse charset and the config charset are deliberately different widths:
+The mention charset and the config charset are the same charset, and
+`internal/names` is the only place either is written down:
 
-- `mentions.Parse` accepts `[A-Za-z0-9]` then `[A-Za-z0-9_-]`, because a mention
-  is a lexical scan of arbitrary text.
-- `agentcfg` requires a profile name to match `^[a-z0-9][a-z0-9_-]*$`, lowercase
-  and case-sensitive.
+- A name is `^[A-Za-z](?:[A-Za-z.]*[A-Za-z])?$` and at most 12 bytes: ASCII
+  letters and dots, starting and ending with a letter. An agent profile is named
+  `ci.bot`, never `ci-bot`, `ci_bot`, or `ci2`.
+- `mentions.Parse` scans a mention token with that charset, and a token the
+  charset would have continued is not a name at all: `@alice2` and `@alice-bot`
+  parse to no name rather than to `alice`, because a mention is a lexical scan
+  of arbitrary text and `alice2` is far more likely to be prose than an agent
+  called `alice`. A mention of a 13-byte token is not a name either.
+- A name may not end with a dot: `mentions` trims trailing dots off a token, so
+  an agent named `ci.` could never be mentioned and would silently never
+  trigger.
 
 So `@Reviewer hi` parses as the name `Reviewer` and then resolves to nothing —
 inert text, no session, no error. That is the same outcome as any unresolvable

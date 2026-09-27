@@ -16,7 +16,7 @@ func TestCreateAndListAnchoredChannel(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	id, err := s.CreateChannel(context.Background(), "auth-refactor", "/tmp/proj", "git@x:y.git", "abc123", "", false)
+	id, err := s.CreateChannel(context.Background(), "auth-ref", "/tmp/proj", "git@x:y.git", "abc123", "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,7 +27,7 @@ func TestCreateAndListAnchoredChannel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0].Name != "auth-refactor" {
+	if len(got) != 1 || got[0].Name != "auth-ref" {
 		t.Fatalf("got %+v", got)
 	}
 }
@@ -52,12 +52,12 @@ func TestAppendAssignsSeqInOrder(t *testing.T) {
 	s, _ := Open(":memory:")
 	defer s.Close()
 	ch, _ := s.CreateChannel(context.Background(), "c", "/r", "", "", "", false)
-	th, err := s.CreateThread(context.Background(), ch, "Schema migration")
+	th, err := s.CreateThread(context.Background(), ch, "db-migration")
 	if err != nil {
 		t.Fatal(err)
 	}
 	s1, _ := s.AppendMessage(context.Background(), th, "alice", "human", "user", "first")
-	s2, _ := s.AppendMessage(context.Background(), th, "pi-agent", "agent", "assistant", "second")
+	s2, _ := s.AppendMessage(context.Background(), th, "pi.agent", "agent", "assistant", "second")
 	if s1 != 1 || s2 != 2 {
 		t.Fatalf("seqs %d %d", s1, s2)
 	}
@@ -185,7 +185,7 @@ func TestListMessagesLastNWithParentRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	childSeq, _, err := s.AppendMessageByParentSeq(context.Background(), threadID, rootSeq, "pi-agent", "agent", "assistant", "reply", "")
+	childSeq, _, err := s.AppendMessageByParentSeq(context.Background(), threadID, rootSeq, "pi.agent", "agent", "assistant", "reply", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +219,7 @@ func TestFileStorePersistsParentSequenceProjection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	childSeq, childID, err := s.AppendMessageByParentSeq(context.Background(), threadID, rootSeq, "pi-agent", "agent", "assistant", "reply", "2026-09-25T10:00:00Z")
+	childSeq, childID, err := s.AppendMessageByParentSeq(context.Background(), threadID, rootSeq, "pi.agent", "agent", "assistant", "reply", "2026-09-25T10:00:00Z")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +295,7 @@ func TestAppendMessageByParentSeqRejectsNegativeSequence(t *testing.T) {
 	s, _, threadID := newStoreWithThread(t, ":memory:")
 	defer s.Close()
 
-	if _, _, err := s.AppendMessageByParentSeq(context.Background(), threadID, -1, "pi-agent", "agent", "assistant", "reply", ""); err == nil {
+	if _, _, err := s.AppendMessageByParentSeq(context.Background(), threadID, -1, "pi.agent", "agent", "assistant", "reply", ""); err == nil {
 		t.Fatal("expected negative parent sequence error")
 	}
 	messages, err := s.ListMessages(context.Background(), threadID, 0)
@@ -326,7 +326,7 @@ func TestAppendMessageByParentSeqRejectsMissingAndCrossThreadParents(t *testing.
 		{name: "missing", parentSeq: 999},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, _, err := s.AppendMessageByParentSeq(context.Background(), threadID, tt.parentSeq, "pi-agent", "agent", "assistant", "reply", ""); !errors.Is(err, ErrNotFound) {
+			if _, _, err := s.AppendMessageByParentSeq(context.Background(), threadID, tt.parentSeq, "pi.agent", "agent", "assistant", "reply", ""); !errors.Is(err, ErrNotFound) {
 				t.Fatalf("parent seq %d error = %v, want ErrNotFound", tt.parentSeq, err)
 			}
 		})
@@ -377,7 +377,7 @@ func TestListReactionsReturnsThreadFieldsInMessageOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondSeq, err := s.AppendMessage(context.Background(), threadID, "pi-agent", "agent", "assistant", "second")
+	secondSeq, err := s.AppendMessage(context.Background(), threadID, "pi.agent", "agent", "assistant", "second")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -437,7 +437,7 @@ func TestAppendBatchRemapsSourceSequencesAndReferences(t *testing.T) {
 	}
 	events := []AppendEvent{
 		{Type: "message", SourceSeq: 10, Name: "alice", AuthorType: "human", Role: "user", Content: "imported root", CreatedAt: "2026-09-25T10:00:00Z"},
-		{Type: "message", SourceSeq: 20, ParentSeq: 10, Name: "pi-agent", AuthorType: "agent", Role: "assistant", Content: "imported reply", CreatedAt: "2026-09-25T10:01:00Z"},
+		{Type: "message", SourceSeq: 20, ParentSeq: 10, Name: "pi.agent", AuthorType: "agent", Role: "assistant", Content: "imported reply", CreatedAt: "2026-09-25T10:01:00Z"},
 		{Type: "message", SourceSeq: 30, ParentSeq: 1, Name: "alice", AuthorType: "human", Role: "user", Content: "existing parent", CreatedAt: "2026-09-25T10:02:00Z"},
 		{Type: "reaction", SourceSeq: 40, MessageSeq: 20, Name: "bob", AuthorType: "human", Emoji: "+1", CreatedAt: "2026-09-25T10:03:00Z"},
 		{Type: "reaction", SourceSeq: 50, MessageSeq: 1, Name: "carol", AuthorType: "human", Emoji: "👀", CreatedAt: "2026-09-25T10:04:00Z"},
@@ -504,7 +504,7 @@ func TestAppendBatchMapsEveryMessageDestination(t *testing.T) {
 	events := []AppendEvent{
 		{Type: "message", SourceSeq: 0, Name: "alice", AuthorType: "human", Role: "user", Content: "live first"},
 		{Type: "message", SourceSeq: 10, Name: "alice", AuthorType: "human", Role: "user", Content: "imported parent"},
-		{Type: "message", SourceSeq: 20, ParentSeq: 10, Name: "pi-agent", AuthorType: "agent", Role: "assistant", Content: "imported reply"},
+		{Type: "message", SourceSeq: 20, ParentSeq: 10, Name: "pi.agent", AuthorType: "agent", Role: "assistant", Content: "imported reply"},
 		{Type: "reaction", MessageSeq: 10, Name: "bob", AuthorType: "human", Emoji: "+1"},
 	}
 
@@ -641,7 +641,7 @@ func TestAppendBatchRejectsUnsortedMessageSourceSequences(t *testing.T) {
 	defer s.Close()
 	events := []AppendEvent{
 		{Type: "message", SourceSeq: 20, Name: "alice", AuthorType: "human", Role: "user", Content: "out of order parent"},
-		{Type: "message", SourceSeq: 10, ParentSeq: 20, Name: "pi-agent", AuthorType: "agent", Role: "assistant", Content: "out of order reply"},
+		{Type: "message", SourceSeq: 10, ParentSeq: 20, Name: "pi.agent", AuthorType: "agent", Role: "assistant", Content: "out of order reply"},
 	}
 
 	if _, err := s.AppendBatch(context.Background(), threadID, events); err == nil {
@@ -1130,5 +1130,101 @@ func TestListReactionsReturnsNilForEmptyThread(t *testing.T) {
 	}
 	if got != nil {
 		t.Fatalf("ListReactions returned a non-nil slice of length %d for an empty thread; want nil", len(got))
+	}
+}
+
+func TestCreateChannelRejectsBadSlug(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for _, name := range []string{"", "-lead", "1lead", "has space", "has_underscore", "has.dot", "thirteencharsabc"} {
+		if _, err := s.CreateChannel(context.Background(), name, "", "", "", "", true); !errors.Is(err, ErrInvalid) {
+			t.Errorf("CreateChannel(%q) = %v, want ErrInvalid", name, err)
+		}
+	}
+}
+
+func TestCreateThreadRejectsBadSlug(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	chID, err := s.CreateChannel(context.Background(), "eng", "", "", "", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, title := range []string{"", "Schema migration", "-lead", "has_underscore", "thirteencharsabc"} {
+		if _, err := s.CreateThread(context.Background(), chID, title); !errors.Is(err, ErrInvalid) {
+			t.Errorf("CreateThread(%q) = %v, want ErrInvalid", title, err)
+		}
+	}
+}
+
+func TestAppendMessageRejectsBadName(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	chID, err := s.CreateChannel(context.Background(), "eng", "", "", "", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thID, err := s.CreateThread(context.Background(), chID, "pr-review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"", "ci-bot", "ci_bot", "ci2", ".lead", "alice.", "ci.bot."} {
+		if _, err := s.AppendMessage(context.Background(), thID, name, "agent", "assistant", "hi"); !errors.Is(err, ErrInvalid) {
+			t.Errorf("AppendMessage(name=%q) = %v, want ErrInvalid", name, err)
+		}
+	}
+}
+
+func TestAppendBatchRejectsBadName(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	chID, err := s.CreateChannel(context.Background(), "eng", "", "", "", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thID, err := s.CreateThread(context.Background(), chID, "pr-review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AppendBatch(context.Background(), thID, []AppendEvent{{Type: "message", Name: "ci-bot", AuthorType: "agent", Role: "assistant", Content: "hi"}}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("AppendBatch(name=%q) = %v, want ErrInvalid", "ci-bot", err)
+	}
+	if _, err := s.AppendBatch(context.Background(), thID, []AppendEvent{{Type: "message", Name: "ci.bot", AuthorType: "agent", Role: "assistant", Content: "hi"}, {Type: "reaction", MessageSeq: 1, Emoji: "\U0001F440", Name: "ci-bot", AuthorType: "agent"}}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("AppendBatch(reaction name=%q) = %v, want ErrInvalid", "ci-bot", err)
+	}
+}
+
+func TestAddReactionRejectsBadName(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	chID, err := s.CreateChannel(context.Background(), "eng", "", "", "", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thID, err := s.CreateThread(context.Background(), chID, "pr-review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.AppendMessage(context.Background(), thID, "alice", "human", "user", "hi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddReaction(context.Background(), id, "\U0001F440", "ci-bot", "agent"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("AddReaction = %v, want ErrInvalid", err)
 	}
 }

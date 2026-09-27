@@ -30,14 +30,12 @@ func TestParseLeadingMentions(t *testing.T) {
 		{"name cannot start with dash", "@-x hi", nil, ""},
 		{"name cannot start with underscore", "@_x hi", nil, ""},
 		{"uppercase token parses", "@Reviewer hi", []string{"Reviewer"}, "hi"},
-		{"digits allowed", "@a1 hi", []string{"a1"}, "hi"},
-		{"digit leading name", "@1abc hi", []string{"1abc"}, "hi"},
-		{"underscore and dash inside", "@a_b-c hi", []string{"a_b-c"}, "hi"},
+		{"digit leading name is inert", "@1abc hi", nil, ""},
 		{"empty content", "", nil, ""},
 		{"whitespace only", "   \t ", nil, ""},
 		{"only mentions no request", "@a @b", []string{"a", "b"}, ""},
 		{"request keeps internal newlines", "@a line1\nline2", []string{"a"}, "line1\nline2"},
-		{"punctuation ends name", "@a.b hi", []string{"a"}, ".b hi"},
+		{"dot is a name byte", "@a.b hi", []string{"a.b"}, "hi"},
 		{"leading whitespace then mention", "  @a hi", []string{"a"}, "hi"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -49,6 +47,36 @@ func TestParseLeadingMentions(t *testing.T) {
 				t.Fatalf("request = %q, want %q", request, tc.wantRequest)
 			}
 		})
+	}
+}
+
+func TestParse(t *testing.T) {
+	tests := []struct {
+		content string
+		names   []string
+		request string
+	}{
+		{"@alice what changed?", []string{"alice"}, "what changed?"},
+		{"@alice @bob ship it", []string{"alice", "bob"}, "ship it"},
+		{"@alice @alice twice", []string{"alice"}, "twice"},
+		{"@alice.", []string{"alice"}, ""},
+		{"@alice. what changed?", []string{"alice"}, "what changed?"},
+		{"@ci.bot fix it", []string{"ci.bot"}, "fix it"},
+		{"@alice, ship it", []string{"alice"}, ", ship it"},
+		{"hello @alice", nil, ""},
+		{"@alice2 ship it", nil, ""},
+		{"@alice-bot ship it", nil, ""},
+		{"@2alice ship it", nil, ""},
+		{"@thirteencharsabc ship it", nil, ""},
+		{"", nil, ""},
+		{"@", nil, ""},
+	}
+	for _, tt := range tests {
+		gotNames, gotRequest := Parse(tt.content)
+		if !reflect.DeepEqual(gotNames, tt.names) || gotRequest != tt.request {
+			t.Errorf("Parse(%q) = %q, %q; want %q, %q",
+				tt.content, gotNames, gotRequest, tt.names, tt.request)
+		}
 	}
 }
 

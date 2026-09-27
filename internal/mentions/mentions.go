@@ -1,8 +1,17 @@
+// Package mentions extracts the leading @name run from a message.
 package mentions
 
-import "strings"
+import (
+	"strings"
 
-func Parse(content string) (names []string, request string) {
+	"github.com/NoRaincheck/fluffle/internal/names"
+)
+
+// Parse returns the distinct names in a leading @name run and the request
+// that follows it. The name charset, not a delimiter, ends a token, and a
+// token that a looser charset would have continued is not a name at all, so
+// @alice2 stays prose.
+func Parse(content string) (found []string, request string) {
 	rest := content
 	seen := map[string]bool{}
 	for {
@@ -10,37 +19,36 @@ func Parse(content string) (names []string, request string) {
 		if !strings.HasPrefix(trimmed, "@") {
 			break
 		}
-		body := trimmed[1:]
-		end := 0
-		for end < len(body) && isNameByte(body[end], end) {
-			end++
-		}
-		if end == 0 {
+		token, width := scanName(trimmed[1:])
+		if width == 0 {
 			break
 		}
-		name := body[:end]
-		if !seen[name] {
+		name := strings.TrimRight(token, ".")
+		if name != "" && !seen[name] {
 			seen[name] = true
-			names = append(names, name)
+			found = append(found, name)
 		}
-		rest = body[end:]
+		rest = trimmed[1+width:]
 	}
-	if len(names) == 0 {
+	if len(found) == 0 {
 		return nil, ""
 	}
-	return names, strings.TrimSpace(rest)
+	return found, strings.TrimSpace(rest)
 }
 
-func isNameByte(b byte, pos int) bool {
-	switch {
-	case b >= 'a' && b <= 'z':
-		return true
-	case b >= 'A' && b <= 'Z':
-		return true
-	case b >= '0' && b <= '9':
-		return true
-	case b == '_' || b == '-':
-		return pos > 0
+// scanName returns the leading run of name bytes in s and its width, or a
+// zero width when the run is not a name: too long, or followed by a byte a
+// looser charset would have continued.
+func scanName(s string) (string, int) {
+	end := 0
+	for end < len(s) && names.IsNameByte(s[end], end) {
+		end++
 	}
-	return false
+	if end > names.MaxName {
+		return "", 0
+	}
+	if end < len(s) && names.IsNameContinuation(s[end]) {
+		return "", 0
+	}
+	return s[:end], end
 }

@@ -296,7 +296,7 @@ Agent definitions are TOML, not JSON. Two files are read: `~/.fluffle/config.tom
 
 ```toml
 [[agents]]
-name = "reviewer"           # required, ^[a-z0-9][a-z0-9_-]*$
+name = "reviewer"           # required, ^[A-Za-z](?:[A-Za-z.]*[A-Za-z])?$, <= 12 bytes
 description = "reviews diffs"
 command = "claude"          # required
 args = ["-p", "{prompt}"]  # optional
@@ -306,7 +306,7 @@ env = { ANTHROPIC_API_KEY = "…" }
 system_prompt = "You are a meticulous reviewer."
 ```
 
-`name` and `command` are required — a name must match `^[a-z0-9][a-z0-9_-]*$` and a command must be non-blank. `reply` defaults to `auto` and must be one of the three values when set; `timeout_secs` defaults to 300 and must be in `1..9223372036`. The upper bound is `math.MaxInt64` nanoseconds expressed in seconds: a larger value wraps `time.Duration` negative, and the run would then fail instantly with an unexplained `agent timed out` instead of reporting a config error. An unknown key anywhere in the file is a hard error naming every unrecognized key, not a warning — a typo in `timeouts_secs` must not silently fall back to the default. Parsed files are cached by path and re-read when the file's mtime changes.
+`name` and `command` are required — a name must match `^[A-Za-z](?:[A-Za-z.]*[A-Za-z])?$` and be at most 12 bytes, and a command must be non-blank. The rule lives in `internal/names` and is the only definition of a name in the codebase; an agent profile is `ci.bot`, never `ci-bot`. `reply` defaults to `auto` and must be one of the three values when set; `timeout_secs` defaults to 300 and must be in `1..9223372036`. The upper bound is `math.MaxInt64` nanoseconds expressed in seconds: a larger value wraps `time.Duration` negative, and the run would then fail instantly with an unexplained `agent timed out` instead of reporting a config error. An unknown key anywhere in the file is a hard error naming every unrecognized key, not a warning — a typo in `timeouts_secs` must not silently fall back to the default. Parsed files are cached by path and re-read when the file's mtime changes.
 
 `~/.fluffle/daemon.json` stays JSON; only agent definitions are TOML.
 
@@ -320,7 +320,7 @@ A mention of a name that does not resolve is inert: no session row, no subproces
 
 Sessions are created only from a **human** message append — `POST /v1/threads/:id/messages` or `POST /v1/threads/:id/events` without `X-Fluffle-Agent`. A request carrying that header is a human-only gate: an agent cannot start a session, and therefore an agent cannot start an agent. Scanning happens after the message is committed, so a session's prompt always includes its own trigger message. A mention that is not leading (`text @reviewer`) does not trigger.
 
-`mentions.Parse` accepts a run of `@name` tokens at the very start of the content, allowing whitespace between them, and returns each distinct name once. A name is `[A-Za-z0-9]` plus `_`/`-` after the first byte. It also returns the text following the mention run, but the trigger discards that value: the prompt quotes the trigger message in full, mentions and all.
+`mentions.Parse` accepts a run of `@name` tokens at the very start of the content, allowing whitespace between them, and returns each distinct name once. A name is that same charset, and a token it would have continued is not a name at all: `@alice2` and `@alice-bot` resolve to nothing rather than to `alice`. It also returns the text following the mention run, but the trigger discards that value: the prompt quotes the trigger message in full, mentions and all.
 
 `UNIQUE(trigger_message_id, agent_name)` makes a repeated trigger on the same message a no-op rather than a second run.
 
@@ -384,13 +384,13 @@ Returns `{"ok":true}` with status 200.
 
 **`GET /v1/channels?repo=&include-orphaned=1`** — List channels. `repo` filters by canonical path. `include-orphaned=1` includes orphaned channels. Returns `[]Channel`.
 
-**`POST /v1/channels`** — Create channel. Body keys are matched case-insensitively against the field names the daemon decodes: `Name`, `RepoAbsPath`, `RepoRemote`, `RepoHeadSHA`, `RepoHeadBranch`, `Orphaned`. Agents get 403. An invalid payload (blank name, missing repo path, orphaned channel with a repo path) is `400 BAD_JSONL`; a duplicate channel is `409 CHANNEL_EXISTS`; a storage failure is `500 DAEMON_ERROR`. Returns `{"id":1}`.
+**`POST /v1/channels`** — Create channel. Body keys are matched case-insensitively against the field names the daemon decodes: `Name`, `RepoAbsPath`, `RepoRemote`, `RepoHeadSHA`, `RepoHeadBranch`, `Orphaned`. Agents get 403. An invalid payload (a name that is not a legal slug, missing repo path, orphaned channel with a repo path) is `400 BAD_JSONL`; a duplicate channel is `409 CHANNEL_EXISTS`; a storage failure is `500 DAEMON_ERROR`. Returns `{"id":1}`.
 
 ### Threads
 
 **`GET /v1/channels/:id/threads`** — List threads in a channel. Returns `[]Thread`.
 
-**`POST /v1/channels/:id/threads`** — Create thread. Body: `{"title":"..."}`. Agents get 403. A blank title is `400 BAD_JSONL`, an unknown channel is `404 CHANNEL_NOT_FOUND`, and a storage failure is `500 DAEMON_ERROR`. Returns `{"id":1}`.
+**`POST /v1/channels/:id/threads`** — Create thread. Body: `{"title":"..."}`. Agents get 403. A title that is not a legal slug is `400 BAD_JSONL`, an unknown channel is `404 CHANNEL_NOT_FOUND`, and a storage failure is `500 DAEMON_ERROR`. Returns `{"id":1}`.
 
 ### Inbox
 

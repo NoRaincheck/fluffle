@@ -27,7 +27,7 @@ func fixture(t *testing.T) *store.Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	thID, err := s.CreateThread(context.Background(), chID, "session states")
+	thID, err := s.CreateThread(context.Background(), chID, "sess-states")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func baseSpec(status string) SessionSpec {
 	return SessionSpec{
 		Channel:    "agents",
 		Orphaned:   true,
-		Thread:     "session states",
+		Thread:     "sess-states",
 		TriggerSeq: triggerSeq,
 		Agent:      "summarizer",
 		Status:     status,
@@ -406,7 +406,7 @@ func threadIDOf(t *testing.T, s *store.Store) int64 {
 			t.Fatal(err)
 		}
 		for _, th := range threads {
-			if th.Title == "session states" {
+			if th.Title == "sess-states" {
 				return th.ID
 			}
 		}

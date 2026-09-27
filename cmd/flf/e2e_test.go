@@ -1219,10 +1219,10 @@ func TestE2E_AgentPortableLoop(t *testing.T) {
 		if events[2].Type != "message" || events[2].Seq != events[1].Seq+1 || events[2].ParentSeq != 0 || events[2].Name != "alice" || events[2].Role != "user" || events[2].AuthorType != "human" || events[2].Content != "portable root" || events[2].Timestamp != "2026-09-25T10:00:00Z" {
 			t.Fatalf("%s root = %+v", label, events[2])
 		}
-		if events[3].Type != "message" || events[3].Seq != events[2].Seq+1 || events[3].ParentSeq != events[2].Seq || events[3].Name != "portable-agent" || events[3].Role != "user" || events[3].AuthorType != "agent" || events[3].Content != "portable reply" {
+		if events[3].Type != "message" || events[3].Seq != events[2].Seq+1 || events[3].ParentSeq != events[2].Seq || events[3].Name != "port.agent" || events[3].Role != "user" || events[3].AuthorType != "agent" || events[3].Content != "portable reply" {
 			t.Fatalf("%s reply = %+v, root seq %d", label, events[3], events[2].Seq)
 		}
-		if events[4].Type != "reaction" || events[4].MessageSeq != events[2].Seq || events[4].Name != "portable-agent" || events[4].AuthorType != "agent" || events[4].Emoji != "+1" || events[4].Role != "" {
+		if events[4].Type != "reaction" || events[4].MessageSeq != events[2].Seq || events[4].Name != "port.agent" || events[4].AuthorType != "agent" || events[4].Emoji != "+1" || events[4].Role != "" {
 			t.Fatalf("%s reaction = %+v, root seq %d", label, events[4], events[2].Seq)
 		}
 	}
@@ -1233,7 +1233,7 @@ func TestE2E_AgentPortableLoop(t *testing.T) {
 	}
 	rootSeq := events[2].Seq
 
-	out = runOK("portable reply", "message", "send", "--thread", threadID, "--reply-to-seq", strconv.FormatInt(rootSeq, 10), "--text", "-", "--agent-id", "portable-agent", "--as", "portable-agent", "--json")
+	out = runOK("portable reply", "message", "send", "--thread", threadID, "--reply-to-seq", strconv.FormatInt(rootSeq, 10), "--text", "-", "--agent-id", "port.agent", "--as", "port.agent", "--json")
 	var reply struct {
 		Seq       int64 `json:"seq"`
 		ParentSeq int64 `json:"parent_seq"`
@@ -1245,7 +1245,7 @@ func TestE2E_AgentPortableLoop(t *testing.T) {
 		t.Fatalf("reply = %+v, root seq %d", reply, rootSeq)
 	}
 
-	reactionOut := runOK("", "react", "add", "--thread", threadID, "--message-seq", strconv.FormatInt(rootSeq, 10), "--emoji", "+1", "--agent-id", "portable-agent", "--as", "portable-agent")
+	reactionOut := runOK("", "react", "add", "--thread", threadID, "--message-seq", strconv.FormatInt(rootSeq, 10), "--emoji", "+1", "--agent-id", "port.agent", "--as", "port.agent")
 	if reactionOut != "ok" {
 		t.Fatalf("reaction output = %q", reactionOut)
 	}
@@ -1388,7 +1388,7 @@ func TestE2E_AgentPortableLoop(t *testing.T) {
 
 	appendInput := "{\"type\":\"message\",\"parent_seq\":" + strconv.FormatInt(reply.Seq, 10) + ",\"name\":\"portable-agent\",\"author_type\":\"agent\",\"role\":\"assistant\",\"content\":\"portable appended\"}\n" +
 		"{\"type\":\"reaction\",\"message_seq\":" + strconv.FormatInt(reply.Seq+1, 10) + ",\"name\":\"portable-agent\",\"author_type\":\"agent\",\"emoji\":\"👀\"}\n"
-	appendResult := runCLIResult(t, env, bin, appendInput, "agent", "append", "--thread", threadID, "--file", "-", "--agent-id", "portable-agent")
+	appendResult := runCLIResult(t, env, bin, appendInput, "agent", "append", "--thread", threadID, "--file", "-", "--agent-id", "port.agent")
 	if appendResult.exitCode != 0 || appendResult.stdout != "" || appendResult.stderr != "" {
 		t.Fatalf("agent append: exit=%d stdout=%q stderr=%q", appendResult.exitCode, appendResult.stdout, appendResult.stderr)
 	}
@@ -1404,7 +1404,7 @@ func TestE2E_AgentPortableLoop(t *testing.T) {
 		t.Fatalf("appended reaction = %+v", appended[2])
 	}
 
-	failure := runCLIResult(t, env, bin, "", "message", "send", "--thread", threadID, "--reply-to-seq", "0", "--text", "-", "--agent-id", "portable-agent")
+	failure := runCLIResult(t, env, bin, "", "message", "send", "--thread", threadID, "--reply-to-seq", "0", "--text", "-", "--agent-id", "port.agent")
 	assertE2ECLIErrorResult(t, failure, "BAD_ARGS")
 
 	stop()

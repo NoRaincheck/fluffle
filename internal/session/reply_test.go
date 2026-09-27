@@ -170,7 +170,7 @@ func TestAutoModeWaitsForALateAgentPost(t *testing.T) {
 func TestAnotherAgentsPostDoesNotCountAsSelfPost(t *testing.T) {
 	s, m, thID, msgID := harness(t, cfgWith("auto"), &fakeRunner{stdout: "should post"})
 	fr := m.runner.(*fakeRunner)
-	fr.onStart = func() { selfPost(t, s, thID, "someone-else", "not mine") }
+	fr.onStart = func() { selfPost(t, s, thID, "other.agent", "not mine") }
 	m.Start(thID, msgID, []string{"probe"})
 	got := waitSession(t, s, onlySession(t, s, thID).ID, 15*time.Second)
 	if got.ReplyMessageID == nil {

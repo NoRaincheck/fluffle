@@ -742,7 +742,7 @@ func TestChannelAndThreadCreationStoreFailuresAreDaemonErrors(t *testing.T) {
 		body string
 	}{
 		{name: "channel create", path: "/v1/channels", body: `{"Name":"new","RepoAbsPath":"/repo"}`},
-		{name: "thread create", path: fmt.Sprintf("/v1/channels/%d/threads", channelID), body: `{"title":"new thread"}`},
+		{name: "thread create", path: fmt.Sprintf("/v1/channels/%d/threads", channelID), body: `{"title":"new-thread"}`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			rec := serveRequest(t, h, http.MethodPost, test.path, test.body)
@@ -761,7 +761,7 @@ func TestChannelAndThreadCreationValidationAndConflictsStayClientErrors(t *testi
 
 	blankThread := serveRequest(t, h, http.MethodPost, "/v1/channels/1/threads", `{"title":"  "}`)
 	assertErrorEnvelope(t, blankThread, http.StatusBadRequest, "BAD_JSONL")
-	missingChannel := serveRequest(t, h, http.MethodPost, "/v1/channels/9999/threads", `{"title":"orphan thread"}`)
+	missingChannel := serveRequest(t, h, http.MethodPost, "/v1/channels/9999/threads", `{"title":"orphan"}`)
 	assertErrorEnvelope(t, missingChannel, http.StatusNotFound, "CHANNEL_NOT_FOUND")
 }
 
@@ -791,7 +791,7 @@ func TestMessagePostRejectsParentFromAnotherThreadAsClientError(t *testing.T) {
 func TestBatchEventsUseJSONLCodecNormalization(t *testing.T) {
 	s, h, threadID := newTestHandlerWithThread(t)
 
-	body := `{"events":[{"role":"user","author":"legacy-agent","content":"no type, legacy author"},{"type":"message","name":"reviewer","role":"assistant","content":"typed"}]}`
+	body := `{"events":[{"role":"user","author":"legacy.agent","content":"no type, legacy author"},{"type":"message","name":"reviewer","role":"assistant","content":"typed"}]}`
 	rec := serveRequest(t, h, http.MethodPost, fmt.Sprintf("/v1/threads/%d/events", threadID), body)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d body %s", rec.Code, rec.Body.String())
@@ -803,7 +803,7 @@ func TestBatchEventsUseJSONLCodecNormalization(t *testing.T) {
 	if len(messages) != 2 {
 		t.Fatalf("messages = %+v", messages)
 	}
-	if messages[0].Name != "legacy-agent" || messages[0].AuthorType != "human" {
+	if messages[0].Name != "legacy.agent" || messages[0].AuthorType != "human" {
 		t.Fatalf("normalized legacy line = %+v", messages[0])
 	}
 	if messages[1].Name != "reviewer" || messages[1].AuthorType != "human" {

@@ -33,7 +33,7 @@ func TestSuccessfulPostsUseJSONContentType(t *testing.T) {
 		t.Fatal("channel id = 0")
 	}
 
-	threadRec := serveRequest(t, h, http.MethodPost, fmt.Sprintf("/v1/channels/%d/threads", channel.ID), `{"Title":"contract-thread"}`)
+	threadRec := serveRequest(t, h, http.MethodPost, fmt.Sprintf("/v1/channels/%d/threads", channel.ID), `{"Title":"contract-fix"}`)
 	assertJSONContentType(t, threadRec)
 	if threadRec.Code != http.StatusOK {
 		t.Fatalf("thread status = %d body %s", threadRec.Code, threadRec.Body.String())

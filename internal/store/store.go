@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/NoRaincheck/fluffle/internal/db"
+	"github.com/NoRaincheck/fluffle/internal/names"
 
 	_ "modernc.org/sqlite"
 )
@@ -75,8 +76,8 @@ func prepare(conn *sql.DB) error {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) CreateChannel(ctx context.Context, name, repoAbsPath, repoRemote, repoHeadSHA, repoHeadBranch string, orphaned bool) (int64, error) {
-	if strings.TrimSpace(name) == "" {
-		return 0, invalid("channel name required")
+	if err := names.Slug(name); err != nil {
+		return 0, invalid("%v", err)
 	}
 	var abs *string
 	var isOrphan int64
@@ -246,8 +247,8 @@ type InboxMessage struct {
 }
 
 func (s *Store) CreateThread(ctx context.Context, channelID int64, title string) (int64, error) {
-	if strings.TrimSpace(title) == "" {
-		return 0, invalid("title required")
+	if err := names.Slug(title); err != nil {
+		return 0, invalid("%v", err)
 	}
 	id, err := s.q.CreateThread(ctx, db.CreateThreadParams{ChannelID: channelID, Title: title})
 	if err != nil {
@@ -313,6 +314,9 @@ func (s *Store) AppendMessageByParentSeq(ctx context.Context, threadID, parentSe
 }
 
 func (s *Store) appendMessage(ctx context.Context, q *db.Queries, threadID int64, name, authorType, role, content, createdAt string, parentID int64) (int64, int64, error) {
+	if err := names.Name(name); err != nil {
+		return 0, 0, invalid("%v", err)
+	}
 	seq, err := nextMessageSeq(ctx, q, threadID)
 	if err != nil {
 		return 0, 0, err
@@ -524,6 +528,9 @@ func (s *Store) addReactionBySeq(ctx context.Context, q *db.Queries, threadID, m
 }
 
 func (s *Store) addReaction(ctx context.Context, q *db.Queries, messageID int64, emoji, name, authorType, createdAt string) (int64, int64, error) {
+	if err := names.Name(name); err != nil {
+		return 0, 0, invalid("%v", err)
+	}
 	var (
 		reactionID int64
 		err        error
