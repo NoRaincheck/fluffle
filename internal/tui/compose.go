@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"slices"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -36,6 +37,13 @@ func (m *composeModel) close() {
 	m.active, m.context, m.text, m.cursor, m.err = false, "", "", 0, ""
 }
 
+// runes is the text as the cursor counts it: the cursor is an index into this
+// and never a byte offset. Every edit goes through here, so there is one
+// definition of a position and a multi-byte character cannot be cut in half.
+func (m composeModel) runes() []rune { return []rune(m.text) }
+
+func (m *composeModel) setRunes(r []rune) { m.text = string(r) }
+
 func (m *composeModel) update(msg tea.KeyMsg) tea.Cmd {
 	switch msg.Type {
 	case tea.KeyEsc:
@@ -51,15 +59,19 @@ func (m *composeModel) update(msg tea.KeyMsg) tea.Cmd {
 		return func() tea.Msg { return composeSendMsg{text: text} }
 	case tea.KeyBackspace:
 		if m.cursor > 0 {
-			m.text = m.text[:m.cursor-1] + m.text[m.cursor:]
+			m.setRunes(slices.Delete(m.runes(), m.cursor-1, m.cursor))
 			m.cursor--
+		}
+	case tea.KeyDelete:
+		if m.cursor < len(m.runes()) {
+			m.setRunes(slices.Delete(m.runes(), m.cursor, m.cursor+1))
 		}
 	case tea.KeyLeft:
 		if m.cursor > 0 {
 			m.cursor--
 		}
 	case tea.KeyRight:
-		if m.cursor < len(m.text) {
+		if m.cursor < len(m.runes()) {
 			m.cursor++
 		}
 	case tea.KeyRunes, tea.KeySpace:
@@ -67,22 +79,28 @@ func (m *composeModel) update(msg tea.KeyMsg) tea.Cmd {
 		if len(runes) == 0 && msg.Type == tea.KeySpace {
 			runes = []rune{' '}
 		}
-		for _, r := range runes {
-			m.text = m.text[:m.cursor] + string(r) + m.text[m.cursor:]
-			m.cursor++
+		if len(runes) > 0 {
+			at := min(m.cursor, len(m.runes()))
+			m.setRunes(slices.Insert(m.runes(), at, runes...))
+			m.cursor = at + len(runes)
 		}
 	}
 	return nil
 }
 
+// caret is the text with the cursor glyph drawn between the two halves at the
+// cursor, so the box shows where the next keystroke lands. The cursor is a rune
+// index and is clamped, so a stale one splits nothing and overruns nothing.
+func (m composeModel) caret() string {
+	r := []rune(m.text)
+	at := min(max(m.cursor, 0), len(r))
+	return string(r[:at]) + "▏" + string(r[at:])
+}
+
 func (m composeModel) view() string {
-	cursor := "▏ "
-	if m.cursor < len(m.text) {
-		cursor = "▏"
-	}
 	lines := []string{
 		modalTitleStyle.Render(termtext.Truncate(termtext.SanitizeLine(m.context), m.width-6, "")),
-		pad(termtext.Truncate(m.text+cursor, m.width-6, ""), m.width-6),
+		pad(termtext.Truncate(m.caret(), m.width-6, ""), m.width-6),
 		m.errLine(),
 		modalHintStyle.Render("Enter to send · Esc to cancel"),
 	}

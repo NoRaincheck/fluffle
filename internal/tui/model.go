@@ -128,7 +128,7 @@ func (m model) bodyView() string {
 		m.titleLine(),
 		body,
 		dimStyle.Render("↑↓ nav · g group · v sort · Enter read · r reply · q quit"),
-		statusStyle.Width(m.width - 2).Render(termtext.Truncate(m.statusLine(), m.width-2, "…")),
+		statusStyle.Width(m.width - 2).Render(termtext.Truncate(termtext.SanitizeLine(m.statusLine()), m.width-2, "…")),
 	}, "\n")
 }
 
@@ -180,6 +180,16 @@ func (m model) statusLine() string {
 		return m.status
 	}
 	return ""
+}
+
+// appendStatus adds a note to the status band without losing what is already
+// there: a later note explains an action, and overwriting the reason with it
+// loses why the action was refused.
+func appendStatus(status, note string) string {
+	if status == "" {
+		return note
+	}
+	return status + " · " + note
 }
 
 // threadTitle names the thread the pane shows, or is empty for a channel row,
@@ -341,8 +351,8 @@ func (m *model) handleComposeSend(msg composeSendMsg) (tea.Model, tea.Cmd) {
 	if m.threadID == 0 {
 		// A failed thread load clears the id, so there is nowhere to send. The
 		// typed text is gone either way; say so rather than dropping it in
-		// silence.
-		m.status = "cannot reply — the thread is not loaded"
+		// silence, and keep the error that explains why the thread is not there.
+		m.status = appendStatus(m.status, "cannot reply — the thread is not loaded")
 		return m, nil
 	}
 	threadID, text := m.threadID, msg.text

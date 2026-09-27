@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -142,8 +143,155 @@ func TestComposeCursorMovesWithinTheText(t *testing.T) {
 	for range 2 {
 		c.update(tea.KeyMsg{Type: tea.KeyRight})
 	}
-	if c.cursor > len(c.text) {
+	if c.cursor > utf8.RuneCountInString(c.text) {
 		t.Errorf("cursor = %d, past the end of %q", c.cursor, c.text)
+	}
+}
+
+// The cursor counts runes, so the byte length of the text is the wrong bound
+// for it: on multi-byte text a cursor at the last rune still compares less
+// than the byte count, and right walks past the end.
+func TestComposeCursorStaysWithinAMultiByteText(t *testing.T) {
+	var c composeModel
+	c.open("reply")
+	c.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("éé")})
+	if c.cursor != 2 {
+		t.Fatalf("cursor = %d, want 2 after two runes", c.cursor)
+	}
+	if n := utf8.RuneCountInString(c.text); c.cursor != n {
+		t.Fatalf("cursor = %d, want %d (the rune count)", c.cursor, n)
+	}
+	for range 3 {
+		c.update(tea.KeyMsg{Type: tea.KeyRight})
+	}
+	if c.cursor > utf8.RuneCountInString(c.text) {
+		t.Errorf("cursor = %d, past the %d runes of %q",
+			c.cursor, utf8.RuneCountInString(c.text), c.text)
+	}
+}
+
+// Backspace deletes a whole rune. Slicing a byte out of a multi-byte character
+// leaves a lone continuation byte, which is invalid UTF-8 and is then sent to
+// the daemon as the reply body.
+func TestComposeBackspaceDeletesAWholeRune(t *testing.T) {
+	for _, tc := range []struct {
+		name, typed, want string
+		left              int
+	}{
+		{name: "one multi-byte rune", typed: "é", want: ""},
+		{name: "multi-byte rune then ASCII", typed: "aéb", want: "aé"},
+		{name: "two multi-byte runes", typed: "éé", want: "é"},
+		{name: "ASCII", typed: "ab", want: "a"},
+		{name: "multi-byte rune in the middle", typed: "aéb", want: "ab", left: 1},
+		{name: "combining mark is its own rune", typed: "e\u0301", want: "e"},
+	} {
+		var c composeModel
+		c.open("reply")
+		c.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(tc.typed)})
+		for range tc.left {
+			c.update(tea.KeyMsg{Type: tea.KeyLeft})
+		}
+		c.update(key("backspace"))
+		if c.text != tc.want {
+			t.Errorf("%s: text = %q, want %q", tc.name, c.text, tc.want)
+		}
+		if !utf8.ValidString(c.text) {
+			t.Errorf("%s: text %q is not valid UTF-8", tc.name, c.text)
+		}
+		if want := utf8.RuneCountInString(tc.typed) - tc.left - 1; c.cursor != want {
+			t.Errorf("%s: cursor = %d, want %d", tc.name, c.cursor, want)
+		}
+	}
+}
+
+// Delete removes the rune after the cursor, whole, for the same reason.
+func TestComposeDeleteRemovesAWholeRune(t *testing.T) {
+	for _, tc := range []struct {
+		name, typed, want string
+		left              int
+	}{
+		{name: "one multi-byte rune", typed: "é", want: "", left: 1},
+		{name: "multi-byte rune between ASCII", typed: "aéb", want: "ab", left: 2},
+		{name: "two multi-byte runes", typed: "éé", want: "é", left: 1},
+		{name: "ASCII", typed: "ab", want: "a", left: 1},
+		{name: "combining mark is its own rune", typed: "e\u0301", want: "e", left: 1},
+	} {
+		var c composeModel
+		c.open("reply")
+		c.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(tc.typed)})
+		for range tc.left {
+			c.update(tea.KeyMsg{Type: tea.KeyLeft})
+		}
+		c.update(tea.KeyMsg{Type: tea.KeyDelete})
+		if c.text != tc.want {
+			t.Errorf("%s: text = %q, want %q", tc.name, c.text, tc.want)
+		}
+		if !utf8.ValidString(c.text) {
+			t.Errorf("%s: text %q is not valid UTF-8", tc.name, c.text)
+		}
+		if want := utf8.RuneCountInString(tc.typed) - tc.left; c.cursor != want {
+			t.Errorf("%s: cursor = %d, want %d", tc.name, c.cursor, want)
+		}
+	}
+}
+
+// Delete at the end of the text has nothing after the cursor to remove. The
+// guard has to compare the cursor with the rune count: on multi-byte text the
+// byte length is larger, so a byte bound lets the delete run past the end.
+func TestComposeDeleteAtTheEndChangesNothing(t *testing.T) {
+	for _, typed := range []string{"ab", "é", "aéb", "éé"} {
+		var c composeModel
+		c.open("reply")
+		c.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(typed)})
+		c.update(tea.KeyMsg{Type: tea.KeyDelete})
+		if c.text != typed {
+			t.Errorf("delete at the end of %q gave %q", typed, c.text)
+		}
+		if c.cursor != utf8.RuneCountInString(typed) {
+			t.Errorf("delete at the end of %q moved the cursor to %d", typed, c.cursor)
+		}
+	}
+}
+
+// A typed multi-byte rune advances the caret by one, not by its byte length.
+func TestComposeTypingAMultiByteRuneAdvancesOne(t *testing.T) {
+	var c composeModel
+	c.open("reply")
+	c.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("é")})
+	if c.cursor != 1 {
+		t.Fatalf("cursor = %d, want 1 after one rune", c.cursor)
+	}
+	if c.text != "é" {
+		t.Fatalf("text = %q, want %q", c.text, "é")
+	}
+}
+
+// ASCII and multi-byte runes in one reply, edited in the middle, which is where
+// a byte cursor and a rune cursor disagree.
+func TestComposeEditsMixedASCIIAndMultiByte(t *testing.T) {
+	var c composeModel
+	c.open("reply")
+	c.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("aé漢b")})
+	for range 2 {
+		c.update(tea.KeyMsg{Type: tea.KeyLeft})
+	}
+	c.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("X")})
+	if c.text != "aéX漢b" {
+		t.Fatalf("text = %q, want %q", c.text, "aéX漢b")
+	}
+	c.update(key("backspace"))
+	if c.text != "aé漢b" {
+		t.Fatalf("after backspace: text = %q, want %q", c.text, "aé漢b")
+	}
+	c.update(tea.KeyMsg{Type: tea.KeyDelete})
+	if c.text != "aéb" {
+		t.Fatalf("after delete: text = %q, want %q", c.text, "aéb")
+	}
+	if !utf8.ValidString(c.text) {
+		t.Errorf("text %q is not valid UTF-8", c.text)
+	}
+	if want := utf8.RuneCountInString(c.text) - 1; c.cursor != want {
+		t.Errorf("cursor = %d, want %d", c.cursor, want)
 	}
 }
 
@@ -347,9 +495,8 @@ func TestComposeViewSanitizesTheContext(t *testing.T) {
 	}
 }
 
-// The cursor glyph is part of the text line. It is drawn at the end of the
-// line rather than at the cursor, so moving the cursor does not move the glyph;
-// what the box owes the reader is that the glyph is there at all.
+// The cursor glyph is part of the text line, so a box with the caret at the
+// end shows it immediately after the text.
 func TestComposeViewDrawsTheCursor(t *testing.T) {
 	var c composeModel
 	c.resize(MinWidth)
@@ -359,6 +506,50 @@ func TestComposeViewDrawsTheCursor(t *testing.T) {
 	}
 	if got := plain(c.view()); !strings.Contains(got, "hi▏") {
 		t.Errorf("the cursor is not drawn after the typed text: %q", got)
+	}
+}
+
+// The caret is drawn between the two halves of the text at the cursor, so
+// editing mid-string shows the caret mid-string. Drawn at the end of the line
+// instead, the box looks the same wherever the caret is.
+func TestComposeViewDrawsTheCaretAtTheCursor(t *testing.T) {
+	var c composeModel
+	c.resize(MinWidth)
+	c.open("reply in eng › pr-review")
+	for _, r := range "hi" {
+		c.update(key(string(r)))
+	}
+	for _, tc := range []struct {
+		name string
+		left int
+		want string
+	}{
+		{"cursor at the start", 0, "▏hi"},
+		{"cursor in the middle", 1, "h▏i"},
+		{"cursor at the end", 2, "hi▏"},
+	} {
+		c.cursor = tc.left
+		if got := plain(c.view()); !strings.Contains(got, tc.want) {
+			t.Errorf("%s: the caret is not drawn at %d, want %q in %q",
+				tc.name, tc.left, tc.want, got)
+		}
+	}
+}
+
+// The caret is drawn by rune position too, so a multi-byte rune is not split by
+// it and a caret past the end is clamped rather than panicking.
+func TestComposeViewDrawsTheCaretAmongMultiByteRunes(t *testing.T) {
+	var c composeModel
+	c.resize(MinWidth)
+	c.open("reply in eng › pr-review")
+	c.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("aé")})
+	c.cursor = 1
+	if got := plain(c.view()); !strings.Contains(got, "a▏é") {
+		t.Errorf("the caret is not between the two runes: %q", got)
+	}
+	c.cursor = 99
+	if got := plain(c.view()); !strings.Contains(got, "aé▏") {
+		t.Errorf("a caret past the end was not clamped: %q", got)
 	}
 }
 
@@ -445,6 +636,23 @@ func TestReplySendsToTheSelectedThread(t *testing.T) {
 	}
 }
 
+// The status line carries the daemon's error text, and readAPIError formats the
+// envelope's message with an unquoted %s, so a message with an escape sequence
+// in it arrives intact. Truncate preserves ANSI, so the status band has to
+// sanitize like the row and the thread view do.
+func TestStatusLineSanitizesTheDaemonError(t *testing.T) {
+	m := toModel(New("http://127.0.0.1:1"))
+	m.width, m.height = 120, 40
+	m.status = "error: DAEMON_ERROR: unsafe\x1b]0;pwned\x07 text"
+	got := m.View()
+	if strings.Contains(got, "\x1b") {
+		t.Fatalf("an escape sequence in a daemon error reached the status line: %q", got)
+	}
+	if !strings.Contains(plain(got), "unsafe") {
+		t.Fatalf("sanitization must keep the surrounding text: %q", plain(got))
+	}
+}
+
 // A thread load that failed left threadID at 0, so a reply cannot be sent. The
 // typed text is dropped either way, and the user must be told why.
 func TestReplyWithNoLoadedThreadSaysSo(t *testing.T) {
@@ -454,10 +662,33 @@ func TestReplyWithNoLoadedThreadSaysSo(t *testing.T) {
 	m.compose.open("reply in eng › pr-review")
 	next, _ := m.handleComposeSend(composeSendMsg{text: "hi"})
 	mm := toModel(next)
-	if mm.status == "" {
-		t.Fatal("dropping a reply with no loaded thread must say so")
+	const want = "cannot reply — the thread is not loaded"
+	if mm.status != want {
+		t.Errorf("status = %q, want %q", mm.status, want)
 	}
 	if mm.compose.active {
 		t.Fatal("compose must close on send")
+	}
+}
+
+// A refused send must not erase the reason it was refused. The daemon's error
+// is already in the status band, and overwriting it with a vaguer message loses
+// why the thread was not there.
+func TestRefusedReplyKeepsTheReasonItWasRefused(t *testing.T) {
+	m := toModel(New("http://127.0.0.1:1"))
+	m.width, m.height = 120, 40
+	m.threadID = 0
+	m.status = "error: DAEMON_DOWN: connection refused"
+	m.compose.open("reply in eng › pr-review")
+	next, _ := m.handleComposeSend(composeSendMsg{text: "hi"})
+	mm := toModel(next)
+	if !strings.Contains(mm.status, "DAEMON_DOWN: connection refused") {
+		t.Errorf("status = %q, want it to keep the reason", mm.status)
+	}
+	if mm.status == "error: DAEMON_DOWN: connection refused" {
+		t.Errorf("status = %q, want the explanation appended", mm.status)
+	}
+	if want := "cannot reply — the thread is not loaded"; !strings.Contains(mm.status, want) {
+		t.Errorf("status = %q, want it to contain %q", mm.status, want)
 	}
 }
