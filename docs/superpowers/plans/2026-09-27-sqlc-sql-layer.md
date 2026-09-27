@@ -854,9 +854,10 @@ package store
 
 import (
 	"errors"
+	"fmt"
 
 	"modernc.org/sqlite"
-	"modernc.org/sqlite/lib"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 func classify(err error) error {
@@ -868,23 +869,33 @@ func classify(err error) error {
 		return err
 	}
 	switch se.Code() {
-	case lib.SQLITE_CONSTRAINT_UNIQUE:
-		return ErrConflict
-	case lib.SQLITE_CONSTRAINT_FOREIGNKEY:
-		return ErrNotFound
-	case lib.SQLITE_CONSTRAINT_CHECK, lib.SQLITE_CONSTRAINT_NOTNULL:
-		return ErrInvalid
+	case sqlite3.SQLITE_CONSTRAINT_UNIQUE:
+		return fmt.Errorf("%w: %s", ErrConflict, se.Error())
+	case sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY:
+		return fmt.Errorf("%w: %s", ErrNotFound, se.Error())
+	case sqlite3.SQLITE_CONSTRAINT_CHECK, sqlite3.SQLITE_CONSTRAINT_NOTNULL:
+		return fmt.Errorf("%w: %s", ErrInvalid, se.Error())
 	}
 	return err
 }
 ```
+
+`modernc.org/sqlite/lib` declares its package as `sqlite3`, so the import needs that
+alias — the unaliased form does not compile.
+
+Each branch **wraps** rather than replaces, so `errors.Is(err, ErrInvalid)` still holds
+while `err.Error()` keeps a useful message. `apiserver` renders `err.Error()` straight
+into the response body and `AGENTS.md` requires an `{code, message}` envelope at every
+layer boundary, so returning the bare sentinel would reduce every constraint violation's
+message to the single word `"invalid"`. The wrapping shape matches the existing
+`invalid()` helper.
 
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `go test ./internal/store/ -run TestClassify -v`
 Expected: PASS for both pass-through cases and the `unique`, `check`, and `notnull` subtests. `TestClassifyForeignKeyViolation` reports SKIP.
 
-- [ ] **Step 5: Wire classify into the three substring sites**
+- [ ] **Step 5: Wire classify into all four error sites**
 
 In `store.go` `CreateChannel`, replace:
 
@@ -907,16 +918,37 @@ with:
 
 In `store.go` `addReactionTx`, replace the equivalent block ending in `return 0, 0, err` with `return 0, 0, classify(err)`. In `session.go` `CreateSession`, replace its block with `return 0, classify(err)`.
 
+**There is a fourth site, and omitting it causes a real regression.** `appendMessageTx`
+in `store.go` has two INSERT branches (the `createdAt != ""` variant and the default
+variant) whose errors are returned bare. Those are the only remaining path that can
+produce the `messages` CHECK and NOT NULL violations that `validateMessage` used to
+catch, so leaving them unclassified turns blank content, a bad `author_type`, and a bad
+`role` from HTTP 400 `BAD_JSONL` into HTTP 500 `DAEMON_ERROR`. Classify both:
+
+```go
+	res, err = tx.Exec(`INSERT INTO ...`)
+	if err != nil {
+		return 0, 0, classify(err)
+	}
+```
+
+You can confirm which sites matter by reading the `CHECK` constraints in
+`internal/store/migrations/00001_initial_schema.sql` and checking which Go code path
+can now reach each one.
+
 - [ ] **Step 6: Run the store tests and note the failures**
 
 Run: `go test ./internal/store/ 2>&1 | head -40`
-Expected: failures whose messages assert the old validator text, for example `"name and content required"` or `"emoji and name required"`. Record each failing assertion; these are the tests task step 7 updates.
+Expected: some failures. Record each one. Note that most `ErrInvalid` assertions in
+this suite already use `errors.Is`, so they will pass unchanged — the failures you see
+are the ones whose **premise** depended on the validator running before the database.
 
-- [ ] **Step 7: Delete the validators and update the affected assertions**
+- [ ] **Step 7: Delete the validators and fix any test whose premise broke**
 
 Delete `validateMessage` (`store.go:456-467`) and `validateReaction` (`store.go:619-627`). Remove their call sites in `appendMessageTx`, `addReactionTx`, `addReactionBySeqTx`, `AddReaction`, and `validateAppendEvent`.
 
-For each failure recorded in step 6, change the assertion to match the constraint-derived message. A `CHECK` or `NOT NULL` violation now surfaces as `ErrInvalid` wrapping the driver message, so assert on the sentinel rather than exact text:
+A `CHECK` or `NOT NULL` violation now surfaces as `ErrInvalid` wrapping the driver
+message, so assert on the sentinel rather than on text:
 
 ```go
 	if !errors.Is(err, ErrInvalid) {
@@ -924,7 +956,13 @@ For each failure recorded in step 6, change the assertion to match the constrain
 	}
 ```
 
-Replace exact-string assertions such as `err.Error() != "invalid: name and content required"` with this sentinel check. Where a test asserted a specific substring, assert the substring that the driver reliably produces — for a `CHECK(length(trim(name)) > 0)` violation that is `CHECK constraint failed`.
+Most such assertions already read this way and need no edit. Where a test fails, the
+cause will usually be that it used a **hardcoded row id in a store with no such row**,
+relying on the validator to reject the input before any existence probe ran. Repoint
+such a test at a real row id so it provokes the actual constraint — that makes it
+strictly stronger, because it now exercises `classify` rather than the deleted Go check.
+Do not weaken an assertion, and do not touch a test that is failing for any reason other
+than the removed validators.
 
 - [ ] **Step 8: Run the full suite**
 
