@@ -1,0 +1,1 @@
+{"seq":1,"role":"user","name":"alice","content":"This thread gets a real @mention appended by the seed script, so the session pane shows a live run rather than a staged one.","timestamp":"@T-1h"}

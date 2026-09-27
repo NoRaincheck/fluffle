@@ -35,5 +35,7 @@ go.work.sum
 
 # binary
 /flf
+# tui manual-qa scratch (scripts/seed-tui.sh)
+/.tui-seed/
 # superpowers sdd scratch
 .superpowers/

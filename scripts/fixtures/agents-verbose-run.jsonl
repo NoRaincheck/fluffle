@@ -1,0 +1,2 @@
+{"seq":1,"role":"user","name":"alice","content":"@replacer run the whole suite with -v and paste the output. It is long.","timestamp":"@T-1d"}
+{"type":"reaction","message_seq":1,"emoji":"😬","name":"bob","timestamp":"@T-1d"}

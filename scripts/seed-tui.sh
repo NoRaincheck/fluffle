@@ -1,219 +1,295 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
-
-# Seed script for TUI manual testing.
-# Creates orphan channels, repo-anchored channels, threads, messages,
-# threaded replies, and reactions so the TUI has rich data to display.
-# Messages span ~14 days with varied lengths (short ↔ 1000+ chars)
-# and monotonically increasing timestamps.
-#
-# Usage:
-#   export HOME_TMP=$(mktemp -d)
-#   export FLUFFLE_HOME=$HOME_TMP
-#   go run ./cmd/flf daemon start --background
-#   sleep 1
-#   ./scripts/seed-tui.sh
-#   go run ./cmd/flf tui
-
-export FLUFFLE_HOME="${FLUFFLE_HOME:?FLUFFLE_HOME not set}"
-export HOME_TMP="${HOME_TMP:?HOME_TMP not set}"
-
-# ── helpers ───────────────────────────────────────────────────────────
-flf() { go run ./cmd/flf "$@"; }
-flf_json() { go run ./cmd/flf "$@" --json; }
-flf_json_q() { go run ./cmd/flf "$@" --json | jq .; }
-
-# ── timestamp helpers ─────────────────────────────────────────────────
-# Base: 14 days ago, UTC. Each call adds ~10-30 minutes.
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+SCRATCH=${SCRATCH:-$ROOT/.tui-seed}
+export FLUFFLE_HOME=${FLUFFLE_HOME:-$SCRATCH/home}
+FIXTURES=$ROOT/scripts/fixtures
+RENDERED=$SCRATCH/rendered
+FIXTURE_REPO=$SCRATCH/repo
+BIN=$SCRATCH/bin/flf
 NOW=$(date -u +%s)
-BASE=$(( NOW - 14*86400 ))
-ELAPSED=0
+LAUNCH_TUI=1
+AGENT_SLEEP=${SEED_AGENT_SLEEP:-12}
 
-next_ts() {
-  # Add 10-30 minutes (random-ish but deterministic)
-  ELAPSED=$(( ELAPSED + 600 + (RANDOM % 1200) ))
-  date -u -d "@$(( BASE + ELAPSED ))" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || \
-  date -u -r $(( BASE + ELAPSED )) +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null
+usage() {
+  cat <<'EOF'
+Seeds a scratch Fluffle install with a rich TUI dataset and launches the TUI.
+
+  scripts/seed-tui.sh [--no-tui]
+
+Owns the whole lifecycle: wipes FLUFFLE_HOME, builds a fixture repo and a
+fresh flf binary, starts the daemon and waits for it, imports the JSONL
+fixtures in scripts/fixtures, stops the daemon to stage agent sessions
+through internal/store, restarts, fires one live @mention, verifies, and
+then execs `flf tui` from inside the fixture repo.
+
+Environment:
+  FLUFFLE_HOME   scratch home            (default: <repo>/.tui-seed/home)
+  SCRATCH        scratch root            (default: <repo>/.tui-seed)
+EOF
 }
 
-# ── agent senders ─────────────────────────────────────────────────────
-# Agents use --agent-id so the server sets author_type="agent" (purple in TUI).
-# Humans omit --agent-id so author_type="human" (blue in TUI).
-AGENT_REPLACER="replacer"
-AGENT_SUMMARIZER="summarizer"
+die() {
+  printf 'seed-tui: %s\n' "$*" >&2
+  exit 1
+}
 
-PORT=$(jq -r .port "$FLUFFLE_HOME/daemon.json")
+note() {
+  printf '\n%s\n' "$*"
+}
 
-# ── 1. orphan channel: general ───────────────────────────────────────
-flf_json_q channel create --orphaned --name general
+iso() {
+  date -u -r "$1" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null ||
+    date -u -d "@$1" +"%Y-%m-%dT%H:%M:%SZ"
+}
 
-# ── 2. orphan channel: random ────────────────────────────────────────
-flf_json_q channel create --orphaned --name random
+token_offset() {
+  local spec=${1#@T} sign=1 total=0 num unit
+  case $spec in
+    -*) sign=-1; spec=${spec#-} ;;
+    +*) spec=${spec#+} ;;
+  esac
+  while [[ $spec =~ ^([0-9]+)([dhms])(.*)$ ]]; do
+    num=${BASH_REMATCH[1]}
+    unit=${BASH_REMATCH[2]}
+    spec=${BASH_REMATCH[3]}
+    case $unit in
+      d) total=$((total + num * 86400)) ;;
+      h) total=$((total + num * 3600)) ;;
+      m) total=$((total + num * 60)) ;;
+      s) total=$((total + num)) ;;
+    esac
+  done
+  printf '%d' $((sign * total))
+}
 
-# ── 3. orphan channel: tui-testing ───────────────────────────────────
-flf_json_q channel create --orphaned --name tui-testing
+render() {
+  local src=$1 dst=$RENDERED/$(basename "$1") content tok
+  content=$(cat "$src")
+  for tok in $(grep -oE '@T[-+0-9dhms]*' "$src" | sort -u); do
+    content=${content//$tok/$(iso $((NOW - $(token_offset "$tok"))))}
+  done
+  printf '%s\n' "$content" >"$dst"
+}
 
-# ── 4. repo-anchored channel ─────────────────────────────────────────
-REPO=$(mktemp -d)
-git -C "$REPO" init -q
-git -C "$REPO" config user.email "t@t.com"
-git -C "$REPO" config user.name "T"
-touch "$REPO"/placeholder
-git -C "$REPO" add .
-git -C "$REPO" commit -qm init
-flf_json_q channel create --name dev --repo "$REPO"
+build() {
+  note "Building flf and seeding scripts"
+  mkdir -p "$SCRATCH/bin"
+  (cd "$ROOT" && go build -o "$BIN" ./cmd/flf)
+}
 
-# ── 5. threads in general ────────────────────────────────────────────
-flf_json_q thread new --channel general --orphaned --title "welcome"
-flf_json_q thread new --channel general --orphaned --title "announcements"
+fixture_repo() {
+  if [[ -d $FIXTURE_REPO/.git ]]; then
+    return
+  fi
+  rm -rf "$FIXTURE_REPO"
+  mkdir -p "$FIXTURE_REPO"
+  git -C "$FIXTURE_REPO" init -q
+  git -C "$FIXTURE_REPO" config user.email seed@fluffle.local
+  git -C "$FIXTURE_REPO" config user.name "Fluffle Seed"
+  printf 'fluffle tui manual-qa fixture\n' >"$FIXTURE_REPO/README.md"
+  git -C "$FIXTURE_REPO" add README.md
+  git -C "$FIXTURE_REPO" commit -qm "seed fixture"
+}
 
-# ── 6. threads in random ─────────────────────────────────────────────
-flf_json_q thread new --channel random --orphaned --title "off-topic"
-flf_json_q thread new --channel random --orphaned --title "memes"
+write_agent_config() {
+  cat >"$FLUFFLE_HOME/config.toml" <<EOF
+[[agents]]
+name = "replacer"
+description = "Seeded manual-QA agent. Sleeps so the live session is observable."
+command = "/bin/sh"
+args = ["-c", "echo 'reading config.toml'; sleep $AGENT_SLEEP; echo 'checked 2 agents'; sleep $AGENT_SLEEP; echo 'replacer: nothing to change'"]
+reply = "stdout"
+timeout_secs = $((AGENT_SLEEP * 4))
+EOF
+}
 
-# ── 7. threads in tui-testing ────────────────────────────────────────
-flf_json_q thread new --channel tui-testing --orphaned --title "tui feedback"
+daemon_up() {
+  "$BIN" daemon status --json >/dev/null 2>&1
+}
 
-# ── 8. threads in dev (repo) ─────────────────────────────────────────
-flf_json_q thread new --channel dev --repo "$REPO" --title "pr review"
-flf_json_q thread new --channel dev --repo "$REPO" --title "bug fix"
+start_daemon() {
+  "$BIN" daemon start --background >/dev/null
+  local waited=0
+  until daemon_up; do
+    sleep 0.2
+    waited=$((waited + 1))
+    ((waited > 100)) && die "daemon did not come up"
+  done
+}
 
-# ── 9. messages & replies ────────────────────────────────────────────
-# Gather thread IDs
-TID_WELCOME=$(flf_json_q thread list --channel general --orphaned | jq -r '.[] | select(.Title=="welcome") | .ID')
-TID_ANNOUNCE=$(flf_json_q thread list --channel general --orphaned | jq -r '.[] | select(.Title=="announcements") | .ID')
-TID_OFFTOPIC=$(flf_json_q thread list --channel random --orphaned | jq -r '.[] | select(.Title=="off-topic") | .ID')
-TID_MEMES=$(flf_json_q thread list --channel random --orphaned | jq -r '.[] | select(.Title=="memes") | .ID')
-TID_TUI=$(flf_json_q thread list --channel tui-testing --orphaned | jq -r '.[] | select(.Title=="tui feedback") | .ID')
-TID_PR=$(flf_json_q thread list --channel dev --repo "$REPO" | jq -r '.[] | select(.Title=="pr review") | .ID')
-TID_BUG=$(flf_json_q thread list --channel dev --repo "$REPO" | jq -r '.[] | select(.Title=="bug fix") | .ID')
+stop_daemon() {
+  daemon_up || return 0
+  "$BIN" daemon stop >/dev/null
+}
 
-# ── 9a. post root messages (no replies) ──────────────────────────────
-# Timestamps span ~14 days, monotonically increasing. Mix of short & long.
+channel_id() {
+  local name=$1 anchor=$2 out
+  if [[ $anchor == repo ]]; then
+    out=$("$BIN" channel list --repo "$FIXTURE_REPO" --json)
+  else
+    out=$("$BIN" channel list --include-orphaned --json)
+  fi
+  printf '%s' "$out" | jq -r --arg n "$name" '.[] | select(.Name == $n) | .ID' | head -1
+}
 
-# --- general: welcome (day 0) ---
-flf_json_q message send --thread "$TID_WELCOME" --text "Welcome to Fluffle! 🎉" --as alice --created-at "$(next_ts)"
-flf_json_q message send --thread "$TID_WELCOME" --text "Hey everyone!" --as bob --created-at "$(next_ts)"
-flf_json_q message send --thread "$TID_WELCOME" --text "Nice to be here" --as carol --created-at "$(next_ts)"
+make_channel() {
+  local name=$1 anchor=$2
+  if [[ $anchor == repo ]]; then
+    "$BIN" channel create --name "$name" --repo "$FIXTURE_REPO" >/dev/null
+  else
+    "$BIN" channel create --orphaned --name "$name" >/dev/null
+  fi
+  printf '  %-38s %s\n' "$name" "$anchor"
+}
 
-# --- general: announcements (day 1) ---
-flf_json_q message send --thread "$TID_ANNOUNCE" --text "We are absolutely thrilled to announce that Fluffle v0.1 is officially out! After months of dedicated development, late-night coding sessions, and rigorous testing, our team is finally ready to share this first public milestone with the community. Fluffle was built from the ground up to be a lightning-fast, lightweight data aggregation framework that doesn't get in your way. In this initial release, we've focused on core stability, intuitive API design, and blazing performance. You can now easily bundle, process, and route your data streams with minimal boilerplate. We've also included comprehensive documentation, a brand-new CLI tool, and a suite of examples to help you get started in minutes. This is just the beginning of our journey. We have big plans for v0.2, including plugin support and advanced routing features. We want to hear your feedback, so please check out the GitHub repository, open an issue, or submit a pull request. We appreciate your feedback and wish you a very happy coding day!!!" --as alice --created-at "$(next_ts)"
+seed_thread() {
+  local fixture=$1 channel=$2 anchor=$3 title=$4 ch id
+  ch=$(channel_id "$channel" "$anchor")
+  [[ -n $ch && $ch != null ]] || die "channel $channel not found"
+  if [[ $anchor == repo ]]; then
+    id=$("$BIN" thread new --channel "$channel" --repo "$FIXTURE_REPO" --title "$title" --json | jq -r .id)
+  else
+    id=$("$BIN" thread new --channel "$channel" --orphaned --title "$title" --json | jq -r .id)
+  fi
+  "$BIN" thread import --thread "$id" --file "$RENDERED/$fixture" >/dev/null
+  printf '  %-38s %s\n' "$title" "$fixture"
+}
 
-# --- agent: announcements (day 7.5) ---
-flf_json_q message send --thread "$TID_ANNOUNCE" --text "Announcement rotation check: 1 active announcement. No expirations scheduled." --as "$AGENT_REPLACER" --agent-id "$AGENT_REPLACER" --created-at "$(next_ts)"
+thread_sessions() {
+  local port
+  port=$(jq -r .port "$FLUFFLE_HOME/daemon.json")
+  curl -s "http://127.0.0.1:$port/v1/threads/$1/sessions" | jq 'length'
+}
 
-# --- random: off-topic (day 2) ---
-flf_json_q message send --thread "$TID_OFFTOPIC" --text "Anyone up for a game tonight?" --as dave --created-at "$(next_ts)"
+thread_id() {
+  "$BIN" thread list --channel "$1" --orphaned --json |
+    jq -r --arg t "$2" '.[] | select(.Title == $t) | .ID'
+}
 
-# --- agent: off-topic (day 8.5) ---
-flf_json_q message send --thread "$TID_OFFTOPIC" --text "Game night summary: 4 replies, 2 interested. Scheduling for Friday 8pm." --as "$AGENT_SUMMARIZER" --agent-id "$AGENT_SUMMARIZER" --created-at "$(next_ts)"
+verify() {
+  local inbox threads staged failures=0
+  inbox=$("$BIN" inbox --json --limit 500 | jq 'length')
+  threads=$("$BIN" channel list --include-orphaned --json | jq 'length')
+  staged=$(thread_sessions "$(thread_id agents "session states")")
+  printf '  channels                  %s\n' "$threads"
+  printf '  inbox messages            %s\n' "$inbox"
+  printf '  sessions in session states %s\n' "$staged"
+  printf '  sessions in verbose run    %s\n' "$(thread_sessions "$(thread_id agents "verbose run")")"
+  ((threads == 7)) || { printf '  FAIL: expected 7 channels\n' >&2; failures=1; }
+  ((inbox > 40)) || { printf '  FAIL: expected a rich inbox\n' >&2; failures=1; }
+  ((staged == 6)) || { printf '  FAIL: expected 6 staged sessions in session states\n' >&2; failures=1; }
+  ((failures == 0)) || die "seed verification failed"
+}
 
-# --- random: memes (day 3) ---
-flf_json_q message send --thread "$TID_MEMES" --text "Check this out" --as grace --created-at "$(next_ts)"
-flf_json_q message send --thread "$TID_MEMES" --text "😂😂😂" --as henry --created-at "$(next_ts)"
+main() {
+  case ${1:-} in
+    '') ;;
+    --no-tui) LAUNCH_TUI=0 ;;
+    -h | --help)
+      usage
+      return 0
+      ;;
+    *) usage >&2; die "unknown argument: $1" ;;
+  esac
 
-# --- agent: memes (day 3.5) ---
-flf_json_q message send --thread "$TID_MEMES" --text "Meme quality check: 2 posts, both above threshold. No spam detected." --as "$AGENT_REPLACER" --agent-id "$AGENT_REPLACER" --created-at "$(next_ts)"
+  command -v jq >/dev/null || die "jq is required"
+  command -v go >/dev/null || die "go is required"
 
-# --- tui-testing: feedback (day 4) ---
-flf_json_q message send --thread "$TID_TUI" --text "The preview panel looks great!" --as ivan --created-at "$(next_ts)"
-flf_json_q message send --thread "$TID_TUI" --text "Can we add dark mode?" --as judy --created-at "$(next_ts)"
+  note "Resetting $FLUFFLE_HOME"
+  (cd "$ROOT" && go run ./cmd/flf daemon stop >/dev/null 2>&1) || true
+  rm -rf "$FLUFFLE_HOME" "$RENDERED"
+  mkdir -p "$FLUFFLE_HOME" "$RENDERED"
 
-# --- agent: tui feedback (day 9.5) ---
-flf_json_q message send --thread "$TID_TUI" --text "Feedback digest: 4 messages, 2 feature requests (dark mode, starred threads). 1 bug report pending." --as "$AGENT_SUMMARIZER" --agent-id "$AGENT_SUMMARIZER" --created-at "$(next_ts)"
+  build
+  fixture_repo
 
-# --- dev: pr review (day 5) ---
-flf_json_q message send --thread "$TID_PR" --text "LGTM, r+1" --as alice --created-at "$(next_ts)"
+  note "Rendering fixtures"
+  for f in "$FIXTURES"/*.jsonl; do
+    render "$f"
+  done
 
-# --- agent: pr review (day 10.5) ---
-flf_json_q message send --thread "$TID_PR" --text "PR status: 3 messages, 2 approvals. All comments resolved." --as "$AGENT_REPLACER" --agent-id "$AGENT_REPLACER" --created-at "$(next_ts)"
+  write_agent_config
 
-# --- dev: bug fix (day 6) ---
-flf_json_q message send --thread "$TID_BUG" --text "Found the race condition" --as carol --created-at "$(next_ts)"
+  note "Starting daemon"
+  start_daemon
 
-# --- agent: bug fix (day 11.5) ---
-flf_json_q message send --thread "$TID_BUG" --text "Triage: race condition in channel map + TOCTOU in append handler. Severity: high. Assignee: carol." --as "$AGENT_REPLACER" --agent-id "$AGENT_REPLACER" --created-at "$(next_ts)"
+  note "Creating channels"
+  make_channel general orphaned
+  make_channel random orphaned
+  make_channel tui-testing orphaned
+  make_channel agents orphaned
+  make_channel release-coordination-and-handoffs orphaned
+  make_channel unicode-channels orphaned
+  make_channel dev repo
 
-# ── 9b. fetch message IDs for threaded replies ───────────────────────
-MSG_ANNOUNCE_ROOT=$(curl -s "http://127.0.0.1:$PORT/v1/threads/$TID_ANNOUNCE/messages" | jq -r '.[0].ID')
-MSG_OFFTOPIC_ROOT=$(curl -s "http://127.0.0.1:$PORT/v1/threads/$TID_OFFTOPIC/messages" | jq -r '.[0].ID')
-MSG_TUI_JUDY=$(curl -s "http://127.0.0.1:$PORT/v1/threads/$TID_TUI/messages" | jq -r '.[1].ID')
-MSG_PR_ALICE=$(curl -s "http://127.0.0.1:$PORT/v1/threads/$TID_PR/messages" | jq -r '.[0].ID')
-MSG_BUG_CAROL=$(curl -s "http://127.0.0.1:$PORT/v1/threads/$TID_BUG/messages" | jq -r '.[0].ID')
+  note "Seeding threads"
+  seed_thread general-welcome.jsonl general orphaned welcome
+  seed_thread general-announcements.jsonl general orphaned announcements
+  seed_thread random-off-topic.jsonl random orphaned off-topic
+  seed_thread random-memes.jsonl random orphaned memes
+  seed_thread tui-testing-feedback.jsonl tui-testing orphaned "tui feedback"
+  seed_thread dev-pr-review.jsonl dev repo "pr review"
+  seed_thread dev-bug-fix.jsonl dev repo "bug fix"
+  seed_thread release-long-names.jsonl release-coordination-and-handoffs orphaned \
+    cross-team-migration-notes-for-the-v1-cutover
+  seed_thread unicode-wide-glyphs.jsonl unicode-channels orphaned \
+    "全角・Display・Width・テスト"
+  seed_thread agents-session-states.jsonl agents orphaned "session states"
+  seed_thread agents-verbose-run.jsonl agents orphaned "verbose run"
+  seed_thread agents-no-session-here.jsonl agents orphaned "no session here"
+  seed_thread agents-live-mention.jsonl agents orphaned "live mention"
 
-# ── 9c. post threaded replies ────────────────────────────────────────
-# Mix of short replies and longer detailed responses
+  note "Staging agent sessions (daemon must be down: no WAL, no busy_timeout)"
+  stop_daemon
+  (cd "$ROOT" && go run ./scripts/seed-sessions.go)
 
-# announcements reply (day 7) - long
-flf_json_q message send --thread "$TID_ANNOUNCE" --text "When can we expect the TUI? I've been using the web interface and it's fine but having a native terminal client would be amazing for quick checks without opening a browser. Also wondering about offline support and whether there's a plan for mobile support down the road?" --as bob --reply-to "$MSG_ANNOUNCE_ROOT" --created-at "$(next_ts)"
+  note "Restarting daemon"
+  start_daemon
 
-# off-topic replies (day 8) - short
-flf_json_q message send --thread "$TID_OFFTOPIC" --text "I'm in!" --as eve --reply-to "$MSG_OFFTOPIC_ROOT" --created-at "$(next_ts)"
-flf_json_q message send --thread "$TID_OFFTOPIC" --text "Count me in too" --as frank --reply-to "$MSG_OFFTOPIC_ROOT" --created-at "$(next_ts)"
+  note "Firing one live @mention"
+  "$BIN" message send --thread "$(thread_id agents "live mention")" \
+    --text "@replacer live check: the newest inbox row should gain a session within a second" \
+    --as alice >/dev/null
 
-# tui-testing reply (day 9) - long
-flf_json_q message send --thread "$TID_TUI" --text "Dark mode is a must-have. I spend most of my time in tmux with a dark background and having a bright white terminal app would cause eye strain after a few hours. Also, some thoughts on the overall UX: the channel list on the left is great, but I think the thread panel could use a collapse/expand toggle. Currently it just takes up space even when I'm not actively following a thread. Maybe a 'starred threads' feature would help?" --as ivan --reply-to "$MSG_TUI_JUDY" --created-at "$(next_ts)"
+  note "Verifying"
+  verify
 
-# pr review replies (day 10) - short
-flf_json_q message send --thread "$TID_PR" --text "Minor nit on line 42" --as bob --reply-to "$MSG_PR_ALICE" --created-at "$(next_ts)"
-flf_json_q message send --thread "$TID_PR" --text "Fixed!" --as alice --reply-to "$MSG_PR_ALICE" --created-at "$(next_ts)"
+  note "Ready"
+  cat <<EOF
+  Try these first:
+    Enter            open the thread under the cursor (top row is the live mention)
+    s                session pane; press it again to go back to the thread
+    p  then  l       preview on, then switch to the full layout (preview turns itself off)
+    v                toggle sort: latest-desc vs channel/thread + time desc
+    f                filter; type zzz to see the 0/N filtered empty state
+    r  n  C  e       reply, new thread, new channel, react
+    C                anchors a new channel to $FIXTURE_REPO (the cwd for this TUI)
 
-# bug fix reply (day 11) - long
-flf_json_q message send --thread "$TID_BUG" --text "Nice find, I'll patch it. The issue is in the message append handler where we don't properly lock the channel map before iterating. I think we need a RWMutex here - reads can be concurrent but writes need exclusive access. I'll write a test case that reproduces the panic under load first." --as dave --reply-to "$MSG_BUG_CAROL" --created-at "$(next_ts)"
+  Session coverage:
+    agents / session states   failed, canceled, succeeded x4, one with "replied #N",
+                              two agents on a single message, reply modes auto/stdout/cli
+    agents / verbose run      41 events, exercises the "... N hidden ..." fold
+    agents / live mention     a real @mention run, queued then running for ~$((AGENT_SLEEP * 2))s
+    agents / no session here  press s and read the status bar
 
-# ── 9d. more messages for variety (days 12-14) ──────────────────────
-# Longer messages to fill out threads with realistic content
+  queued and running are never staged: the daemon reconciles both to canceled on
+  startup, so only a live run can show those states.
 
-flf_json_q message send --thread "$TID_WELCOME" --text "Quick note on etiquette: please keep general discussions friendly and on-topic. If you have suggestions for features or want to report bugs, tui-testing and dev are the right places. Have fun!" --as alice --created-at "$(next_ts)"
+  Keep poking at this install afterwards:
+    export FLUFFLE_HOME=$FLUFFLE_HOME
+    $BIN inbox --json --limit 20
+    $BIN thread list --channel agents --orphaned
 
-# --- agent: welcome (day 13) ---
-flf_json_q message send --thread "$TID_WELCOME" --text "Summary of this thread: 4 messages so far. Welcome everyone!" --as "$AGENT_SUMMARIZER" --agent-id "$AGENT_SUMMARIZER" --created-at "$(next_ts)"
+  Re-seed from scratch: scripts/seed-tui.sh
+EOF
 
-flf_json_q message send --thread "$TID_OFFTOPIC" --text "So I was thinking we could set up a weekly game night. Maybe Fridays at 8pm? I was thinking we could do a mix of party games and strategy games. Something like Jackbox for the party games and maybe a round of Catan or Ticket to Ride for strategy. Let me know what works for everyone and I'll set up a recurring calendar invite." --as dave --created-at "$(next_ts)"
+  if ((LAUNCH_TUI == 0)); then
+    return 0
+  fi
+  cd "$FIXTURE_REPO"
+  exec "$BIN" tui
+}
 
-flf_json_q message send --thread "$TID_TUI" --text "I've been prototyping a dark mode theme for the TUI. The main challenge is balancing contrast - too dark and text becomes hard to read, too bright and it defeats the purpose. I'm leaning towards a slate-900 background with slate-100 text for body content, and using indigo-500 for links and interactive elements. The key is making sure the thread list, message area, and input bar all have distinct visual hierarchy. Also need to handle the case where the user has a light terminal theme - we should detect that and offer a light mode variant." --as ivan --created-at "$(next_ts)"
-
-flf_json_q message send --thread "$TID_BUG" --text "After investigating the race condition further, I found it's not just in the channel map - the message append logic also has a TOCTOU issue where we check if a thread exists, then try to append, but another goroutine could have deleted it in between. The fix should use a single atomic operation with proper locking. I'll also add integration tests that run with -race and -cpu=4 to catch these in CI." --as carol --created-at "$(next_ts)"
-
-flf_json_q message send --thread "$TID_PR" --text "One more thing - can we add a check in CI to verify that all exported functions have godoc comments? It's been a while since we enforced this and I've noticed a few new functions without documentation. Consistent documentation makes it much easier for new contributors to understand the codebase." --as alice --created-at "$(next_ts)"
-
-# ── 10. reactions ────────────────────────────────────────────────────
-# Fetch message IDs for reactions (global IDs, not seq)
-MSG_WELCOME_ALICE=$(curl -s "http://127.0.0.1:$PORT/v1/threads/$TID_WELCOME/messages" | jq -r '.[0].ID')
-MSG_OFFTOPIC_DAVE=$(curl -s "http://127.0.0.1:$PORT/v1/threads/$TID_OFFTOPIC/messages" | jq -r '.[0].ID')
-MSG_MEMES_EVE=$(curl -s "http://127.0.0.1:$PORT/v1/threads/$TID_OFFTOPIC/messages" | jq -r '.[1].ID')
-MSG_TUI_JUDY_ID=$(curl -s "http://127.0.0.1:$PORT/v1/threads/$TID_TUI/messages" | jq -r '.[1].ID')
-MSG_PR_BOB=$(curl -s "http://127.0.0.1:$PORT/v1/threads/$TID_PR/messages" | jq -r '.[1].ID')
-MSG_BUG_DAVE=$(curl -s "http://127.0.0.1:$PORT/v1/threads/$TID_BUG/messages" | jq -r '.[1].ID')
-
-flf react add --message "$MSG_WELCOME_ALICE" --emoji "+1" --as bob
-flf react add --message "$MSG_WELCOME_ALICE" --emoji "🎉" --as carol
-flf react add --message "$MSG_OFFTOPIC_DAVE" --emoji "👀" --as dave
-flf react add --message "$MSG_OFFTOPIC_DAVE" --emoji "😂" --as eve
-flf react add --message "$MSG_OFFTOPIC_DAVE" --emoji "🤣" --as frank
-flf react add --message "$MSG_TUI_JUDY_ID" --emoji "👍" --as ivan
-flf react add --message "$MSG_TUI_JUDY_ID" --emoji "👎" --as judy
-flf react add --message "$MSG_PR_BOB" --emoji "✅" --as bob
-flf react add --message "$MSG_BUG_DAVE" --emoji "🔧" --as dave
-
-# ── 10b. agent reactions ─────────────────────────────────────────────
-flf react add --message "$MSG_WELCOME_ALICE" --emoji "🤖" --as "$AGENT_REPLACER" --agent-id "$AGENT_REPLACER"
-flf react add --message "$MSG_OFFTOPIC_DAVE" --emoji "📊" --as "$AGENT_SUMMARIZER" --agent-id "$AGENT_SUMMARIZER"
-flf react add --message "$MSG_PR_BOB" --emoji "✅" --as "$AGENT_REPLACER" --agent-id "$AGENT_REPLACER"
-
-# ── 11. summary ──────────────────────────────────────────────────────
-echo ""
-echo "=== Seed complete ==="
-echo "Channels:"
-flf_json_q channel list --include-orphaned
-echo ""
-echo "Threads:"
-flf_json_q thread list --channel general --orphaned
-flf_json_q thread list --channel random --orphaned
-flf_json_q thread list --channel tui-testing --orphaned
-flf_json_q thread list --channel dev --repo "$REPO"
-echo ""
-echo "Daemon port: $PORT"
-echo "Start TUI: go run ./cmd/flf tui"
+main "$@"
