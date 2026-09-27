@@ -1006,8 +1006,10 @@ func TestListChannelsCombinations(t *testing.T) {
 				t.Fatal(err)
 			}
 			var names []string
+			var orphaned []bool
 			for _, c := range got {
 				names = append(names, c.Name)
+				orphaned = append(orphaned, c.IsOrphaned)
 			}
 			if len(names) != len(tc.want) {
 				t.Fatalf("got %v, want %v", names, tc.want)
@@ -1015,6 +1017,10 @@ func TestListChannelsCombinations(t *testing.T) {
 			for i := range names {
 				if names[i] != tc.want[i] {
 					t.Fatalf("got %v, want %v", names, tc.want)
+				}
+				wantOrphaned := names[i] == "orphan"
+				if orphaned[i] != wantOrphaned {
+					t.Fatalf("channel %q: is_orphaned = %v, want %v", names[i], orphaned[i], wantOrphaned)
 				}
 			}
 		})

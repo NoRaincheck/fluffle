@@ -54,10 +54,7 @@ func Open(path string) (*Store, error) {
 }
 
 func prepare(conn *sql.DB) error {
-	if _, err := conn.Exec(`PRAGMA foreign_keys=ON`); err != nil {
-		return err
-	}
-	if err := assertForeignKeys(conn); err != nil {
+	if err := enableForeignKeys(conn); err != nil {
 		return err
 	}
 	legacy, err := legacyRebuildRequired(conn)

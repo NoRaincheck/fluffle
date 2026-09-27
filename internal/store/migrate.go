@@ -122,6 +122,13 @@ func applyMigration(conn *sql.DB, m migration) error {
 	return tx.Commit()
 }
 
+func enableForeignKeys(conn *sql.DB) error {
+	if _, err := conn.Exec(`PRAGMA foreign_keys=ON`); err != nil {
+		return err
+	}
+	return assertForeignKeys(conn)
+}
+
 func assertForeignKeys(conn *sql.DB) error {
 	var fk int
 	if err := conn.QueryRow(`PRAGMA foreign_keys`).Scan(&fk); err != nil {
@@ -138,18 +145,17 @@ func legacyRebuildRequired(conn *sql.DB) (bool, error) {
 	if err != nil || !present {
 		return false, err
 	}
-	return !hasColumnChecked(conn, "messages", "parent_id"), nil
+	has, err := hasColumn(conn, "messages", "parent_id")
+	if err != nil {
+		return false, err
+	}
+	return !has, nil
 }
 
 func tableExists(conn *sql.DB, table string) (bool, error) {
 	var n int
 	err := conn.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&n)
 	return n > 0, err
-}
-
-func hasColumnChecked(conn *sql.DB, table, column string) bool {
-	ok, err := hasColumn(conn, table, column)
-	return err == nil && ok
 }
 
 func dropLegacyTables(conn *sql.DB) error {

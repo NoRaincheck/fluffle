@@ -387,6 +387,9 @@ func (m *Manager) postReply(ctx context.Context, id int64, entry agentcfg.Entry,
 		m.store.FinishSession(context.Background(), id, store.SessionFailed, exit, stringPtr(err.Error()), nowRFC3339())
 		return
 	}
-	m.store.SetSessionReply(context.Background(), id, replyID)
+	if err := m.store.SetSessionReply(context.Background(), id, replyID); err != nil {
+		m.store.FinishSession(context.Background(), id, store.SessionFailed, exit, stringPtr(err.Error()), nowRFC3339())
+		return
+	}
 	m.store.FinishSession(context.Background(), id, store.SessionSucceeded, exit, nil, nowRFC3339())
 }
