@@ -2,7 +2,6 @@ package apiserver
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -17,23 +16,40 @@ func seedRows(t *testing.T) *store.Store {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
-	chID, err := s.CreateChannel(context.Background(), "eng", "", "", "", "", true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	thID, err := s.CreateThread(context.Background(), chID, "pr-review")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, body := range []string{"looks great", "ship it"} {
-		if _, err := s.AppendMessage(context.Background(), thID, "alice", "human", "user", body); err != nil {
+	for _, seed := range []struct {
+		channel string
+		threads map[string][]string
+	}{
+		{channel: "eng", threads: map[string][]string{
+			"pr-review": {"looks great", "ship it"},
+			"ci-flake":  {"flaky again"},
+		}},
+		{channel: "ops", threads: map[string][]string{
+			"deploy": {"shipped"},
+		}},
+	} {
+		chID, err := s.CreateChannel(context.Background(), seed.channel, "", "", "", "", true)
+		if err != nil {
 			t.Fatal(err)
+		}
+		for title, bodies := range seed.threads {
+			thID, err := s.CreateThread(context.Background(), chID, title)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, body := range bodies {
+				if _, err := s.AppendMessage(context.Background(), thID, "alice", "human", "user", body); err != nil {
+					t.Fatal(err)
+				}
+			}
 		}
 	}
 	return s
 }
 
 func TestRowsEndpoint(t *testing.T) {
+	want := map[string]int{"message": 4, "thread": 3, "channel": 2}
+	seen := make(map[string]int, len(want))
 	h := NewHandler(seedRows(t))
 	for _, g := range []string{"message", "thread", "channel"} {
 		rec := httptest.NewRecorder()
@@ -41,15 +57,19 @@ func TestRowsEndpoint(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("g=%s status = %d, want 200", g, rec.Code)
 		}
-		if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
-			t.Errorf("g=%s Content-Type = %q", g, ct)
-		}
+		assertJSONContentType(t, rec)
 		var rows []store.Row
-		if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
-			t.Fatal(err)
+		decodeResponse(t, rec, &rows)
+		if len(rows) != want[g] {
+			t.Errorf("g=%s rows = %d, want %d", g, len(rows), want[g])
 		}
-		if len(rows) == 0 {
-			t.Errorf("g=%s returned no rows", g)
+		seen[g] = len(rows)
+	}
+	for a, countA := range seen {
+		for b, countB := range seen {
+			if a < b && countA == countB {
+				t.Fatalf("fixture gives g=%s and g=%s both %d rows, so it cannot tell them apart", a, b, countA)
+			}
 		}
 	}
 }
@@ -59,17 +79,19 @@ func TestRowsRejectsBadGranularity(t *testing.T) {
 	for _, q := range []string{"", "?g=folder", "?g="} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/rows"+q, nil))
-		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("/v1/rows%s status = %d, want 400", q, rec.Code)
-		}
-		var eb struct{ Code, Message string }
-		if err := json.Unmarshal(rec.Body.Bytes(), &eb); err != nil {
-			t.Fatal(err)
-		}
-		if eb.Code == "" || eb.Message == "" {
-			t.Fatalf("/v1/rows%s error envelope = %+v", q, eb)
-		}
+		assertErrorEnvelope(t, rec, http.StatusBadRequest, "BAD_ARGS")
 	}
+}
+
+func TestRowsMapsStoreFailureToDaemonError(t *testing.T) {
+	s := seedRows(t)
+	h := NewHandler(s)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/rows?g=message", nil))
+	assertErrorEnvelope(t, rec, http.StatusInternalServerError, "DAEMON_ERROR")
 }
 
 func TestRowsEndpointCoexistsWithInbox(t *testing.T) {
