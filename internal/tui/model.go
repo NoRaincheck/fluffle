@@ -139,9 +139,10 @@ func (m model) bodyView() string {
 	}, "\n")
 }
 
-// hintLine names every key the TUI answers, on one row, with no `?` overlay and
-// no context-sensitive text. It has to fit the 71-column floor, which is what
-// bounds how much of the keymap can be said out loud.
+// hintLine names the navigable keys, on one row, with no `?` overlay and no
+// context-sensitive text. It has to fit the 71-column floor, which is what
+// bounds how much of the keymap can be said out loud; `q` and ctrl+c are the
+// keys it leaves to muscle memory.
 func hintLine() string {
 	return dimStyle.Render("↑↓ nav · g group · v sort · Enter read · Esc back · r reply · q quit")
 }

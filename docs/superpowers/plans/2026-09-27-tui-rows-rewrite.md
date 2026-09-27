@@ -2994,8 +2994,10 @@ const tickInterval = 2 * time.Second
 
 type tickMsg struct{}
 
-// tick arms the next refresh. It is scheduled from a response, never from a
-// timer loop, so there is at most one tick in flight.
+// tick arms the next refresh. It is scheduled from the rows response and by
+// nothing else, so a steady state has exactly one tick in flight. A key that
+// triggers its own refetch briefly adds a second, which is why the invariant is
+// one tick per outstanding refetch rather than a hard one.
 func (m model) tick() tea.Cmd {
 	return tea.Tick(tickInterval, func(time.Time) tea.Msg { return tickMsg{} })
 }
