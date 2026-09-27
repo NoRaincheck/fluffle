@@ -1912,7 +1912,6 @@ type model struct {
 	scroll         int
 	threadID       int64
 	thread         []store.Message
-	threadScroll   int
 	status         string
 	api            *apiClient
 	compose        composeModel
@@ -2398,7 +2397,6 @@ const (
 	threadClockW  = 5
 	threadHeadGap = 1
 	threadBodyAt  = threadIndent + threadClockW + threadHeadGap
-	threadMinBody = 8
 )
 
 // renderThread draws a thread at any width: in the pane beside the list, or
@@ -2427,7 +2425,7 @@ func renderThread(w, h int, title string, thread []store.Message) string {
 // Every line is truncated and padded to w, so a long author name or a wide
 // grapheme cannot push a line past the pane.
 func threadLines(w int, thread []store.Message) []string {
-	body := max(w-threadBodyAt, threadMinBody)
+	body := w - threadBodyAt
 	lines := make([]string, 0, len(thread)*3)
 	for _, m := range thread {
 		header := strings.Repeat(" ", threadIndent) +
@@ -2527,7 +2525,6 @@ func (m *model) openThread() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.detail = true
-	m.threadScroll = 0
 	return m, m.syncThread()
 }
 ```
@@ -2844,7 +2841,6 @@ func (m *model) openReply() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.detail = true
-	m.threadScroll = 0
 	m.compose.open("reply in " + row.Channel + " › " + row.Thread)
 	return m, m.syncThread()
 }

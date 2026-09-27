@@ -208,7 +208,6 @@ type model struct {
     scroll         int    // list row offset
     threadID       int64  // thread whose messages are loaded
     thread         []store.Message
-    threadScroll   int
     status         string
     api            *apiClient
     compose        composeModel
