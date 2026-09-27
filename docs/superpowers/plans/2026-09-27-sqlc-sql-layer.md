@@ -26,7 +26,7 @@ These apply to every task. They are copied verbatim from the spec.
 - **Empty-slice convention is per-method and must be preserved exactly.** The methods are not symmetric, so copy the right one per method:
   - return **nil**: `ListChannels`, `ListThreads`, `ListMessages`, `ListReactions`
   - return **non-nil** (seeded with `[]T{}` or normalized from nil): `ListInbox`, `ListSessions`, `ListSessionEvents`
-  With `emit_empty_slices: false`, sqlc's `:many` returns nil, so the three non-nil methods need an explicit `if out == nil { out = []T{} }`. Note that `apiserver` currently normalizes nil to `[]` at all five HTTP list endpoints, so this is a **store-internal** convention rather than an API-visible one — it is preserved because it is the current behavior and `store_test.go` observes it, not because the HTTP response would change. Do not "normalize" a nil-returning method to an empty slice: that is still a behavior change, just an invisible one.
+  With `emit_empty_slices: false`, sqlc's `:many` returns nil, so the three non-nil methods need an explicit `if out == nil { out = []T{} }`. **`ListInbox` is the one that is genuinely wire-visible:** `apiserver` normalizes nil to `[]` for the other four (`server.go` for channels, threads, messages and reactions; `sessions.go:117` for session events), so for those the HTTP response is invariant to the store convention and it is a store-internal detail. The inbox handler at `server.go:394-399` passes the slice straight to `writeJSON` with **no** normalization, so an empty inbox renders as `null` unless the store returns a non-nil empty slice. Do not "normalize" a nil-returning method to an empty slice either — that is still a behavior change, just an invisible one.
 - **No existing test may be modified to accommodate a new implementation** in tasks 1-9. A test that must change means behavior changed, which requires sign-off. Task 3 (validator removal) is the single sanctioned exception and must update the affected assertions in the same commit.
 - Identifiers named `db` collide with the new `db` package. `store.go` lines 106, 118, 139, 155, 162 all bind a variable or parameter named `db`; rename to `conn`.
 - Two-phase context rollout: tasks 5-9 keep the existing `Store` method signatures and pass `context.Background()` internally. Task 10 is the one isolated commit that threads real contexts. Do not thread context early.
@@ -1945,22 +1945,25 @@ Append to `store_test.go`:
 
 ```go
 func TestListInboxReturnsEmptySliceNotNil(t *testing.T) {
-	s, _, threadID := newStoreWithThread(t, ":memory:")
-	if _, err := s.AppendMessage(threadID, "human", "human", "user", "hi"); err != nil {
-		t.Fatal(err)
-	}
+	s, _, _ := newStoreWithThread(t, ":memory:")
 	got, err := s.ListInbox(10)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got == nil {
-		t.Fatal("ListInbox returned nil; must return an empty slice so JSON is [] not null")
+		t.Fatal("ListInbox returned nil; the inbox endpoint does not normalize, so an empty inbox would render as null instead of []")
 	}
-	if len(got) != 1 {
-		t.Fatalf("got %d, want 1", len(got))
+	if len(got) != 0 {
+		t.Fatalf("got %d messages, want 0", len(got))
 	}
 }
 ```
+
+The store must be **empty**. `newStoreWithThread` creates a channel and a thread but no
+messages, so the zero-row path is what this exercises. Adding a message first would make
+the test pass whether or not `ListInbox` normalizes, because one row always yields a
+non-nil slice — the empty case is the only one that distinguishes them, and it is the only
+one that matters, because the inbox endpoint at `server.go:394-399` does no normalization.
 
 - [ ] **Step 2: Run it**
 
