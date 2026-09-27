@@ -512,38 +512,15 @@ Expected: PASS.
 
 - [ ] **Step 5: Add the failing store tests**
 
-First check whether `newTestStore` and a thread-seeding helper already exist in `internal/store/store_test.go`; if not, add them once at the top of that file and reuse them:
-
-```go
-func newTestStore(t *testing.T) *Store {
-	t.Helper()
-	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { s.Close() })
-	return s
-}
-
-func seedThread(t *testing.T, s *Store, channel, title string) int64 {
-	t.Helper()
-	chID, err := s.CreateChannel(context.Background(), channel, "", "", "", "", true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	thID, err := s.CreateThread(context.Background(), chID, title)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return thID
-}
-```
-
-Then append:
+Append to `internal/store/store_test.go`. Match the file's existing style: `Open(":memory:")` inline, `defer s.Close()`, and `context.Background()`. Do not introduce a shared test helper.
 
 ```go
 func TestCreateChannelRejectsBadSlug(t *testing.T) {
-	s := newTestStore(t)
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
 	for _, name := range []string{"", "-lead", "1lead", "has space", "has_underscore", "has.dot", "thirteencharsabc"} {
 		if _, err := s.CreateChannel(context.Background(), name, "", "", "", "", true); !errors.Is(err, ErrInvalid) {
 			t.Errorf("CreateChannel(%q) = %v, want ErrInvalid", name, err)
@@ -552,7 +529,11 @@ func TestCreateChannelRejectsBadSlug(t *testing.T) {
 }
 
 func TestCreateThreadRejectsBadSlug(t *testing.T) {
-	s := newTestStore(t)
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
 	chID, err := s.CreateChannel(context.Background(), "eng", "", "", "", "", true)
 	if err != nil {
 		t.Fatal(err)
@@ -565,8 +546,19 @@ func TestCreateThreadRejectsBadSlug(t *testing.T) {
 }
 
 func TestAppendMessageRejectsBadName(t *testing.T) {
-	s := newTestStore(t)
-	thID := seedThread(t, s, "eng", "pr-review")
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	chID, err := s.CreateChannel(context.Background(), "eng", "", "", "", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thID, err := s.CreateThread(context.Background(), chID, "pr-review")
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, name := range []string{"", "ci-bot", "ci_bot", "ci2", ".lead"} {
 		if _, err := s.AppendMessage(context.Background(), thID, name, "agent", "assistant", "hi"); !errors.Is(err, ErrInvalid) {
 			t.Errorf("AppendMessage(name=%q) = %v, want ErrInvalid", name, err)
@@ -575,8 +567,19 @@ func TestAppendMessageRejectsBadName(t *testing.T) {
 }
 
 func TestAddReactionRejectsBadName(t *testing.T) {
-	s := newTestStore(t)
-	thID := seedThread(t, s, "eng", "pr-review")
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	chID, err := s.CreateChannel(context.Background(), "eng", "", "", "", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thID, err := s.CreateThread(context.Background(), chID, "pr-review")
+	if err != nil {
+		t.Fatal(err)
+	}
 	id, err := s.AppendMessage(context.Background(), thID, "alice", "human", "user", "hi")
 	if err != nil {
 		t.Fatal(err)
@@ -753,7 +756,11 @@ Append to `internal/store/store_test.go`:
 
 ```go
 func TestListRowsGranularityCounts(t *testing.T) {
-	s := newTestStore(t)
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
 	eng, err := s.CreateChannel(context.Background(), "eng", "", "", "", "", true)
 	if err != nil {
 		t.Fatal(err)
@@ -838,7 +845,6 @@ func TestListRowsGranularityCounts(t *testing.T) {
 	if !sawEmpty {
 		t.Error("a thread with no messages must still appear")
 	}
-	_ = beta
 
 	channels, err := s.ListRows(context.Background(), GranularityChannel, 0)
 	if err != nil {
@@ -859,14 +865,22 @@ func TestListRowsGranularityCounts(t *testing.T) {
 }
 
 func TestListRowsRejectsUnknownGranularity(t *testing.T) {
-	s := newTestStore(t)
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
 	if _, err := s.ListRows(context.Background(), "folder", 0); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("ListRows(folder) = %v, want ErrInvalid", err)
 	}
 }
 
 func TestListRowsClampsLimit(t *testing.T) {
-	s := newTestStore(t)
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
 	for _, limit := range []int{0, -5, 100000} {
 		if _, err := s.ListRows(context.Background(), GranularityMessage, limit); err != nil {
 			t.Fatalf("limit %d must not error: %v", limit, err)
@@ -1021,9 +1035,9 @@ package apiserver
 
 import (
 	"encoding/json"
+	"context"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"testing"
 
 	"github.com/NoRaincheck/fluffle/internal/store"
@@ -1031,21 +1045,21 @@ import (
 
 func seedRows(t *testing.T) *store.Store {
 	t.Helper()
-	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	s, err := store.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
-	chID, err := s.CreateChannel(t.Context(), "eng", "", "", "", "", true)
+	chID, err := s.CreateChannel(context.Background(), "eng", "", "", "", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	thID, err := s.CreateThread(t.Context(), chID, "pr-review")
+	thID, err := s.CreateThread(context.Background(), chID, "pr-review")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, body := range []string{"looks great", "ship it"} {
-		if _, err := s.AppendMessage(t.Context(), thID, "alice", "human", "user", body); err != nil {
+		if _, err := s.AppendMessage(context.Background(), thID, "alice", "human", "user", body); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1648,7 +1662,7 @@ func renderRows(w, h int, rows []store.Row, cursor, scroll int) string {
 	}
 	lines := make([]string, 0, h)
 	if len(rows) == 0 {
-		lines = append(lines, pad("", placeholder("no rows — press g to change group"), w))
+		lines = append(lines, pad(placeholder("no rows — press g to change group"), w))
 		scroll = 0
 	}
 	for i := scroll; i < len(rows) && len(lines) < h; i++ {
@@ -1923,24 +1937,11 @@ func (m model) View() string {
 }
 
 // bodyView is title, body, hint, and status: chromeH rows of chrome around
-// exactly the rest.
+// exactly the rest. Task 8 adds the split pane and the fullscreen thread.
 func (m model) bodyView() string {
-	h := m.height - chromeH
-	var body string
-	switch {
-	case m.detail:
-		body = renderThread(m.paneWidth(), h, m.threadTitle(), m.thread)
-	case m.split():
-		body = strings.Join([]string{
-			renderRows(ListW, h, m.rows, m.cursor, m.scroll),
-			renderThread(m.width-ListW, h, m.threadTitle(), m.thread),
-		}, "\n")
-	default:
-		body = renderRows(m.width, h, m.rows, m.cursor, m.scroll)
-	}
 	return strings.Join([]string{
 		m.titleLine(),
-		body,
+		renderRows(m.width, m.height-chromeH, m.rows, m.cursor, m.scroll),
 		dimStyle.Render("↑↓ nav · g group · v sort · Enter read · r reply · q quit"),
 		statusStyle.Width(m.width - 2).Render(termtext.Truncate(m.statusLine(), m.width-2, "…")),
 	}, "\n")
@@ -1948,16 +1949,9 @@ func (m model) bodyView() string {
 
 func (m model) tooNarrow() bool { return m.width < MinWidth || m.height < MinHeight }
 
+// split reports whether the terminal is wide enough for the list and the
+// thread side by side. Task 8 uses it.
 func (m model) split() bool { return m.width >= MinSplitWidth }
-
-// paneWidth is the width the thread is drawn at, whether it sits beside the
-// list or fills the terminal.
-func (m model) paneWidth() int {
-	if m.split() && !m.detail {
-		return m.width - ListW
-	}
-	return m.width
-}
 
 func (m model) titleLine() string {
 	order := "newest first"
@@ -1983,7 +1977,6 @@ func (m model) threadTitle() string {
 	}
 	return row.Channel + " › " + row.Thread
 }
-
 func narrowNotice(w, h int) string {
 	return fmt.Sprintf("flf needs %d columns and %d rows (got %dx%d) — resize the terminal",
 		MinWidth, MinHeight, w, h)
@@ -2339,11 +2332,14 @@ import (
 	"github.com/NoRaincheck/fluffle/internal/tui/termtext"
 )
 
+// A message is a clock, an author, and a body on its own lines. The body
+// starts one cell past the clock, so the author is free to run further right
+// on the header line without ever colliding with the body below it.
 const (
 	threadIndent  = 2
 	threadClockW  = 5
 	threadHeadGap = 1
-	threadBodyAt  = threadIndent + threadClockW + threadHeadGap + 1
+	threadBodyAt  = threadIndent + threadClockW + threadHeadGap
 	threadMinBody = 8
 )
 
@@ -2370,17 +2366,20 @@ func renderThread(w, h int, title string, thread []store.Message) string {
 }
 
 // threadLines is every message as a header line plus its wrapped content.
+// Every line is truncated and padded to w, so a long author name or a wide
+// grapheme cannot push a line past the pane.
 func threadLines(w int, thread []store.Message) []string {
 	body := max(w-threadBodyAt, threadMinBody)
 	lines := make([]string, 0, len(thread)*3)
 	for _, m := range thread {
-		lines = append(lines, threadHeaderStyle.Render(
-			strings.Repeat(" ", threadIndent)+
-				pad(termtext.Truncate(formatClock(m.CreatedAt), threadClockW, ""), threadClockW)+
-				strings.Repeat(" ", threadHeadGap)+
-				pad(nameStyle(m.AuthorType).Render(termtext.Truncate(termtext.SanitizeLine(m.Name), ColW, "")), ColW)))
+		header := strings.Repeat(" ", threadIndent) +
+			pad(formatClock(m.CreatedAt), threadClockW) +
+			strings.Repeat(" ", threadHeadGap) +
+			nameStyle(m.AuthorType).Render(termtext.Truncate(termtext.SanitizeLine(m.Name), ColW, ""))
+		lines = append(lines, pad(threadHeaderStyle.Render(termtext.Truncate(header, w, "")), w))
 		for _, line := range termtext.Wrap(termtext.SanitizeBlock(m.Content), body) {
-			lines = append(lines, pad(threadBodyStyle.Render(strings.Repeat(" ", threadBodyAt)+line), w))
+			lines = append(lines, pad(
+				threadBodyStyle.Render(strings.Repeat(" ", threadBodyAt)+termtext.Truncate(line, w-threadBodyAt, "")), w))
 		}
 	}
 	return lines
@@ -2405,7 +2404,45 @@ func padLines(s string, w, h int) string {
 }
 ```
 
-- [ ] **Step 4: Wire `enter` and `esc` into `handleKey`**
+- [ ] **Step 4: Wire the split pane and `enter`/`esc` into `model.go`**
+
+Replace `bodyView` with the version that has somewhere to put the thread:
+
+```go
+// bodyView is title, body, hint, and status: chromeH rows of chrome around
+// exactly the rest. In a split terminal the thread sits beside the list; in a
+// stacked one it replaces the list; either way it is the same renderThread.
+func (m model) bodyView() string {
+	h := m.height - chromeH
+	var body string
+	switch {
+	case m.detail:
+		body = renderThread(m.paneWidth(), h, m.threadTitle(), m.thread)
+	case m.split():
+		body = strings.Join([]string{
+			renderRows(ListW, h, m.rows, m.cursor, m.scroll),
+			renderThread(m.width-ListW, h, m.threadTitle(), m.thread),
+		}, "\n")
+	default:
+		body = renderRows(m.width, h, m.rows, m.cursor, m.scroll)
+	}
+	return strings.Join([]string{
+		m.titleLine(),
+		body,
+		dimStyle.Render("↑↓ nav · g group · v sort · Enter read · r reply · q quit"),
+		statusStyle.Width(m.width - 2).Render(termtext.Truncate(m.statusLine(), m.width-2, "…")),
+	}, "\n")
+}
+
+// paneWidth is the width the thread is drawn at, whether it sits beside the
+// list or fills the terminal.
+func (m model) paneWidth() int {
+	if m.split() && !m.detail {
+		return m.width - ListW
+	}
+	return m.width
+}
+```
 
 Add to the `switch msg.String()` in `handleKey`, and add the method:
 
@@ -3009,7 +3046,7 @@ Re-slug every example: `auth-refactor` stays, `Schema migration` becomes `schema
 
 - [ ] **Step 6: Verify no doc names a deleted thing**
 
-Run: `rg -n 'layout:compact|layout:full|preview pane|session pane|/v1/inbox|InboxMessage|filter modal|viewChannels' README.md VISION.md docs/`
+Run: `rg -n 'layout:compact|layout:full|preview pane|session pane|/v1/inbox|InboxMessage|filter modal|viewChannels' README.md VISION.md docs/ -g '!superpowers'`
 Expected: no matches. Any match is a doc still describing deleted behavior.
 
 - [ ] **Step 7: Commit**
