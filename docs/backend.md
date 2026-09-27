@@ -131,7 +131,7 @@ Two rules define the layer, and both exist to keep the wire contract checkable:
 
 ### The wire contract
 
-`store.Channel`, `store.Thread`, `store.Message`, `store.Reaction`, `store.Session`, `store.SessionEvent`, and `store.ThreadContext` are marshaled straight to JSON by `apiserver` and unmarshaled straight by `tui` and `internal/client`. They carry almost no JSON tags — only `json:"-"` on `Message.ParentSeq` and three tags on `InboxMessage` — so **the Go field names are the API field names.** Promoting a generated `db` model into a wire position would silently become the API, which is why generated types are never marshaled and why `emit_json_tags: false` is load-bearing: set it `true` and sqlc emits `json:"RepoHeadSha"` against a field named `RepoHeadSHA`.
+`store.Channel`, `store.Thread`, `store.Message`, `store.Reaction`, `store.Row`, `store.Session`, `store.SessionEvent`, and `store.ThreadContext` are marshaled straight to JSON by `apiserver` and unmarshaled straight by `tui` and `internal/client`. They carry almost no JSON tags — the only one in the package is `json:"-"` on `Message.ParentSeq` — so **the Go field names are the API field names.** Promoting a generated `db` model into a wire position would silently become the API, which is why generated types are never marshaled and why `emit_json_tags: false` is load-bearing: set it `true` and sqlc emits `json:"RepoHeadSha"` against a field named `RepoHeadSHA`.
 
 Nullable columns keep their `COALESCE(col, '')` wrappers in the read queries, which is what keeps `Channel.RepoAbsPath` and friends pointer-free. There are exactly two read-side exceptions and both are deliberate: `messages.parent_id` and the `p.seq AS parent_seq` projection are `sql.NullInt64` before and after the move onto sqlc. Coalescing either would turn "no parent" into a fake `0` and make the TUI's `.Valid` check read a real parent as absent.
 
@@ -143,11 +143,11 @@ The convention is per method and deliberately not symmetric:
 
 | Returns `nil` when empty | Returns non-nil `[]T{}` |
 |---|---|
-| `ListChannels`, `ListThreads`, `ListMessages`, `ListMessagesAfter`, `ListReactions` | `ListInbox`, `ListSessions`, `ListSessionEvents` |
+| `ListChannels`, `ListThreads`, `ListMessages`, `ListMessagesAfter`, `ListReactions` | `ListRows`, `ListSessions`, `ListSessionEvents` |
 
 `sqlc` runs with `emit_empty_slices: false`, so a `:many` query hands back `nil`; the three methods on the right seed an empty slice explicitly.
 
-Two of the eight are visible on the wire. The handlers for channels, threads, messages, reactions, and session events normalize `nil` to `[]` before writing, so for those five the store-side choice is an internal detail. `GET /v1/inbox` and the per-thread session list do not normalize — both hand the slice straight to `writeJSON` — so a `nil` from `ListInbox` or `ListSessions` would render an empty result as `null` rather than `[]`. Do not "fix" a `nil`-returning method into returning an empty slice either: that is still a behavior change, just an invisible one.
+One of the eight is visible on the wire. The handlers for channels, threads, messages, reactions, rows, and session events normalize `nil` to `[]` before writing, so for those six the store-side choice is an internal detail. The per-thread session list does not normalize — it hands the slice straight to `writeJSON` — so a `nil` from `ListSessions` would render an empty result as `null` rather than `[]`. Do not "fix" a `nil`-returning method into returning an empty slice either: that is still a behavior change, just an invisible one.
 
 ### Error classification
 
@@ -392,9 +392,11 @@ Returns `{"ok":true}` with status 200.
 
 **`POST /v1/channels/:id/threads`** — Create thread. Body: `{"title":"..."}`. Agents get 403. A title that is not a legal slug is `400 BAD_JSONL`, an unknown channel is `404 CHANNEL_NOT_FOUND`, and a storage failure is `500 DAEMON_ERROR`. Returns `{"id":1}`.
 
-### Inbox
+### Rows
 
-**`GET /v1/inbox?limit=N`** — List recent messages across channels and threads. The default limit is 100 and the server caps it at 200. Results are ordered by message recency.
+**`GET /v1/rows?g=<message|thread|channel>&limit=N`** — The cross-channel feed at one granularity, newest first, as `[]Row`. One row is a message, a thread, or a channel: `ID` is that entity's id, `ThreadID` is 0 at `g=channel`, `Content` is the whole representative message (at `g=thread`, the original post), and `Count` is the group's size, 1 at `g=message`. `limit` defaults to 200 and the store caps it at 500; a non-`GET` method is `405 METHOD_NOT_ALLOWED`. An unknown or missing `g` is `400 BAD_ARGS`, and a storage failure is `500 DAEMON_ERROR`. Grouping, representative selection, and the counts are the query's, so the client holds no rule about which message represents a group. An empty result is `[]`, never `null`.
+
+This replaces the flat inbox route, which no longer exists, and the message-joined row type it returned: a row is no longer a message record, so it carries no thread-local `seq`. `flf message send --reply-to-seq` is unaffected — `seq` still comes from `GET /v1/threads/:id/messages`.
 
 ### Messages
 

@@ -2,7 +2,7 @@
 
 A local-first, TUI-first communication hub for developer teams and local AI agents.
 
-**Glossary:** Channel = repo-anchored or `--orphaned` room · Thread = titled conversation in a channel · Message = chat line in a thread (reply via `--reply-to` or `--reply-to-seq`) · Reaction = emoji attached to a message · Inbox = unified view of recent messages across all channels · **Agent session** = one local agent run started by an `@mention`, with its prompt, output, and result. Two unrelated things were once both called a *session*, so: an **agent session** is a subprocess run recorded in the `agent_sessions` table and is never part of an export, whereas the portable thing an export carries is the **thread** itself. Only the `session.jsonl` filename in the examples below still uses the older name.
+**Glossary:** Channel = repo-anchored or `--orphaned` room · Thread = titled conversation in a channel · Message = chat line in a thread (reply via `--reply-to` or `--reply-to-seq`) · Reaction = emoji attached to a message · Row = one line of the TUI's cross-channel feed, where one row is a message, a thread, or a channel depending on the granularity the daemon answers · **Agent session** = one local agent run started by an `@mention`, with its prompt, output, and result. Two unrelated things were once both called a *session*, so: an **agent session** is a subprocess run recorded in the `agent_sessions` table and is never part of an export, whereas the portable thing an export carries is the **thread** itself. Only the `session.jsonl` filename in the examples below still uses the older name.
 
 ```bash
 go build ./cmd/flf
@@ -19,7 +19,7 @@ go build ./cmd/flf
 # agent read — portable JSONL with thread-local sequences + reactions
 ./flf agent read --thread 1 --last 5 --json   # last 5 messages as JSONL
 ./flf agent read --thread 1 --after-seq 3     # cursor-based reads
-./flf agent append --thread 1 --file response.jsonl --agent-id my-agent
+./flf agent append --thread 1 --file response.jsonl --agent-id my.agent
 
 # repo-anchored channel/thread
 ./flf channel create --name refactor --repo . --json
@@ -37,22 +37,26 @@ printf '[[agents]]\nname="reviewer"\ncommand="claude"\nargs=["-p","{prompt}"]\n'
 ./flf thread export --thread 1 --format jsonl > session.jsonl
 ./flf thread import --file session.jsonl --channel refactor
 
-# inbox — unified view of recent messages across channels
+# inbox — the cross-channel feed; one row is a message, a thread, or a channel
+# depending on the granularity the daemon answers (this asks for messages)
 ./flf inbox --limit 50 --json
 
 # init — prepare a repo for fluffle
 ./flf init --repo .
 
-# TUI — lands on a unified inbox of recent messages across all channels
+# TUI — a feed of rows beside the thread under the cursor; g cycles what one row
+# is (message → thread → channel), and the list takes the whole terminal below
+# 110 columns, where Enter still reads the thread
 ./flf tui
-#  Inbox:   ↑↓/j/k nav · Enter open · r reply · n new thread · C new channel · v sort · f filter · l layout · q quit
-#  Detail:  ↑↓/j/k scroll · g/G top/bottom · r reply · e react · n new thread · Esc back
-#  Channels: ↑↓/j/k nav · Enter open · n new thread · C new channel · q quit
+#  List:    ↑↓/j/k nav · g group · v sort · Enter read · Esc back · r reply · q quit
+#  Compose: type · Enter send · Esc cancel
+#  Needs 71x24. Reply appends to the thread; creating, reacting, and reading an
+#  agent run are CLI commands.
 
 ./flf daemon stop
 ```
 
-Docs: `VISION.md` for scope and the `kata`/`roborev` division of labor · `docs/backend.md` for the daemon, API, and CLI reference · `docs/agent-sessions.md` for why local agent runs are shaped the way they are, and what is out of scope · `docs/tui-architecture.md` and `docs/tui-keybindings.md` for the TUI.
+Docs: `VISION.md` for scope and the `kata`/`roborev` division of labor · `docs/backend.md` for the daemon, API, and CLI reference · `docs/agent-sessions.md` for why local agent runs are shaped the way they are, and what is out of scope · `docs/tui-architecture.md`, `docs/tui-keybindings.md`, and `docs/tui-extending.md` for the TUI.
 
 ## Development
 

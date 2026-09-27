@@ -259,20 +259,21 @@ main() {
   note "Ready"
   cat <<EOF
   Try these first:
-    Enter            open the thread under the cursor (top row is the live mention)
-    s                session pane; press it again to go back to the thread
-    p  then  l       preview on, then switch to the full layout (preview turns itself off)
-    v                toggle sort: latest-desc vs channel/thread + time desc
-    f                filter; type zzz to see the 0/N filtered empty state
-    r  n  C  e       reply, new thread, new channel, react
-    C                anchors a new channel to $FIXTURE_REPO (the cwd for this TUI)
+    Enter            read the thread under the cursor (top row is the live mention)
+    Esc              back to the list
+    g                group: one row per message, then per thread, then per channel
+    v                reverse the order: newest first vs oldest first
+    r                reply to the row's thread
+    ↑↓ / j / k       move the cursor; q quits
 
-  Session coverage:
+  Agent runs:
+    The TUI shows each run's reply in the thread, so the live mention lands
+    without a keypress. The run itself is not on screen; read one with
+      $BIN agent session --id <id> --json
     agents / session states   failed, canceled, succeeded x4, one with "replied #N",
                               two agents on a single message, reply modes auto/stdout/cli
-    agents / verbose run      41 events, exercises the "... N hidden ..." fold
+    agents / verbose run      41 events, the longest transcript in the seed
     agents / live mention     a real @mention run, queued then running for ~$((AGENT_SLEEP * 2))s
-    agents / no session here  press s and read the status bar
 
   queued and running are never staged: the daemon reconciles both to canceled on
   startup, so only a live run can show those states.

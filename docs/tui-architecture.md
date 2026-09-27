@@ -1,440 +1,329 @@
 # TUI Architecture
 
-Bubble Tea v1.3.10 terminal UI for Fluffle. Flat inbox table with right-side preview panel (wide terminals), centered compose modal overlay. The preview pane has two modes — the thread, and the agent session belonging to the cursor row's thread — switched with `s`.
+Bubble Tea v1.3.10 terminal UI for Fluffle. One model, one list, one thread renderer, one compose mode, eight bound actions and `ctrl+c`. A list of rows, a thread pane beside the list or in its place, and a centered reply box over the top.
+
+For the keys see [tui-keybindings.md](tui-keybindings.md). For how to extend it see [tui-extending.md](tui-extending.md).
 
 ## Overview
 
-```
-┌────────────────────────────────────────────────────────────────────────────────┐
-│ fluffle                                                                       │
-├────────────────────────────────────────────────────────────────────────────────┤
-│Inbox — 3 messages · sort:latest ↓ · layout:compact                             │
-│  42         TIME  CHANNEL       THREAD            NAME          CONTENT          │
-│────────────────────────────────────────────────────────────────────────────────│
-│> 42 Sep 23 15:04  eng     pr-review         ci-bot    ✅ build passed           │
-│  17 Sep 23 11:00  eng     hello             alice     looks great!   (4+)     │
-│                                        │                                      │
-│                                        │ Preview: eng › hello                  │
-│                                        │ Original Post #2 · Sep 23 09:12 …    │
-│                                        │ wraps with no truncation              │
-│                                        │ ───────────────────────────────────  │
-│                                        │   TIME     NAME     MESSAGE          │
-│                                        │  10:00    bob      ship it           │
-│                                        │  11:00    ci-bot   ✅ build passed    │
-├────────────────────────────────────────────────────────────────────────────────┤
-│ ↑↓/j/k nav  Enter view  r reply  v sort  f filter  l layout  s session  p hide  q  │
-└────────────────────────────────────────────────────────────────────────────────┘
-```
-
-Press `l` for the full layout, where each group expands to its original post plus one `> `-prefixed line per reply:
+A terminal at least `MinSplitWidth` columns wide shows two panes. The list is a fixed `ListW` cells and the thread takes the rest:
 
 ```
-│  42 Sep 23 15:04  eng  pr-review  ci-bot  ✅ build passed                        │
-│  17 Sep 23 11:00  eng  hello      alice   looks great!                          │
-│                                         > ship it                              │
-│                                         > ✅ build passed                      │
-│                                         > one more thing                       │
+flf · message · 2 rows · newest first
+▸ Sep 23 15:04  eng           pr-review     ci.bot          3build passed eng › pr-review
+  Sep 23 09:12  eng           hello         bob              ship it      ────────────────────────────────────
+                                                                            09:12 bob
+                                                                                  ship it
+                                                                            15:04 ci.bot
+                                                                                  build passed
+↑↓ nav · g group · v sort · Enter read · Esc back · r reply · q quit
+ sent
 ```
 
-Single flat **Global Inbox** table showing all channels/threads, one row per channel/thread group. `l` toggles between two layouts: **compact** (default — one line per group, most recent message) and **full** (original post plus every reply, inline). `p` toggles a right-side preview panel showing the word-wrapped original post + replies; `s` swaps that pane's content for the agent session belonging to the cursor row's thread. Preview auto-enables at ≥100 cols, respects toggle at ≥80 cols, forced off below 80, and is suppressed in the detail view and in the full layout.
+`Enter` gives the thread the whole terminal and drops the list:
 
-## Package Structure
+```
+flf · message · 3 rows · newest first
+eng › pr-review
+────────────────────────────────────────────────────────────────────────────────
+  09:12 bob
+        ship it
+  11:00 alice
+        looks great!
+  15:04 ci.bot
+        build passed
+↑↓ nav · g group · v sort · Enter read · Esc back · r reply · q quit
+ sent
+```
+
+`Esc` puts the list back with the cursor where it was. Below `MinWidth` columns or `MinHeight` rows there is no layout to draw, so the whole screen is one line:
+
+```
+flf needs 71 columns and 24 rows (got 60x24) — resize the terminal
+```
+
+and every key but `ctrl+c` is inert — including `q`, because a terminal too small for the list is a terminal the user has to leave by the key that always works.
+
+## Package structure
 
 ```
 internal/tui/
-├── tui.go          - Entry point: Run() → tea.Program(model)
-├── model.go        - Bubble Tea model: state, Init, Update, View, rendering
-├── api.go          - Thin HTTP wrapper over daemon REST API
-├── session.go      - Agent session pane: preview-mode state, 500 ms poll, session rendering
-├── compose.go      - Centered compose modal: text input, send/cancel
-└── styles.go       - Lipgloss styles: colors, borders, typography
+├── tui.go        Run(): daemon ensure, tea.Program, exit codes
+├── model.go      model, Init, Update, handleKey, View, geometry, the clock
+├── rows.go       the width constants, rowLine, renderRows, pad
+├── thread.go     renderThread — the one thread renderer
+├── compose.go    the one compose mode
+├── api.go        ListRows, ListMessages, SendReply, get, readAPIError
+├── styles.go     lipgloss styles and the one colour rule
+├── screen/       vendored from go.kenn.io/kit/tui/screen
+└── termtext/     vendored from go.kenn.io/kit/tui/termtext
 ```
-
-### Responsibilities
 
 | File | Responsibility |
 |------|----------------|
-| `tui.go` | `Run()` entry point, daemon ensure, `tea.Model` initialization, exit codes (0=success, 1=client/local error, 2=daemon or transport error) |
-| `model.go` | Full `model` struct, state transitions via `Update()`, rendering via `View()`, key handling, data fetching, time formatting, preview logic |
-| `api.go` | HTTP calls to daemon endpoints, strict response decoding, error classification (`readAPIError`), channel filtering, `jsonBody` helper |
-| `session.go` | Agent session state (`sessions`, `sessionsByMsg`, the resolved session and its events), the gated 500 ms poll, the `s` key, `renderSessionPreview()` |
-| `compose.go` | Compose modal state machine, text input handling, send/cancel, error display, context header rendering |
-| `styles.go` | All lipgloss style definitions: tree panel, chat panel, modal, status bar, hints, colors |
+| `tui.go` | `Run()` entry point, daemon ensure, `tea.Program` with the alt screen, exit codes (0 success, 1 client/local, 2 daemon or transport) |
+| `model.go` | The model, `Update`, `handleKey`, `View`, `bodyView`, the chrome lines, the split/stacked decision, the tick, and the fetch commands |
+| `rows.go` | Every width constant, the one row renderer, the empty-state placeholder, `formatTime`/`formatClock`, and `pad` |
+| `thread.go` | `renderThread` at any width, the per-message block, and `padLines` |
+| `compose.go` | The reply box: open, close, rune-indexed editing, the caret, the error line |
+| `api.go` | The three endpoints the TUI uses, plus `get`, `readAPIError`, and the strict decoder |
+| `styles.go` | Colors, styles, and `nameStyle`, which is the only colour rule in the app |
 
-## Dependencies
+Dependencies are `internal/store` for the wire types, `internal/client` for daemon discovery and the shared HTTP client, and the Bubble Tea ecosystem. `internal/tui/screen` and `internal/tui/termtext` add no download: both import only `github.com/charmbracelet/x/ansi`, which lipgloss already pulls in.
 
-```
-internal/tui/
-├── internal/client   (daemon location, auto-spawn, health probe)
-├── internal/store    (data types: Channel, Thread, Message, Reaction, Session, SessionEvent)
-└── github.com/charmbracelet/bubbletea v1
-    ├── github.com/charmbracelet/lipgloss v1
-    └── github.com/mattn/go-runewidth
-```
-
-No new external dependencies beyond the Bubble Tea ecosystem. The TUI reuses `internal/client` for daemon communication — same auto-spawn, same health probe, same error handling.
-
-## State Machine
-
-```
-                    ┌──────────────────────────────────────┐
-                    │                                      │
-                    ▼                                      │
-  [Inbox Table] ──r──────▶ [Compose]                      │
-     ▲                       │    │                        │
-     │                       │    │ Esc (cancel)           │
-     │                       │    │                        │
-     │     Enter             │    │                        │
-     └─────▼── inbox detail ─┘    │                        │
-                    │              │                        │
-                    └─────Esc──────┘                        │
-```
-
-Five views exist, tracked by `viewKind`: `viewInbox` (the flat table, one row per channel/thread group), `viewInboxDetail` (`Enter` from the inbox), and the older `viewChannels` → `viewThreads` → `viewMessages` stack, which is what the app starts on (`New()` sets `viewChannels`). Navigation is cursor-based everywhere: `↑/↓` or `j/k` moves through rows. In the inbox, `r` opens compose for a reply, `Enter` opens the detail view, `v` toggles sort, `f` opens the filter, `l`/`L` toggles layout, `p` toggles the preview panel, and `s` switches the pane to the agent session. `Esc` returns from any pushed view to the one beneath it.
-
-The character keys `handleKey` acts on are `q`, `k`/`↑`, `j`/`↓`, `r`, `v`, `f`, `l`/`L`, `p`, `s`, `g`, `G`, plus `ctrl+c`; every other rune falls through untouched. Notably `c` and `n` are **not bound** — `simple_test.go` asserts that neither opens compose, and `handleNewThread` no longer exists in the codebase at all.
-
-### State Fields
+## State
 
 | Field | Purpose |
 |-------|---------|
-| `inbox` | All messages across channels/threads (`[]InboxMessage`) |
-| `cursor` | Index into the filtered/sorted group list (0-based, clamped to list length) |
-| `inboxSort` | `inboxSortLatestDesc` or `inboxSortChannelThreadDesc` |
-| `inboxLayout` | `inboxLayoutCompact` or `inboxLayoutFull` |
-| `fullThreads` | Cache of `threadID → []Message` backing the full layout (nil = not fetched) |
-| `preview` | Whether right-side preview panel is visible |
-| `previewThreadID` | Thread ID for deduped preview fetch |
-| `previewMessages` | Messages for preview panel (filtered replies) |
-| `compose` | Active compose modal state (or inactive) |
-| `channels` | Channel cache (for new-thread picker) |
-| `status` | Status bar text (errors, counts, hints) |
-| `width, height` | Current terminal dimensions (from `WindowSizeMsg`) |
-| `previewMode` | `previewThread` or `previewSession` — which content the right pane shows |
-| `sessions` | Sessions for `previewThreadID`, as returned by the last poll |
-| `sessionsByMsg` | `triggerMessageID → Session` index built from `sessions`; step 1 of the pane's lookup, keyed on the **trigger** message id |
-| `session` | The session whose events are loaded (`nil` until `s` fetches them) |
-| `sessionEvents` | Events for `session`, in `seq` order |
-| `sessionPollThreadID` | Thread whose session list was last fetched, and the poll's arming target; `0` means released |
-| `sessionTickThread` | Thread a tick is in flight for, so arming stays idempotent |
-| `sessionTickGen` | Monotonic tick generation; a `sessionTickMsg` with a stale gen is dropped |
+| `width, height` | Terminal size, from `tea.WindowSizeMsg` |
+| `quitting` | Set by `q` and `ctrl+c`; `tea.Quit` is what ends the program, so this records an intentional exit rather than gating a render |
+| `granularity` | `message`, `thread`, or `channel` — what one row is |
+| `reversed` | `true` renders oldest first; the server always answers newest first |
+| `detail` | The thread replaces the list instead of sitting beside it |
+| `rows` | The feed at the current granularity, already reversed if `reversed` |
+| `cursor` | Index into `rows`, carried across a refresh by `Row.ID` |
+| `scroll` | First visible row; `clamp` moves it only as far as the cursor needs |
+| `threadID` | The thread whose messages are loaded, or 0 for a channel row and for no row |
+| `thread` | Those messages |
+| `status` | The status band: errors, `sent`, and the two refusals |
+| `api` | The daemon client |
+| `compose` | The reply box, or inactive |
 
-`sessionForCursor()` resolves the pane's session in **two steps**. A row is a channel/thread group whose representative is that group's newest message, and `inboxFilteredSorted()` groups *before* it filters, so a thread yields exactly one row whether or not a filter is active — a filter removes rows, it never splits a thread into per-message rows.
+Fourteen fields. The whole of the mode state is `granularity`, `reversed`, and `detail`, and each is read by exactly one decision: the fetch, `applyRows`, and `bodyView`. There is no view stack, no layout field, no poll state, and no per-key mutual exclusion to keep true.
 
-1. **Trigger-keyed first.** If the row's id is some session's `TriggerMessageID`, that session wins — the exact run the row's representative started.
-2. **Thread-scoped fallback, on a miss only.** The newest session whose `ThreadID` equals `row.ThreadID`, highest session id first, so a later run beats an earlier one.
+Two invariants live in the fields rather than in a method:
 
-Only when neither step finds anything does the lookup report no session, and `handleSessionKey` turns that into the status-bar line `no session on this message`.
+- **`threadID` is the pane's identity.** A `threadFetchedMsg` is applied only when its `threadID` equals `m.threadID`, and `syncThread` sets it before fetching, so a response for a thread the cursor has left is dropped and one for the thread on screen is applied. A failed load clears it to 0, which both stops the previous thread's messages from sitting under the new thread's title and lets the next `syncThread` retry instead of treating the failure as loaded.
+- **`compose.active` owns the keyboard.** `Update` routes a `tea.KeyMsg` to the compose box while it is active and to `handleKey` otherwise, so the two keymaps cannot overlap and no key has to be re-checked inside either.
 
-The `ThreadID` guard in step 2 is load-bearing. `m.sessions` does happen to be scoped to the preview thread today, but the fallback does not rely on that: it filters on `row.ThreadID` itself, so a row in a thread with no sessions of its own reports `no session on this message` rather than opening a neighbouring thread's run.
+## Granularity: one row, three things
 
-**Timing.** The row's representative is a projection of the **cached** `m.inbox`, refetched only on `Init`, on filter apply, on return from a pushed view, and after a send — the session poll refetches sessions, never the inbox. Drift between the representative and the trigger therefore becomes *visible* at one of those refetches, not the moment a message lands, and step 2 means any thread that has at least one session keeps resolving across all of them.
+`g` cycles `message` → `thread` → `channel`. What one row *is* is the daemon's answer, not a client mode, so the client holds no representative-selection rule and no reply-count arithmetic:
 
-**Trade-off.** `s` on a row whose thread's only session is an old one now opens that old session instead of reporting nothing. For a thread-level pane that is the right default, and the header names agent, status and session id, so the user can tell what they are looking at.
+| Granularity | One row is | `Thread` is | `Name` is | `Content` is | `Count` is | `ThreadID` |
+|---|---|---|---|---|---|---|
+| `message` | a message | that message's thread | that message's author | that message | 1 | set |
+| `thread` | a thread | its own title | the newest reply's author | the **original** post | replies | set |
+| `channel` | a channel | `""` | the newest message's author | that newest message | messages | 0 |
 
-### Data Fetching
+`Content` is the whole representative message and the row renderer takes its first line, because choosing a line is a rendering decision and doing it in SQL would put presentation in the query layer. `Count` is blank when it is 1, so message rows do not carry a column of `1`s and `rowLine` never has to know the granularity.
 
-Message data is fetched on demand. Agent session data is **polled**: while a session is live, the thread's session list is re-fetched every 500 ms.
+`Row.ID` is the message, thread, or channel id by granularity, which is what makes cursor carry-by-id a two-line operation. A channel row has no thread, and that is the only place a row and a thread disagree: `syncThread` loads nothing, the pane says `no thread — press g`, and `Enter` or `r` on it says `no thread on this row — press g`.
 
-| Event | Fetch |
-|-------|-------|
-| `Init()` | `ListInbox()` — all messages across channels/threads |
-| Cursor moves to new thread | `GET /v1/threads/:id/messages` (debounced by thread ID) |
-| Full layout, viewport intersects an uncached group | `GET /v1/threads/:id/messages` for every such group, batched concurrently |
-| Cursor moves while the preview is visible | `GET /v1/threads/:id/messages` (debounced by thread ID) |
-| After send/create | `fetchInbox()` — refetch entire inbox, clears `fullThreads` |
-| Preview panel active + cursor moves | Preview data for highlighted item (deduped) |
-| Preview messages land for a new thread | `GET /v1/threads/:id/sessions` — one fetch per thread, deduped by `sessionPollThreadID` |
-| `s` pressed on a message with a session | `GET /v1/sessions/:id` — events for that session, once per press |
-| A session is `queued`/`running` and the pane is visible | `GET /v1/threads/:id/sessions` again, on a 500 ms `tea.Tick` |
-| The last session in the thread reaches a terminal status | Nothing further is scheduled for that thread — see the note below |
+`GET /v1/rows?g=<granularity>&limit=<n>` is the feed. The flat inbox route it replaced is gone, along with the message-joined row type it returned. The limit defaults to 200 and the store caps it at 500; the TUI asks for 200 on every fetch, so the list is the newest 200 rows and nothing is paged. An unknown or missing `g` is `400 BAD_ARGS` in the standard envelope. `flf inbox --limit N --json` asks for `g=message` and prints `[]Row`; it no longer carries a per-thread `seq`, because a row is no longer a message record. `flf message send --reply-to-seq` is unaffected — `seq` still comes from `/v1/threads/:id/messages`.
 
-Preview message fetching is idempotent and gated on `previewVisible()`: skips if the cursor hasn't changed, if width < 80, if the same thread is already cached, or if the pane is not actually drawn (detail view, or full inbox layout).
+## Geometry
 
-The session fetch is gated on `previewVisible()` too, plus three more conditions: the view must be the inbox, the preview thread must be non-zero, and this thread's session list must not already have been fetched (`sessionPollThreadID` must not equal the preview thread — it is a "already fetched, do not repeat" lock, not an in-flight marker). The tick handler re-checks the generation, the thread match, `previewVisible()`, and "is anything still live" before it re-fetches. A `sessionTickMsg` whose generation is stale is dropped without touching state, and one whose `threadID` no longer matches `sessionPollThreadID` is dropped too, so an in-flight tick from a previous thread or a superseded arming cannot resurrect a poll. A thread change does not stop the poll — the new thread's response overwrites `sessionPollThreadID` and `applySessions` arms a fresh tick for it, so the poll is re-aimed rather than ended.
+```
+ColW        = 12   // time, channel, thread, name
+CountW      = 3
+ColGap      = 2
+CursorW     = 2
+rowPrefixW  = CursorW + ColW + ColGap + ColW + ColGap + ColW + ColGap + ColW + ColGap + CountW  // 61
+MinContentW = 10
+MinWidth    = rowPrefixW + MinContentW   // 71
+MinHeight   = 24
+chromeH     = 3   // title, hint, status
+MinSplitWidth = 110
+ListW         = 74
+```
 
-`releaseSessionPoll()` has exactly three call sites: `syncSessionTick()`'s `!previewVisible()` branch, the `sessionsFetchedMsg` error path, and the `sessionTickMsg` handler's `!previewVisible() || !anySessionActive()` branch. Each needs a tick, a response, or a failure to arrive — so in the all-terminal state described below, none of the three can fire. That gives the poll a hard boundary:
+`rowLine` emits the cursor, four `ColW` cells separated by `ColGap`, and a `CountW` count, then as much content as the remaining width holds, then padding. For an ASCII row it is exactly `w` cells wide, which is what lets a row sit beside a thread without either one shifting the other.
 
-> The poll covers the *lifetime of a live session*, not the thread. Once every session in the thread is terminal, `syncSessionTick()` returns at its `!anySessionActive()` check without arming a tick and **without** releasing the dedupe key.
+The content column is bounded in cells, by `termtext.Truncate`. The four fixed columns are bounded in cells too and then padded to `ColW` **runes** by `cell`'s `%-*s`, so a column holding a wide grapheme renders wider than `ColW` cells and the row overruns `w` — measured: 79 cells at `w = 71`. Nothing the store writes can do that, because both name rules are ASCII and a parsed timestamp formats as ASCII, so the invariant rests on `internal/names` rather than on the renderer. A hand-edited database can break it, and `pad` will not notice, because `pad` only right-fills.
 
-In that state no tick is in flight, so the tick handler cannot run; no response is arriving, so the `!previewVisible()` branch of `syncSessionTick()` cannot run either; and nothing failed, so the error path cannot run. The only way the key clears is the cursor reaching a different thread: that thread's response sets `sessionPollThreadID` to the new id, which makes a return to the original thread fetch again. A session started in the meantime is therefore discovered on the next **thread switch and back**, and not before. Toggling `p` does not clear it — `p`-off returns without syncing, and `p`-on re-runs `syncVisibleData()`, whose `fetchSessionsForPreview()` is suppressed by the very key that is stuck.
+**There is one column width, and there is no drop ladder.** Every text column is `MaxSlug` or `MaxName` wide, and both are 12, so `ColW` is a single constant and `rowPrefixW` is arithmetic on it. Before, the widths were per-column (time 12, channel 12, thread 16, name 12) and narrow terminals shed columns one at a time — `NAME` → `CHANNEL` → `THREAD` → `TIME` — until the content column had room, which made the *meaning* of a row depend on the terminal's width and needed a rule for what each column looks like at every step of the ladder. Now a row is either drawn whole or the terminal is too narrow to draw it at all, which is `tooNarrow()` and a single line of text.
 
-`TestTickStopsAfterReachingTerminal` and `TestTickHandlerRefetchesWhileActiveThenStops` do reach the all-terminal state, but they only assert that no tick is rescheduled; neither asserts anything about `sessionPollThreadID`. The three re-arm tests (`...AfterThePaneIsHiddenAndShown`, `...AfterADetailRoundTrip`, `...AfterAResizeBackAboveThePaneMinimum`) all start from a **running** session and inject a response *while the pane is hidden*, so their release comes from `syncSessionTick`'s `!previewVisible()` branch. No test starts from the all-terminal state and asks whether the same thread can be fetched again.
+`MinWidth` is derived from `rowPrefixW` rather than stated beside it, so the floor cannot drift from the columns: 61 cells of prefix plus 10 cells of content is 71, and `MinContentW` is the smallest content column that can carry a word. `MinHeight` is 24, which leaves 21 rows of body under the chrome — enough for a thread's title and rule and nine one-line messages.
 
-`syncVisibleData()` is the single entry point for cursor-move-driven fetches. It returns `tea.Batch(maybeFetchPreview(), maybeFetchFullRows(), fetchSessionsForPreview())`; `tea.Batch` returns the sole non-nil command directly, so the three fetches collapse to however many actually need to run.
+The count is right-aligned in its three cells against the content, which is why it is drawn `3build passed` with no gap and blank at 1. The columns are fixed, so the content starts at the same cell on every row; a gap would have to come out of the content width.
 
-## Inbox Layouts
+`split()` is `width >= MinSplitWidth`, and nothing else. At or above 110 the thread takes `width - ListW` cells beside a list of exactly 74; below it the list takes the whole width and `Enter` shows the thread in its place. `paneWidth()` is the only place that arithmetic lives, so the pane beside the list and the pane that fills the terminal cannot drift apart, and `Enter` and `Esc` mean the same thing in both geometries.
 
-`inboxLayout` selects the row renderer. Both layouts group by channel/thread, share column widths, the title, and the cursor model.
-
-| Aspect | Compact | Full |
-|--------|---------|------|
-| Lines per group | 1 | 1 + reply count (1 extra while loading) |
-| Content column shows | Most recent message | Original post (lowest `seq`) |
-| Reply count marker | `(N+)` | none — replies are listed |
-| `scroll` unit | Rows (== groups) | Rendered lines |
-| Thread messages needed | No | Yes — `GET /v1/threads/:id/messages` |
-
-**Key functions:**
-
-| Function | Role |
-|----------|------|
-| `inboxFullBlocks()` | One `inboxFullBlock` per group: `im` (group representative, carries channel/thread), `head` (OP), `replies`, `loading` |
-| `inboxFullBlockRanges()` | Start/end line offsets per group — width-independent, since every reply is exactly one line |
-| `inboxFullGeometry(w, idW)` | Column layout for the current pane width; drops NAME → CHANNEL → THREAD → TIME until the content column has `minContentWidth` |
-| `renderInboxFullWithWidth(w, h)` | Flattens all groups to styled lines tagged with their group index, then windows by line |
-| `clampInboxFullScroll()` | Full-layout branch of `clampCursor`; keeps the cursor's whole block on screen |
-
-`inboxContentCol(idW)` and `inboxRowLine(...)` are shared by both layouts so the compact and full CONTENT columns land on the same offset. `splitPaneWidths(totalW)` is shared between `baseView()` and `inboxListWidth()` so the geometry used for fetch decisions cannot drift from what is drawn.
-
-### Preview Visibility
-
-`previewVisible()` is the single predicate for "is the right-side pane drawn". It is false when the preference is off, below 80 cols, in the detail view, and in the full inbox layout. `baseView()`, `inboxListWidth()`, `listHeight()`, `maybeFetchPreview()`, and `fetchSessionsForPreview()`/`syncSessionTick()` all consult it, so neither message data nor session data can be fetched for a pane that is not on screen.
-
-### Layout / Preview Invariant
-
-**`m.preview == true` implies `m.inboxLayout == inboxLayoutCompact`.** Layout and preview are mutually exclusive, so neither key can be a silent no-op:
-
-| Key | Effect |
-|-----|--------|
-| `p` → preview **on** | Forces compact (status: `preview on — p to hide · layout:compact`) |
-| `p` → preview **off** | Layout untouched, so `p` twice is a no-op |
-| `l`/`L` → **full** | Forces preview off (status: `layout: full — preview off · l to switch`) |
-| `l`/`L` → compact | Preview untouched (stays off) |
-| `WindowSizeMsg` ≥100 cols | Auto-enables preview only in compact, never in full |
-
-`previewVisible()` no longer needs a full-layout clause to hide the pane — the pane is simply off whenever the layout is full — but it keeps the check so rendering stays correct even if the two fields are ever set independently (e.g. from a test or a future layout).
-
-### Messages (Bubble Tea Msg Types)
-
-| Msg Type | Carries | Triggers |
-|----------|---------|----------|
-| `inboxFetchedMsg` | `[]InboxMessage`, `error` | `fetchInbox()` completes |
-| `previewMessagesFetchedMsg` | `threadID`, `[]Message`, `error` | `fetchPreviewMessages()` completes |
-| `sessionsFetchedMsg` | `threadID`, `[]Session`, `error` | `fetchSessions()` completes — the initial fetch and every poll tick |
-| `sessionEventsFetchedMsg` | `Session`, `[]SessionEvent`, `error` | `fetchSessionEvents()` completes after `s` |
-| `sessionTickMsg` | `threadID`, `gen` | A `tea.Tick` fires; re-arms the next poll or releases it |
-| `fullRowsFetchedMsg` | `map[threadID][]Message`, `error` | `fetchFullRows()` completes |
-| `composeSendMsg` | `text`, `composeMode`, `context` | User presses Enter in compose |
-| `threadCreatedMsg` | `channelID`, `threadID`, `title`, `error` | Thread creation response |
-| `tea.WindowSizeMsg` | `Width`, `Height` | Terminal resize |
-| `tea.KeyMsg` | key code/text | Any key press |
-
-`sessionsFetchedMsg` is discarded when its `threadID` is no longer the preview thread, and a failed session fetch releases the poll instead of retrying. `sessionEventsFetchedMsg` assigns `m.session`, `m.sessionEvents`, and `previewMode = previewSession` unconditionally — it does not check where the cursor is, so a response that lands after the cursor has moved elsewhere still becomes the pane's loaded session.
-
-## Rendering Pipeline
+## Rendering
 
 ```
 View()
-  ├─ compose active? ──yes──▶ render list (full width) + placeOverlay(compose view)
-  │
-  └─ no ──▶ preview? ──yes──▶ render list (left half) + render preview (right half)
-  │                            └── lipgloss.JoinHorizontal(Top, left, right)
-  │
-  └─ no ──▶ render list (full width)
-  │
-  └─ append helpView() + status
+  ├─ tooNarrow?   ──yes──▶ one line naming MinWidth x MinHeight and the actual size
+  ├─ compose active? ──yes──▶ screen.OverlayCentered(bodyView(), compose.view(), w, h)
+  └─ bodyView()
+       ├─ detail  ──▶ renderThread(paneWidth(), h, threadTitle(), thread)   // no list
+       ├─ split   ──▶ sideBySide(renderRows(ListW, …), renderThread(…))    // list left, thread right
+       └─ stacked ──▶ renderRows(width, h, …)                              // list only
 ```
 
-### `renderInboxWithWidth(w int)`
+`bodyView` is `titleLine`, the body, `hintLine`, and the status line: `chromeH` rows of chrome around exactly the rest, and both renderers pad to exactly `h` rows so the three bands keep their places.
 
-Renders the inbox in the active layout (`inboxLayoutFull` dispatches to `renderInboxFullWithWidth`):
+`sideBySide` joins the two blocks row by row, one list row to one thread row. Joining them as blocks would stack them, which costs a row and is not a split.
 
-1. Title: `Inbox — N messages · sort:<sort> · layout:<layout>`
-2. Header row: `TIME | CHANNEL | THREAD | NAME | CONTENT`
-3. Fixed column widths: time 12, channel 12, thread 16, name 12, content fills remaining
-4. Single-line truncation for content with ellipsis
-5. Color-coded name column (`getNameStyle`)
-6. Cursor row highlighted (`chatMsgSelectedStyle`)
-7. Empty state: `(no messages)` or `(no messages — filtered, press f to clear)`
-8. Truncated to panel height, padded with empty lines if short
+| Line | Content |
+|------|---------|
+| `titleLine` | `flf · <granularity> · <n> rows · newest first`, or `oldest first` under `v` |
+| `hintLine` | `↑↓ nav · g group · v sort · Enter read · Esc back · r reply · q quit` — 68 cells, and it has to fit the 71-column floor, which is what bounds how much of the keymap can be said out loud. `q` is on it; `ctrl+c` is left to muscle memory. There is no `?` overlay and no context-sensitive text. |
+| status | `error: <CODE>: <message>`, `sent`, `no row selected`, `no thread on this row — press g`, or an appended `cannot reply — the thread is not loaded` |
 
-### `renderPreview(w int)`
+`appendStatus` joins rather than overwrites: a later note explains an action, and replacing the reason with it loses why the action was refused.
 
-Renders the preview panel for the cursor-highlighted inbox group. In the inbox view it first checks `previewMode`: if it is `previewSession`, it delegates to `renderSessionPreview(w, h)` and never draws thread content.
+### One thread renderer, two placements
 
-The thread branch:
+`renderThread(w, h, title, msgs)` is called from both the split body and the detail body. It draws a title line, a rule, and then one uniform block per message — `  TIME  NAME` with the content wrapped under it, one cell past the clock. The original post is not special-cased, so there is one block shape and nothing to keep in sync between the first message and the rest.
 
-- Title: `#channel › thread · last <time> · N replies`
-- Root post: word-wrapped fully with `wrapText`, no truncation
-- Replies: fill remaining height, newest-tail truncation when space runs out
-- Empty state: `(no message)` or `(no replies)`
+The body column is exactly what is left after the indent, with no floor. A floor wider than that space wraps at one width and truncates at a narrower one, which silently drops words: with an 8-cell floor, `a b c d e f g h` wrapped at 8 and was truncated at 4, and rendered as `a b` / `e f` with `c d` and `g h` gone and nothing to show for it. Below the indent the body is blank, which is the one width at which content cannot be shown at all.
 
-### `renderSessionPreview(w, h)` (`session.go`)
+A thread longer than the pane is cut from the top, so the newest messages are the ones on screen. An empty pane says `no thread — press g`, truncated to the pane before it is padded, because `pad` only right-fills and a 19-cell placeholder would overrun a narrower pane and break the invariant that no line `renderThread` emits exceeds the width it was given.
 
-Renders the agent session belonging to the cursor's inbox row's thread. It re-resolves the session from `sessionForCursor()` on every render, so moving the cursor updates the pane without another fetch, and it falls back to the loaded `m.session` when the lookup finds nothing for the row — which is how a session stays on screen after the cursor has moved to a row that has none.
+### Compose
 
-- Header: `SESSION  <agent> · <status> · <reply mode> · #<id>`, plus elapsed duration once terminal, `replied #<seq>` when the daemon posted the reply, and the failure reason when there is one. Stripped of ANSI and newlines, then truncated to the pane width.
-- Events: one line per event, `<type>` in a fixed 8-column field, then the **first line** of the event content with tabs expanded, truncated to the pane width. `loaded` is `m.session != nil && m.session.ID == s.ID`; when it is false the events are suppressed entirely, so the pane will not display one session's events under another's header.
-- Overflow: the oldest events that fit are shown and a `… N hidden …` line counts the rest. The tail of a verbose run is not reachable from the pane.
-- Placeholders, in the order the code tests them: `no session on this message` when the resolved session is nil; `(no events loaded)` when a session resolves but it is not the loaded one; `(running…)` when the loaded session is `queued`/`running`; `(no events)` when it is terminal. `handleSessionKey` installs `m.session` *before* dispatching the events fetch, so `loaded` is already true while that fetch is in flight and if it fails — the pane shows `(running…)` or `(no events)`, never `(no events loaded)`.
-- Returns `""` when the pane is under 3 rows tall, and clamps its width up to `minContentWidth` otherwise, so a narrow terminal cannot panic the renderer.
+`r` opens the reply box and shows the thread, so you can see what you are answering. The box is 80% of the terminal (floored at 60 cells below 30 columns), centered by `screen.OverlayCentered`, and titled `reply in <channel> › <thread>`. `Enter` sends, `Esc` closes, and whitespace-only text is `cannot be empty` in the modal.
 
-### `helpView()`
+Editing is rune-indexed. The cursor is an index into `[]rune(text)` and never a byte offset, and every edit goes through `runes()`/`setRunes`, so there is one definition of a position and a multi-byte character cannot be cut in half. The caret is drawn between the two halves at that index, clamped, so the box shows where the next keystroke lands. The box's width comes from the `tea.WindowSizeMsg` handler, which is also the only place the terminal's size reaches it.
 
-Context-sensitive help bar at bottom of list. Shows available key bindings for current view. The inbox hint row carries a session hint that reflects the pane's current mode — `s session` normally, `s thread` while the session pane is showing — so the key always advertises where it will take you back to.
+A send appends to the thread and never sets `parent_id`: a reply is a message in the thread, not a nested answer. Threaded replies stay reachable from `flf message send --reply-to-seq` and from import. When the thread is not loaded — which is what a failed thread load leaves behind — the send is refused, the typed text is dropped either way, and the status says so.
 
-## Error Handling
+## The clock
 
-| Error | TUI Behavior |
-|-------|-------------|
-| Daemon down (startup or read transport) | `tui.Run()` returns exit code 2 for startup; a read failure shows `error: DAEMON_DOWN: ...` |
-| Read response cannot be decoded | Status bar or compose modal shows `error: DAEMON_ERROR: ...`; prior data is retained |
-| Session list fetch fails | Status bar shows `error: ...`; the poll is released rather than retried, and the previously rendered sessions stay on screen |
-| Session events fetch fails | Status bar shows `error: ...`; the pane stays in session mode showing `(no events loaded)` |
-| Mutation connection failure before dispatch | `error: DAEMON_DOWN: ...`; no acknowledgement is possible |
-| Dispatched mutation timeout, response loss, or acknowledgement failure | `error: DELIVERY_UNKNOWN: ...`; the modal stays open and the user re-reads the thread before retrying |
-| Daemon error response | Rendered as `error: <CODE>: <message>` from the daemon error envelope |
-| Empty compose | Compose modal shows "cannot be empty" in red |
-| Empty inbox | Status bar shows `inbox — no messages · q quit`, or `inbox — 0/N messages (filtered)` followed by the sort/filter suffix and `q quit` when a filter hides every row |
+One unconditional 2-second tick. On each tick the TUI re-reads its rows and the selected thread's messages, so an agent's reply appears in the thread without a keypress. That is the property the pane that showed a run was buying, for no state at all.
 
-Error strings are prefixed with a contract code: `DAEMON_DOWN` when the daemon cannot be reached or a connection cannot be established, `DAEMON_ERROR` when a response cannot be decoded or the daemon reports a server-side failure, and `DELIVERY_UNKNOWN` when a dispatched write may have committed without a verifiable acknowledgement. All errors go through the status bar or compose modal — never panic.
+**The clock is armed by the rows response and by nothing else.** `Update` batches `syncThread()` and `tick()` on `rowsFetchedMsg`; `refresh()` arms no tick of its own. A refresh that armed one would double the count every round — a tick from the refresh and a tick from that refresh's own response — so two become four, then eight, and the TUI ends up hammering the daemon instead of reading it. The invariant is **one tick per outstanding refetch**: a key that triggers its own refetch briefly holds a second, and a steady state holds one.
 
-## Styling System
+The tick re-reads the thread *unconditionally*, through `refetchThread`, not through `syncThread`. `syncThread` returns nil when the selected thread is already loaded, which is right for `j` and `k` — you do not refetch a thread that is on screen every time you move within it — and wrong for the clock, because an agent's reply is a message appended to the thread already on screen and nothing about the selection has changed for `syncThread` to notice. The two are deliberately separate calls.
 
-All colors use the **Tokyo Night** palette via lipgloss `color.RGBA` values:
+New messages append, so the row under the cursor is still in the list. `applyRows` records the previous `Row.ID`, finds it in the new rows, and falls back to 0 when it is gone; `clamp` then moves the window only as far as the carried cursor needs it to. `v` reverses the slice and reuses `applyRows`, which is why the cursor survives a sort and does not have to: the same rows are the same rows in the other order. `g` resets the cursor, the scroll, and the loaded thread instead, because a message row has no counterpart at channel granularity and matching by id would either keep the wrong row or land on an arbitrary one.
+
+### Stale responses
+
+Two rules, and they are the whole story:
+
+- A `rowsFetchedMsg` whose `granularity` is not `m.granularity` is dropped.
+- A `threadFetchedMsg` whose `threadID` is not `m.threadID` is dropped — **including its error**, because a late failure for a thread the cursor has left must not blank the pane the user is now looking at.
+
+Nothing needs a generation counter, because there is nothing to interleave: the only two requests in flight are the rows and the thread, and each is identified by the field that selects it.
+
+## Untrusted text
+
+Message content, author names, channel and thread names, and the daemon's error text all reach the terminal. None of them goes to a renderer directly:
+
+- `termtext.SanitizeLine` for a single line, `termtext.SanitizeBlock` for a message body. Both remove every terminal escape sequence — not just the SGR runs a regexp for — plus Unicode control and format characters, and replace invalid UTF-8. `SanitizeLine` also flattens tabs and newlines to one space.
+- `termtext.Truncate` then bounds the cell width, and `pad` right-fills to the width the line was promised. A styled string's length in bytes is not its width in cells, so `termtext.DisplayWidth` is how anything here is measured.
+
+Sanitize first, then measure: the width of a column must be decided from the text that will be drawn in it, not from the text that arrived. `formatTime` is the exception and it is deliberate — an unparseable timestamp is drawn as-is through `cell`, so a hand-edited database cannot silently shift a row.
+
+`screen` and `termtext` are copied verbatim, without upstream tests, from `go.kenn.io/kit/tui/` (Apache-2.0, Copyright 2026 Kenn Software LLC) into `internal/tui/`, each directory carrying the `NOTICE` that says so and pins the commit. They are a fork rather than a module requirement for two reasons: `kit`'s `go.mod` declares `go 1.27.0` and this module is on 1.26, and the module graph behind `kit` is far larger than these two packages. Keeping the copies verbatim means they can be diffed against upstream. Each has one smoke test, so the fork is exercised rather than assumed.
+
+`splitlayout` was not vendored: it needs `charm.land/lipgloss/v2` alongside the v1 lipgloss already in use, and its entire policy is one width comparison this app can write itself — `split()`.
+
+## Names
+
+Two rules, one package, `internal/names`, and no schema change. The database keeps its `length(trim(x)) > 0` CHECKs; the character rules are Go's job at every write path, so there is exactly one definition to keep true and no data-repair path.
+
+| Kind | Rule | Bound | Examples |
+|---|---|---|---|
+| slug (`channels.name`, `threads.title`) | `^[A-Za-z][A-Za-z0-9-]*$` | 12 bytes | `eng`, `pr-review`, `pr-review-2` |
+| name (an author) | `^[A-Za-z](?:[A-Za-z.]*[A-Za-z])?$` | 12 bytes | `alice`, `bob.smith`, `ci.bot` |
+
+Both bounds are 12 because the row is: a name that does not fit `ColW` is truncated, and a truncated author is a lie about who wrote something. `threads.title` keeps its column, its field name, and its `--title` flag; it is a slug and not prose, so the original post is the subject and the title is only a label.
+
+A name may not end with a dot, even though mention parsing trims trailing dots off a token. Trimming is the tokenizer being tolerant of sentence punctuation; validation is strict, because an agent named `ci.bot.` could never be mentioned — the trim would strip the dot and look up `ci.bot` — and would silently never trigger. Digits are legal in a slug and illegal in a name, and that asymmetry is deliberate: slugs need collision suffixes, names need to stay typeable. See [agent-sessions.md](agent-sessions.md#mention-grammar) for what the name rule does to a mention.
+
+## What the TUI cannot do
+
+Stated plainly, because each of these was a key once:
+
+- **Create channels or threads.** `flf channel create`, `flf thread new`.
+- **React.** `flf react add`.
+- **Filter or search.** There is no filter model and no sort-field cycling; `v` reverses one order.
+- **Show an agent run.** No run pane, no transcript, no `s`. The TUI shows the agent's *reply*, as an ordinary agent-authored message in the thread, and a run's transcript is read with `flf agent session --id N`. The `s` key's job — an agent's reply appearing without a keypress — is done by the clock instead, and the pane itself went: a session belongs to a trigger message, and a row is now a group, so the mapping the pane relied on no longer exists.
+
+Creating anything from the TUI would also mean an agent-reachable create path through a screen, which the agent contract forbids by another route.
+
+## Errors
+
+| Error | Behavior |
+|-------|----------|
+| Daemon down at startup | `Run()` returns `DAEMON_DOWN`; the CLI exits 2 |
+| A read cannot reach the daemon | status `error: DAEMON_DOWN: …` |
+| A response cannot be decoded | status `error: DAEMON_ERROR: …`; prior data is retained |
+| A dispatched write times out, loses its response, or returns no sequence | status `error: DELIVERY_UNKNOWN: …`; read the thread before retrying |
+| A daemon error response | status `error: <CODE>: <message>` from the envelope |
+| Bubble Tea runtime failure | `Run()` returns `TUI_ERROR`; the CLI exits 1 |
+
+Every one lands in the status band, which is sanitized and truncated like everything else — `readAPIError` formats the envelope's message unquoted, so an escape sequence in it would otherwise reach the terminal. Nothing panics. An empty compose is the one error that appears in the modal rather than the status band, because the send is still pending.
+
+## Styling
+
+Tokyo Night values, all in `styles.go`:
 
 | Element | Background | Foreground |
 |---------|-----------|------------|
-| Tree panel | `#1e1e2e` (dark) | `#c9d6f4` (light) |
-| Tree selected | `#313244` | `#f5f5f5` |
-| Chat panel | `#282838` | `#b4bee2` |
-| Chat selected | `#313244` | `#f5f5f5` |
-| Modal | `#313244` | `#f5f5f5` |
-| Modal border | — | `#89b4fa` (blue accent) |
-| Status bar | `#181825` | `#89b4fa` |
-| Hints | — | `#646478` (dim) |
-| Key hints | — | `#89b4fa` (accent, bold) |
+| Selected row | `#313244` | `#f5f5f5` |
+| Title | — | `#89b4fa` bold |
+| Thread rule, thread author | — | `#585062` |
+| Thread body | — | `#cdd6f4` |
+| Hint, placeholder | — | `#646478` dim |
+| Human author | — | `#89b4fa` |
+| Agent author | — | `#b7b4fa` |
+| System or unknown author | — | `#646478` |
+| Status band | `#181825` | `#89b4fa` |
+| Modal border | — | `#89b4fa` |
+| Modal text | — | `#f5f5f5` |
+| Modal error | — | `#f38ba8` |
 
-Styles are defined as package-level `var`s in `styles.go`. Each style uses lipgloss's fluent builder pattern with `.Border()`, `.BorderForeground()`, `.Background()`, `.Foreground()`, `.Padding()`, `.Width()`, `.Margin*()`.
+`nameStyle` is the only colour rule: an author is coloured by `author_type`, and everything else is chrome.
 
-## Data Flow
+## Data flow
 
 ```
-User presses key
-  │
-  ▼
-model.Update(tea.KeyMsg)
-  │
-  ├─ compose active? ──yes──▶ composeModel.Update(key) ──▶ composeSendMsg
-  │
-  └─ no ──▶ handleKey(key)
-              │
-              ├─ ↑↓/j/k ──▶ cursor++, cursor-- ──▶ syncVisibleData()
-              ├─ r ──▶ handleThreadReply() ──▶ compose.Open(composeModeMessage)
-              ├─ Enter ──▶ viewInboxDetail (fullscreen thread)
-              ├─ v ──▶ toggle sort ──▶ syncVisibleData()
-              ├─ l/L ──▶ toggle inbox layout ──▶ syncVisibleData()
-              ├─ p ──▶ toggle preview ──▶ syncVisibleData()
-              ├─ s ──▶ handleSessionKey() ──▶ toggle previewMode
-              │         └─ thread → session ──▶ fetchSessionEvents()
-              ├─ Esc ──▶ no-op (inbox) / return to inbox (detail)
-              └─ q ──▶ quitting = true ──▶ tea.Quit
-  │
-  ▼
-fetch cmd resolves ──▶ *FetchedMsg ──▶ Update() applies it ──▶ re-arms the next cmd
-  │
-  └─ sessionTickMsg ──▶ drop if gen is stale, else release or re-fetch
-  │
-  ▼
-tea.View() called by Bubble Tea runtime
-  │
-  └─ renders based on current model state
-      └─ preview pane = renderSessionPreview() when previewMode == previewSession
+key ──▶ Update(tea.KeyMsg)
+          ├─ compose active ──▶ composeModel.update ──▶ composeSendMsg ──▶ SendReply ──▶ sentMsg
+          └─ otherwise     ──▶ handleKey
+                                q, ctrl+c ──▶ tea.Quit
+                                ↑ ↓ j k   ──▶ cursor, clamp, syncThread
+                                v         ──▶ applyRows (reversed)
+                                g         ──▶ nextGranularity, fetchRows
+                                Enter     ──▶ detail, syncThread
+                                Esc       ──▶ detail = false
+                                r         ──▶ detail, compose.open, syncThread
+
+tickMsg ──▶ refresh ──▶ fetchRows + refetchThread
+rowsFetchedMsg ──▶ applyRows, syncThread, tick          // the only arming site
+threadFetchedMsg ──▶ applied iff threadID == m.threadID
+sentMsg ──▶ status, fetchRows + fetchThread
 ```
 
 ## Testing
 
-### Unit Test (`simple_test.go`)
+| Package | Covers |
+|---|---|
+| `tui` | `rowLine` at 71, 80, and 200 columns; a 40-byte channel and a 40-byte author truncated into a 12-cell column without breaking the row width; only the content's first line is drawn; sanitizing the name, the content, the thread header, the author, and the status; `renderThread` at every width, the empty state, the tail cut, the narrow pane, an overlong author; `g` cycles and resets; `v` reverses and keeps the cursor; `Enter`/`Esc` in both geometries; the view is never wider than the terminal and is exactly `MinHeight` rows; `r` on a channel row; a refused send keeps the reason it was refused; the hint names every bound key and fits the floor; `l p s n C e f c` are not bound; a stale rows and a stale thread response are both dropped; a failed thread fetch clears the pane and retries |
+| `tui` (clock) | A tick arms its successor; four rounds produce four ticks, not more; a tick keeps the cursor on the same row; a tick shows an appended reply with no keypress; a refresh re-reads the thread already on screen; a late thread error does not blank the thread on screen |
+| `tui` (api) | `ListRows` decodes the feed, defaults the limit, and rejects a `null` body; `ListMessages`; the error envelope surfaces; an envelope-free 4xx is `DAEMON_ERROR`; `SendReply` posts the text with no parent, and a missing sequence is `DELIVERY_UNKNOWN`; a pre-dispatch connection failure is `DAEMON_DOWN`; a dispatched timeout is `DELIVERY_UNKNOWN`; a context cancellation returns promptly; the strict decoder rejects a second value, a `null`, and trailing bytes |
+| `screen`, `termtext` | One smoke test each, so the fork is exercised rather than assumed |
+| `store` | `ListRows` per granularity: counts, newest-first order, original-post content, a channel row carrying no thread, and an unknown granularity |
+| `apiserver` | `/v1/rows` per `g`, `400` on a bad `g`, `500` on a store failure, and an empty result as `[]` rather than `null` |
 
-Tests the core inbox flow: window resize → inbox fetch → cursor nav → reply compose with threadID → adaptive preview truncation. Uses `toModel()` to extract `model` from `tea.Model` interface.
+## Design decisions
 
-## InboxMessage Data Type
+1. **The daemon decides what a row is.** Granularity is a query parameter on `GET /v1/rows`, not a client mode. Grouping, representative selection, and reply counts are the query's job, so the client has no rule about which message represents a group and no arithmetic to get wrong.
+2. **One column width and no drop ladder.** Every text column is 12 because that is the name bound, so `rowPrefixW` is arithmetic and `MinWidth` derives from it. A row is drawn whole or not at all.
+3. **`split` is a width comparison and nothing else.** Below it the list takes the whole width and `Enter` gives the thread the terminal; above it the thread sits beside the list. One rule, so `Enter` and `Esc` mean the same thing in both geometries and no key is a no-op at some widths.
+4. **One `renderThread` in two placements.** The pane and the detail view are the same function at two widths, so the original post needs no special case and the two cannot drift.
+5. **One unconditional tick, armed by the rows response.** An agent's reply appears without a keypress, which is what the pane that showed a run was buying, for two fields and no release rules. The old poll covered a live run's lifetime rather than the thread's, and a session started in the thread you were already looking at was not discovered until you moved away and back.
+6. **One tick per outstanding refetch, and the rows response is the only arming site.** A tick armed anywhere else doubles the count every round.
+7. **A response is stale when the field that selects it no longer matches.** `granularity` for rows, `threadID` for the thread, errors included. There are only two requests in flight, so there is nothing to interleave and no generation counter.
+8. **The clock refetches the thread; the cursor does not.** `refetchThread` and `syncThread` are different calls because the reasons are different, and sharing one would have kept the pane frozen exactly when it mattered.
+9. **The cursor is carried by `Row.ID`, and `g` does not carry it.** Messages append, so a refreshed feed still holds the row; a different granularity is a different list, where a message row has no counterpart.
+10. **Reply is the only compose mode.** The TUI creates nothing, so there is one box, and it appends to the thread without setting `parent_id`.
+11. **A channel row has no thread, and says so.** `r` and `Enter` refuse with `no thread on this row — press g` rather than opening a pane or a box with nothing behind them. It is the one place a row and a thread disagree, so it is one `if`.
+12. **Names are bounded to the column that draws them.** Two rules in `internal/names`, enforced in Go with no schema change, so a rendered author is never truncated into a different person.
+13. **The vendored primitives measure in cells.** A styled string's byte length is not its cell width; sanitize, then truncate, then pad.
+14. **The status band joins, never overwrites.** A note that explains an action must not erase the reason the action was refused.
+15. **One fixed hint line.** A `?` overlay is one more mode to render and one more key to bind; the floor is 71 columns, which bounds what can be said out loud anyway.
+16. **No pane for a run, no create flow, no reactions, no filter.** A row is a group, so the trigger-message mapping the pane relied on is gone; creating from a screen would put an agent-reachable create path on a route that is human-only by design; and a filter needs a filter model and a sort order, which `g` and `v` between them do not want to have.
 
-Enriched message type joining messages→threads→channels:
+## Deferred
 
-```go
-type InboxMessage struct {
-    Message
-    ChannelName string `json:"channel_name"`
-    ThreadTitle string `json:"thread_title"`
-    ChannelID   int64  `json:"channel_id"`
-}
-```
-
-## ListInbox Store Method
-
-`ListInbox(limit int) ([]InboxMessage, error)` — SQL joins `messages → threads → channels`, orders DESC then reverses to ASC. Limits capped at 200, negative defaults to 100.
-
-## GET /v1/inbox API Endpoint
-
-`GET /v1/inbox?limit=100` → `[]InboxMessage` (JSON, `Content-Type: application/json`). Reuses daemon auth. Existing `GET /v1/threads/:id/messages` serves preview.
-
-## Inbox Detail View
-
-`viewInboxDetail` — fullscreen scrollable thread view. Entered via `Enter` from inbox. `Esc` returns to inbox, preserving `cursor`/`scroll`.
-
-**Rendering:**
-- Full terminal width, single pane (no preview split)
-- Title: `#channel › thread · last <time>`
-- Each message: `[TIME] #SEQ Author: wrapped content...`
-- Continuation lines indented 20 spaces under content column
-- `wrapText` used for all message content — no truncation
-- `detailScroll` tracks vertical scroll offset; `detailCursor` tracks selected message index
-- `clampDetailScroll()` keeps cursor visible within visible window
-- Empty state: `(loading…)` or `(no messages — press r to reply)`
-
-**State fields:**
-| Field | Purpose |
-|-------|---------|
-| `detailThreadID` | Thread ID for the detail view (int64) |
-| `detailScroll` | Vertical scroll offset (int) |
-| `detailCursor` | Selected message index (int) |
-| `savedInboxCursor` | Inbox cursor saved before entering detail |
-| `savedInboxScroll` | Inbox scroll saved before entering detail |
-
-## Adaptive Preview Y
-
-```
-hAvail := previewHeight - 4
-replyReserve := 5 * 2
-Y := clamp(3, 20, hAvail - replyReserve - 2)
-```
-
-## Design Decisions
-
-1. **Flat inbox over 3-view stack**: All messages in one table. Eliminates Enter/Esc navigation for scanning. `↑↓` is the only nav.
-2. **Preview panel**: Shows the word-wrapped original post + replies. Adaptive Y prevents overflow. Toggle with `p`.
-3. **Reply via `r`**: Opens compose with `threadID` + `parentID` set from cursor position for threaded replies. `c` was the original alias and is no longer bound.
-4. **Enter opens detail view**: On inbox, `Enter` opens the selected thread in a fullscreen scrollable detail view. `Esc` returns to inbox, preserving cursor position. Detail view is read-only; `r` from detail opens compose for reply.
-5. **Full-post wrapping in preview and detail**: Preview root post is word-wrapped with no truncation (via `wrapText`), replies fill remaining pane height with newest-tail truncation. Detail view wraps all messages fully — no ellipsis truncation on message content.
-6. **Fill-to-height preview**: Replies in the preview pane fill available space; when content exceeds height, oldest replies are dropped and newest are kept (tail truncation).
-7. **No filter/sort**: Explicitly deferred. YAGNI.
-8. **Preview auto-enables at ≥100 cols**: Below 100 cols, user must press `p` to enable. At 80-99 cols, preview available but off by default. Below 80 cols, forced off.
-9. **Status bar at bottom**: Always visible, shows action feedback, error messages, and context-sensitive hints.
-10. **Compose modal centered**: Full width of terminal, height scales with terminal height (min 5, max 12 lines).
-11. **Channel cache retained**: Only for new-thread picker, not for inbox rendering.
-12. **Grouping via columns only**: No injected date/group headers; deferred to follow-up.
-13. **Cursor starts at top (0)**: Keeps `↑↓` natural; start-at-bottom can be added with `G` key later.
-14. **Detail view hides preview**: When in detail view, the split-pane preview is suppressed — the thread fills the full terminal width.
-15. **Inbox cursor preserved on Esc**: Entering detail saves `cursor`/`scroll`; returning via `Esc` restores them.
-16. **Preview panel hidden in detail**: `View()` early-returns for `viewInboxDetail` with single-pane rendering; the preview split condition guards `&& m.view != viewInboxDetail`.
-17. **Preview and full layout are mutually exclusive**: full layout already inlines the original post and every reply, and a split pane is too narrow for the content column, so the rows take the full width. Rather than leave `p` and `l` fighting over one pane, the two keys are defined so `preview == true` always implies `compact`: `p`-on forces compact, and switching to full turns the preview off.
-18. **Session preview reuses the preview pane instead of adding a view**: a session belongs to a message, so showing it anywhere but next to the message that triggered it would hide the trigger. `s` flips the pane's content rather than pushing a view, which keeps `previewVisible()` the one gate for both content modes and keeps the detail view, the full layout, and every width rule unchanged.
-19. **Session data is polled, message data is not**: messages arrive when the human acts, so on-demand fetching is enough. A session is a subprocess the human is not typing into, and the daemon exposes no push channel, so the pane re-reads the thread's session list every 500 ms — but only while something is actually `queued` or `running`, and only while the pane is drawn. An idle TUI issues no session requests at all.
-
-## wrapText Helper
-
-`func wrapText(s string, width int) []string` — splits `s` on `\n`, then word-wraps each paragraph to `width` columns (preserving words, breaking long words at `width`). Returns slice of lines, all `len(line) <= width`. Used by `renderPreview` (inbox branch) and `renderInboxDetail` for full-post wrapping with no truncation.
-
-## Deferred Features
-
-- Date grouping / relative timestamps
-- Reply count inline (` ↳ 5 replies`)
-- Reaction display in list view
-- Visual reply threading (indentation + tree lines)
-- Density modes beyond the compact/full inbox layouts
-- Search/filter with visual feedback
-- Unread indicators per channel/thread
-- Start-at-bottom cursor (e.g. `G` key)
-- Thread grouping in inbox (by channel/thread)
+- Date grouping and relative timestamps.
+- Unread indicators.
+- Reactions in the list.
+- Starting the cursor at the bottom.
+- A `Row` that names the run that produced it, which is what a pane for a run would need to be rebuilt on.

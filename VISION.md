@@ -35,7 +35,7 @@ Fluffle deliberately avoids building heavy, specialized workflows. It defers to 
 
 - **Language**: Golang.
 - **Data Layer**: SQLite (local file, accessed via a local daemon).
-- **Primary Client**: TUI (Terminal User Interface). Rich, keyboard-driven, responsive (similar to `kata`'s terminal layout).
+- **Primary Client**: TUI (Terminal User Interface). A cross-channel feed of rows beside the thread under the cursor, driven by a keyboard small enough to state in one line: `↑`/`↓`/`j`/`k` to move, `g` to change what one row is (a message, then a thread, then a channel), `v` to reverse the order, `Enter` to read the selected row's thread, `Esc` back, `r` to reply, `q` to quit. Every row is drawn whole at one fixed column geometry, so a terminal is either wide enough or it asks to be resized. Below 110 columns the list takes the whole width and `Enter` shows the thread in its place. The TUI reads and replies; creating channels and threads, reacting, and reading an agent run's transcript stay CLI operations.
 - **Secondary Client**: Lightweight Webapp (HTTP + WebSocket) for browser-based viewing when the terminal is unavailable.
 - **Agent Interface**: Agents interact primarily via the `flf` CLI. An external agent framework (or local LLM runner) executes CLI commands to read thread context and append responses/reactions.
 
@@ -64,7 +64,7 @@ $ flf init --orphaned            # Anchor to a scratchpad channel with no repo
 $ flf tui                       # Launch the main terminal user interface
 
 # Inbox (cross-channel feed; default landing view of the TUI)
-$ flf inbox --limit 20 --json
+$ flf inbox --limit 20 --json  # one row per message; the endpoint is GET /v1/rows?g=message
 
 # Channel & Thread Management (Human only)
 $ flf channel list --repo ./my-project [--include-orphaned] --json
@@ -100,7 +100,7 @@ There is deliberately no `flf agent invoke`. An agent run is started by a human 
 ---
 
 ## 🔍 Decisions Locked In
-These four questions were left open when this manifesto was written. Each is now settled by the implementation.
+These five questions were left open when this manifesto was written. Each is now settled by the implementation.
 
 1. **Daemon Lifecycle — auto-spawn, with explicit override.** Every daemon-touching command first probes `GET /v1/health`; if the daemon is down, the CLI re-execs itself as `daemon start --background` and retries the probe three times at one-second intervals. `flf daemon start|stop|status` remain available for explicit control. `stop` is graceful first (`POST /api/shutdown`, then wait up to five seconds for exit) and only falls back to killing the process.
 
@@ -115,3 +115,4 @@ These four questions were left open when this manifesto was written. Each is now
 
 4. **Orphaned Channel Lifecycle — permanently persistent, no TTL.** `--orphaned` sets `is_orphaned=1` and leaves `repo_abs_path` NULL; the channel name is then globally unique rather than unique per repo. Reaping is left to the human via manual archive. Note that archiving is not implemented: `channels.archived_at` and `threads.archived_at` were removed from the schema after being found to be read by seven queries and written by none, so today there is no reaping mechanism at all.
 
+5. **Names — two rules, 12 bytes each, no third.** A **slug**, which names a channel or titles a thread, is `^[A-Za-z][A-Za-z0-9-]*$`. A **name**, which identifies an author, human or agent, is `^[A-Za-z](?:[A-Za-z.]*[A-Za-z])?$`. Both start with a letter and are at most 12 bytes; a name must also **end** with one, because mention parsing trims a trailing dot off a token and an agent called `ci.bot.` could then never be mentioned. So an agent profile is `ci.bot`, never `ci-bot` or `ci_bot`, and a thread title is a label — `db-migration`, not `Schema migration` — because the original post is the subject. The bound is 12 because the TUI draws every name in one fixed 12-cell column, and a truncated author is a lie about who wrote something. Both rules live in `internal/names`, are enforced in Go at every write path, and change no schema: the `length(trim(x)) > 0` CHECKs stay as they are, so there is exactly one definition of the character rules and no data-repair path. Digits are legal in a slug and illegal in a name — slugs need collision suffixes, names need to stay typeable.
