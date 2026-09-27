@@ -185,6 +185,69 @@ func watch(cmd tea.Cmd, into chan<- tea.Msg) {
 // at channel granularity and the cursor cannot be carried across. Resetting is
 // the honest answer; matching by id would either keep the wrong row or land on
 // an arbitrary one.
+// The clock is armed by the rows response and by nothing else, so a rows
+// response that returns no command ends the tick chain for the rest of the
+// session. DAEMON_DOWN is transient by definition — a daemon restarted under a
+// running TUI produces exactly one — and the user sees a TUI that has quietly
+// stopped reading: no keypress brings the reply, and only g restarts the clock.
+// The error path has to arm the tick for the same reason the success path does.
+func TestARowsErrorStillArmsTheClock(t *testing.T) {
+	m := toModel(New("http://127.0.0.1:1"))
+	m.granularity = store.GranularityMessage
+
+	next, failed := m.Update(rowsFetchedMsg{
+		granularity: store.GranularityMessage,
+		err:         errors.New("DAEMON_DOWN: connection refused"),
+	})
+	if toModel(next).status == "" {
+		t.Error("the error must still reach the status line")
+	}
+	_, good := m.Update(rowsFetchedMsg{granularity: store.GranularityMessage})
+
+	// One tick each, and only one: an error path that armed a second would
+	// double the clock every round, and two become four.
+	var failedTicks, goodTicks int
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); failedTicks = countTicks(failed) }()
+	go func() { defer wg.Done(); goodTicks = countTicks(good) }()
+	wg.Wait()
+
+	if failedTicks != 1 {
+		t.Errorf("a rows error armed %d ticks, want 1: the clock has to survive a transient DAEMON_DOWN", failedTicks)
+	}
+	if goodTicks != 1 {
+		t.Errorf("a good rows response armed %d ticks, want 1", goodTicks)
+	}
+}
+
+// countTicks runs a command tree in the background and reports how many ticks
+// it arms. A tick blocks for a whole tickInterval before it fires, so this
+// waits one interval out rather than running the command synchronously.
+func countTicks(cmd tea.Cmd) int {
+	if cmd == nil {
+		return 0
+	}
+	fired := make(chan tea.Msg, 16)
+	watch(cmd, fired)
+	ticks := 0
+	deadline := time.After(tickInterval + time.Second)
+	for {
+		select {
+		case msg := <-fired:
+			if _, isTick := msg.(tickMsg); isTick {
+				ticks++
+			}
+		case <-deadline:
+			return ticks
+		}
+	}
+}
+
+// g cycles between three different lists, so a message row has no counterpart
+// at channel granularity and the cursor cannot be carried across. Resetting is
+// the honest answer; matching by id would either keep the wrong row or land on
+// an arbitrary one.
 func TestGResetsTheCursorAndDropsTheThread(t *testing.T) {
 	m := toModel(New("http://127.0.0.1:1"))
 	m.width, m.height = 120, 40
@@ -198,6 +261,62 @@ func TestGResetsTheCursorAndDropsTheThread(t *testing.T) {
 	}
 	if mm.threadID != 0 || mm.thread != nil {
 		t.Errorf("threadID %d thread %+v, want both dropped: the old row is gone", mm.threadID, mm.thread)
+	}
+}
+
+// The key handler and the rows response are two halves of one press, and
+// resetting the cursor in the first half is not enough: applyRows carries the
+// cursor by the id of the row under it, so the rows themselves have to go or the
+// response that follows matches the old id against the new list. The id
+// namespaces differ per granularity, so that match succeeds on a row that has
+// nothing to do with the one the user was on — and Enter and r then act on the
+// wrong thread. This drives the whole path because the handler-only test above
+// cannot see it.
+func TestGCyclesOntoTheTopRowOfTheNextGranularity(t *testing.T) {
+	m := toModel(New("http://127.0.0.1:1"))
+	m.width, m.height = 120, 40
+	m.granularity = store.GranularityChannel
+	m.rows = []store.Row{{ID: 3, Channel: "eng"}}
+	m.cursor = 0
+
+	next, _ := m.handleKey(key("g"))
+	if toModel(next).granularity != store.GranularityMessage {
+		t.Fatal("g from channel granularity must reach message granularity")
+	}
+	// Id 3 is the channel the user was on. At message granularity the same
+	// number is the second message, and the row the cursor lands on is what
+	// Enter and r will open.
+	next, _ = m.Update(rowsFetchedMsg{
+		granularity: store.GranularityMessage,
+		rows: []store.Row{
+			{ID: 9, ThreadID: 1, Channel: "eng"},
+			{ID: 3, ThreadID: 2, Channel: "eng"},
+			{ID: 4, ThreadID: 3, Channel: "eng"},
+		},
+	})
+	mm := toModel(next)
+	if mm.cursor != 0 {
+		t.Fatalf("cursor = %d on message %d, want the top row: g is another list, not another page",
+			mm.cursor, mm.rows[mm.cursor].ID)
+	}
+}
+
+// g changes what a row is, so the pane showing the old row's thread has nothing
+// left to show. Leaving detail set puts an empty pane in front of the list,
+// saying "press g" about a granularity the user has already pressed.
+func TestGLeavesTheThreadPane(t *testing.T) {
+	m := toModel(New("http://127.0.0.1:1"))
+	m.width, m.height = 120, 40
+	m.rows = []store.Row{{ID: 1, Channel: "eng", Thread: "pr"}}
+	m.cursor = 0
+	next, _ := m.handleKey(key("g"))
+	m = toModel(next)
+	next, _ = m.handleKey(key("g"))
+	m = toModel(next)
+	m.detail = true
+	next, _ = m.handleKey(key("g"))
+	if mm := toModel(next); mm.detail {
+		t.Error("g must leave the thread pane: the rows it showed belong to a granularity that is gone")
 	}
 }
 
@@ -219,9 +338,17 @@ func TestVKeepsTheCursorOnTheSameRow(t *testing.T) {
 	}
 }
 
-// The spec's promise: a tick refetches and keeps the cursor. New messages
-// prepend at message granularity, so a cursor held as a fixed index would slide
-// onto whatever arrived.
+// The spec's promise: a tick refetches and keeps the cursor. The feed is
+// newest-first, so a new message prepends and a cursor held as a fixed index
+// would slide onto whatever arrived; carrying it by id is what stops that.
+//
+// It also carries the window, and that is deliberate rather than incidental. The
+// cursor was on the last visible row when the tick fired, so after the prepend
+// it is one row further down and the window has to move to keep it visible —
+// one row, and the message that arrived at the top goes with it. The old
+// assertion checked the window's top id, which reads the same either way
+// because the prepended row takes index 0 and every other row keeps its id, so
+// it passed over a scroll shift of 0 to 1 and never saw the follow.
 func TestTheTickKeepsTheCursorOnTheSameRow(t *testing.T) {
 	m := toModel(New("http://127.0.0.1:1"))
 	m.width, m.height = 120, MinHeight
@@ -231,7 +358,9 @@ func TestTheTickKeepsTheCursorOnTheSameRow(t *testing.T) {
 	}
 	m.rows = rows
 	m.cursor = 20
-	top := m.rows[m.scroll].ID
+	if m.scroll != 0 {
+		t.Fatalf("the window starts at %d, want 0", m.scroll)
+	}
 	next, _ := m.Update(rowsFetchedMsg{
 		granularity: store.GranularityMessage,
 		rows:        append([]store.Row{{ID: 99, ThreadID: 5}}, rows...),
@@ -240,8 +369,13 @@ func TestTheTickKeepsTheCursorOnTheSameRow(t *testing.T) {
 	if got := mm.rows[mm.cursor].ID; got != 21 {
 		t.Errorf("cursor = %d on row %d, want the row the user was on", mm.cursor, got)
 	}
-	if got := mm.rows[mm.scroll].ID; got != top {
-		t.Errorf("the window now starts at row %d, want %d: a refetch must not lose the user's place", got, top)
+	if mm.scroll != 1 {
+		t.Errorf("scroll = %d, want 1: the prepended row pushed the cursor to the last visible line", mm.scroll)
+	}
+	visible := max(mm.height-chromeH, 1)
+	if mm.cursor < mm.scroll || mm.cursor >= mm.scroll+visible {
+		t.Errorf("cursor %d is outside the window [%d,%d): a refetch must not lose the user's place",
+			mm.cursor, mm.scroll, mm.scroll+visible)
 	}
 }
 

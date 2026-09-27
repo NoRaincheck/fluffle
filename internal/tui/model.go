@@ -59,7 +59,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case rowsFetchedMsg:
 		if msg.err != nil {
 			m.status = "error: " + msg.err.Error()
-			return m, nil
+			// The clock is armed here and nowhere else, so an error that
+			// returned no command would end the tick chain for the rest of the
+			// session — and DAEMON_DOWN is exactly the transient error that
+			// would cause it. Arming here is what makes the clock self-healing.
+			return m, m.tick()
 		}
 		if msg.granularity != m.granularity {
 			return m, nil
@@ -355,9 +359,15 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "g":
 		// Another granularity is another list, so the row the cursor was on has
-		// no counterpart in it. Reset rather than match by id.
+		// no counterpart in it. Reset rather than match by id — and drop the
+		// rows, because applyRows carries the cursor by the id under it and the
+		// id namespaces differ per granularity: a channel id can equal a
+		// message id, so a stale row left here is matched against the next
+		// list's rows and lands on an unrelated one.
 		m.granularity = m.nextGranularity()
+		m.rows = nil
 		m.cursor, m.scroll = 0, 0
+		m.detail = false
 		m.threadID = 0
 		m.thread = nil
 		return m, m.fetchRows()
@@ -443,9 +453,11 @@ func (m model) tick() tea.Cmd {
 // become four, then eight, and the TUI ends up hammering the daemon instead of
 // reading it. One tick per outstanding refetch is the whole invariant.
 //
-// New messages append, so the row the cursor is on is still in the list, and
-// applyRows carries the cursor across by id. The window moves only as far as
-// the carried cursor needs it to.
+// New messages prepend — the feed is newest-first — so the row the cursor is on
+// is still in the list but has moved down by however many arrived, and
+// applyRows carries the cursor across by id rather than by index. The window
+// follows the carried cursor, which is why a new message at the top does not
+// push the row you are reading off the screen.
 func (m model) refresh() tea.Cmd {
 	return tea.Batch(m.fetchRows(), m.refetchThread())
 }
