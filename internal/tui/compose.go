@@ -296,28 +296,3 @@ func (m filterModel) View() string {
 }
 
 type filterAppliedMsg struct{ text string }
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func composeContext(mode composeMode, context string) string {
-	switch mode {
-	case composeModeMessage:
-		return context
-	case composeModeReply:
-		preview := truncate(context, 40)
-		return "Reply to: " + preview
-	case composeModeNewThread:
-		return "New thread in " + context
-	case composeModeNewChannel:
-		return "New channel name (anchored to cwd)"
-	case composeModeReact:
-		return "React to: " + truncate(context, 40)
-	default:
-		return context
-	}
-}

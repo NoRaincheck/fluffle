@@ -481,32 +481,8 @@ func (s *Store) ListInbox(ctx context.Context, limit int) ([]InboxMessage, error
 }
 
 func (s *Store) AddReaction(ctx context.Context, messageID int64, emoji, name, authorType string) error {
-	tx, q, err := s.tx(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if _, err := s.messageThreadID(ctx, q, messageID); err != nil {
-		return err
-	}
-	if _, _, err := s.addReaction(ctx, q, messageID, emoji, name, authorType, ""); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
-func (s *Store) messageThreadID(ctx context.Context, q *db.Queries, messageID int64) (int64, error) {
-	if messageID <= 0 {
-		return 0, ErrNotFound
-	}
-	threadID, err := q.GetMessageThreadIDByID(ctx, db.GetMessageThreadIDByIDParams{ID: messageID})
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, ErrNotFound
-	}
-	if err != nil {
-		return 0, err
-	}
-	return threadID, nil
+	_, _, err := s.addReaction(ctx, s.q, messageID, emoji, name, authorType, "")
+	return err
 }
 
 func (s *Store) ListReactions(ctx context.Context, threadID int64) ([]Reaction, error) {
@@ -588,7 +564,7 @@ func (s *Store) AppendBatch(ctx context.Context, threadID int64, events []Append
 			return nil, err
 		}
 	}
-	nextSeq, err := nextThreadSeq(ctx, q, threadID)
+	nextSeq, err := nextMessageSeq(ctx, q, threadID)
 	if err != nil {
 		return nil, err
 	}
@@ -670,10 +646,6 @@ func (s *Store) appendMessageByParentSeq(ctx context.Context, q *db.Queries, thr
 		}
 	}
 	return s.appendMessage(ctx, q, threadID, name, authorType, role, content, createdAt, parentID)
-}
-
-func nextThreadSeq(ctx context.Context, q *db.Queries, threadID int64) (int64, error) {
-	return nextMessageSeq(ctx, q, threadID)
 }
 
 func nextMessageSeq(ctx context.Context, q *db.Queries, threadID int64) (int64, error) {

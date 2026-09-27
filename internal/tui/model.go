@@ -1413,117 +1413,6 @@ func placeOverlay(base, overlay string, width, height int) string {
 	return strings.Join(baseLines, "\n")
 }
 
-func (m model) renderReplyBackground(w, h int) string {
-	if h < 5 {
-		h = 5
-	}
-	threadID := m.compose.state.threadID
-	chName := ""
-	if m.selectedChannel != nil {
-		chName = m.selectedChannel.Name
-	}
-	thName := ""
-	if m.selectedThread != nil && m.selectedThread.ID == threadID {
-		thName = m.selectedThread.Title
-	} else {
-		for _, th := range m.threads {
-			if th.ID == threadID {
-				thName = th.Title
-				break
-			}
-		}
-		if thName == "" {
-			for _, im := range m.inbox {
-				if im.ThreadID == threadID {
-					thName = im.ThreadTitle
-					if chName == "" {
-						chName = im.ChannelName
-					}
-					break
-				}
-			}
-		}
-	}
-	var msgs []store.Message
-	if len(m.messages) > 0 && m.messages[0].ThreadID == threadID {
-		msgs = m.messages
-	} else if m.previewThreadID == threadID && len(m.previewMessages) > 0 {
-		msgs = m.previewMessages
-	}
-	title := fmt.Sprintf("%s › %s", chName, thName)
-	if title == " › " {
-		title = "Thread"
-	} else {
-		last := latestMessageTime(msgs)
-		if last != "" {
-			title += fmt.Sprintf("  · last %s", formatTime(last))
-		}
-	}
-	var allItems []string
-	if len(msgs) == 0 {
-		allItems = []string{"  (loading thread…)"}
-		if m.selectedThread != nil && threadID != 0 && len(m.messages) == 0 && m.previewThreadID != threadID {
-			allItems = []string{"  (loading thread…)"}
-		}
-	} else {
-		timeWidth := 8
-		seqWidth := 6
-		nameWidth := 15
-		contentWidth := max(minContentWidth, w-timeWidth-seqWidth-nameWidth-12)
-		for i, msg := range msgs {
-			prefix := "  "
-			if i == m.cursor {
-				prefix = "> "
-			}
-			tStr := formatTime(msg.CreatedAt)
-			tStr = fmt.Sprintf("%*s", timeWidth, tStr)
-			nameStyle := getNameStyle(msg.AuthorType)
-			name := truncate(msg.Name, nameWidth)
-			nameRendered := nameStyle.Render(name)
-			seqStr := fmt.Sprintf("#%-4d", msg.Seq)
-			content := truncate(msg.Content, contentWidth)
-			line := fmt.Sprintf("%s%s  %s  %s  %s", prefix, tStr, seqStr, nameRendered, content)
-			if i == m.cursor {
-				line = chatMsgSelectedStyle.Render(line)
-			} else {
-				line = chatMsgStyle.Render(line)
-			}
-			allItems = append(allItems, line)
-		}
-	}
-	visibleCap := h - 2
-	if visibleCap < 1 {
-		visibleCap = 1
-	}
-	start := m.scroll
-	if start < 0 {
-		start = 0
-	}
-	if start >= len(allItems) {
-		start = len(allItems) - 1
-	}
-	if start < 0 {
-		start = 0
-	}
-	visible := allItems[start:]
-	if len(visible) > visibleCap {
-		visible = visible[:visibleCap]
-	}
-	boxW := max(20, w)
-	sepLen := max(0, boxW-2)
-	headerStyleNoMargin := chatHeaderStyle.MarginBottom(0)
-	sep := headerStyleNoMargin.Render(strings.Repeat("─", sepLen))
-	lines := []string{headerStyleNoMargin.Render(title), sep}
-	lines = append(lines, visible...)
-	for len(lines) < h {
-		lines = append(lines, "")
-	}
-	if len(lines) > h {
-		lines = lines[:h]
-	}
-	return lipgloss.NewStyle().Width(boxW).Render(strings.Join(lines, "\n"))
-}
-
 func sortedMessagesDesc(msgs []store.Message) []store.Message {
 	if msgs == nil {
 		return nil
@@ -1810,10 +1699,6 @@ func (m model) renderInboxDetail(w, h int) string {
 		thName = m.selectedThread.Title
 	}
 	return m.renderThreadView(w, h, m.messages, chName, thName, false)
-}
-
-func (m model) renderList() string {
-	return m.renderListWithWidth(m.width, m.height-4)
 }
 
 func (m model) listHeight() int {
@@ -2429,78 +2314,6 @@ func (m model) renderPreview(w, h int) string {
 	return lipgloss.NewStyle().Width(max(20, w)).Render(strings.Join(lines, "\n"))
 }
 
-func lastNPreviewMessages(msgs []store.Message, threadID int64, seq int64, n int) []store.Message {
-	return lastNPreviewMessagesWithParent(msgs, threadID, seq, 0, n)
-}
-
-func filterThreadReplies(msgs []store.Message, threadID int64, seq int64, parentID int64) []store.Message {
-	var filtered []store.Message
-	for _, msg := range msgs {
-		if msg.ThreadID != threadID {
-			continue
-		}
-		if msg.ParentID.Valid && msg.ParentID.Int64 == parentID {
-			filtered = append(filtered, msg)
-		}
-	}
-	if len(filtered) > 0 {
-		return filtered
-	}
-	for _, msg := range msgs {
-		if msg.ThreadID != threadID {
-			continue
-		}
-		if seq != 0 && msg.Seq <= seq {
-			continue
-		}
-		filtered = append(filtered, msg)
-	}
-	return filtered
-}
-
-func lastNPreviewMessagesWithParent(msgs []store.Message, threadID int64, seq int64, parentID int64, n int) []store.Message {
-	var filtered []store.Message
-	if parentID != 0 {
-		for _, msg := range msgs {
-			if msg.ThreadID != threadID {
-				continue
-			}
-			if msg.ParentID.Valid && msg.ParentID.Int64 == parentID {
-				filtered = append(filtered, msg)
-			}
-		}
-		if len(filtered) > 0 {
-			if len(filtered) <= n {
-				return filtered
-			}
-			return filtered[len(filtered)-n:]
-		}
-	}
-	for _, msg := range msgs {
-		if msg.ThreadID != threadID {
-			continue
-		}
-		if seq != 0 && msg.Seq <= seq {
-			continue
-		}
-		filtered = append(filtered, msg)
-	}
-	if len(filtered) == 0 {
-		for _, msg := range msgs {
-			if msg.ThreadID == threadID {
-				filtered = append(filtered, msg)
-			}
-		}
-		if len(filtered) == 0 {
-			return nil
-		}
-	}
-	if len(filtered) <= n {
-		return filtered
-	}
-	return filtered[len(filtered)-n:]
-}
-
 func (m *model) clampCursor() {
 	total := 0
 	switch m.view {
@@ -2579,10 +2392,6 @@ func (m *model) clampInboxFullScroll() {
 	if m.scroll < 0 {
 		m.scroll = 0
 	}
-}
-
-func (m model) detailLineCounts(w int) ([]int, int, int, []store.Message) {
-	return m.threadReplyLineCounts(w)
 }
 
 func (m model) threadReplyLineCounts(w int) ([]int, int, int, []store.Message) {
@@ -2833,19 +2642,6 @@ func (m model) helpView() string {
 		parts = []string{hintKeyStyle.Render("↑↓") + " nav", hintKeyStyle.Render("r") + " reply", hintKeyStyle.Render("n") + " new thread", hintKeyStyle.Render("Esc") + " back", previewHint, hintKeyStyle.Render("q") + " quit"}
 	}
 	return hintStyle.Render(strings.Join(parts, "  "))
-}
-
-func center(s string, width int) string {
-	lines := strings.Split(s, "\n")
-	centered := make([]string, len(lines))
-	for i, line := range lines {
-		padding := (width - len(line)) / 2
-		if padding < 0 {
-			padding = 0
-		}
-		centered[i] = strings.Repeat(" ", padding) + line
-	}
-	return lipgloss.JoinVertical(lipgloss.Left, centered...)
 }
 
 func max(a, b int) int {
