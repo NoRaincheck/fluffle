@@ -69,13 +69,13 @@ const MaxSlug = 12 // channels.name, threads.title
 const MaxName = 12 // messages.name, reactions.name, agent_sessions.agent_name
 
 // Slug: ^[A-Za-z][A-Za-z0-9-]{0,11}$   must start with a letter
-// Name: ^[A-Za-z][A-Za-z.]{0,11}$     must start with a letter
+// Name: ^[A-Za-z](?:[A-Za-z.]{0,10}[A-Za-z])?$   must start and end with a letter
 ```
 
 | Kind | Charset | Max | Examples |
 |---|---|---|---|
-| slug | `A-Za-z0-9-`, leading `A-Za-z` | 12 | `eng`, `pr-review`, `schema-migration-2` |
-| name | `A-Za-z.`, leading `A-Za-z` | 12 | `alice`, `bob.smith`, `ci.bot` |
+| slug | `A-Za-z0-9-`, leading `A-Za-z` | 12 | `eng`, `pr-review`, `pr-review-2` |
+| name | `A-Za-z.`, leading and trailing `A-Za-z` | 12 | `alice`, `bob.smith`, `ci.bot` |
 
 Consequences, all intended:
 
@@ -87,6 +87,12 @@ Consequences, all intended:
 - `@mention` tokens are `[A-Za-z][A-Za-z.]*`, trailing dots trimmed, so
   `@alice. what changed?` yields `alice`. A mention that names no configured
   agent stays prose, as it does today.
+- A name may not **end** in a dot, even though a mention token's trailing dot is
+  trimmed. The two rules are not in conflict: trimming is the tokenizer being
+  tolerant of sentence punctuation, while validation is strict, because an agent
+  named `ci.bot.` could never be resolved — the trim would strip the dot and look
+  up `ci.bot` — so it would silently never trigger. Doubled dots inside a name
+  stay legal: `ci..bot` round-trips through the trim unchanged.
 - All three list columns are 12 wide, so column width is a single constant.
 - Digits are legal in a slug and illegal in a name. That asymmetry is
   deliberate: slugs need collision suffixes, names need to stay pronounceable

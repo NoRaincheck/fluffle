@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- `MaxSlug = 12` and `MaxName = 12`, byte lengths. Slug charset `^[A-Za-z][A-Za-z0-9-]*$`, name charset `^[A-Za-z][A-Za-z.]*$`. Both must start with an ASCII letter.
+- `MaxSlug = 12` and `MaxName = 12`, byte lengths. Slug charset `^[A-Za-z][A-Za-z0-9-]*$`; name charset `^[A-Za-z](?:[A-Za-z.]*[A-Za-z])?$`. Both must start with an ASCII letter, and a name must end with one too: a name may not end with a dot, because `mentions` trims trailing dots off a mention token, so an agent named `ci.bot.` could never be mentioned and would silently never trigger. Doubled dots inside a name stay legal (`ci..bot`) and a slug may end in a digit.
 - `threads.title` keeps its column name, its `Title` field, and the `--title` flag. It becomes a slug. Do not rename it to `slug`.
 - No schema change. The `length(trim(x)) > 0` CHECKs stay. Character rules are enforced in Go only.
 - No migration, no data-repair path, no rebuild probe. `~/.fluffle` was deleted before this work.
@@ -567,7 +567,7 @@ func TestAppendMessageRejectsBadName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"", "ci-bot", "ci_bot", "ci2", ".lead"} {
+	for _, name := range []string{"", "ci-bot", "ci_bot", "ci2", ".lead", "alice.", "ci.bot."} {
 		if _, err := s.AppendMessage(context.Background(), thID, name, "agent", "assistant", "hi"); !errors.Is(err, ErrInvalid) {
 			t.Errorf("AppendMessage(name=%q) = %v, want ErrInvalid", name, err)
 		}
@@ -3024,7 +3024,7 @@ most one is ever in flight. g and v complete the keymap."
 
 **Files:**
 - Rewrite: `docs/tui-architecture.md`, `docs/tui-keybindings.md`, `docs/tui-extending.md`
-- Modify: `docs/agent-sessions.md`, `README.md`, `VISION.md`
+- Modify: `docs/agent-sessions.md`, `docs/backend.md`, `README.md`, `VISION.md`
 
 **Interfaces:**
 - Consumes: the finished behaviour of Tasks 1 through 10.
@@ -3046,11 +3046,15 @@ How to add a renderer or a granularity: the two render functions, the one `Row` 
 
 Delete the sections on the preview pane and the 500 ms poll. Keep the daemon-side contract: a leading `@mention` on a human message starts one session, the reply lands as an ordinary agent-authored message, and `flf agent session --id N` reads a transcript. Add one line: the TUI shows the agent's reply in the thread and does not show the run.
 
-Update the mention-charset paragraph to the new rule: the charset is `[A-Za-z][A-Za-z.]*` with trailing dots trimmed, and a token a looser charset would have continued is not a name at all. Update the `agentcfg` charset sentence to `^[A-Za-z](?:[A-Za-z.]{0,10}[A-Za-z])?$`, which caps the name at 12 bytes and, like `names.Name`, refuses a trailing dot.
+Update the mention-charset paragraph to the new rule: the charset is `[A-Za-z][A-Za-z.]*` with trailing dots trimmed, and a token a looser charset would have continued is not a name at all. State the validation rule alongside it, so the paragraph says a legal name starts and ends with a letter and never ends with a dot, which is why the trailing dot is trimmed rather than resolved. Update the `agentcfg` charset sentence to `^[A-Za-z](?:[A-Za-z.]{0,10}[A-Za-z])?$`, which caps the name at 12 bytes and, like `names.Name`, refuses a trailing dot.
 
 - [ ] **Step 5: Update `README.md` and `VISION.md`**
 
-Re-slug every example: `auth-refactor` stays, `Schema migration` becomes `schema-migration`, `pr-review` stays, `ci-bot` becomes `ci.bot`. In `VISION.md`, add a fifth entry to Decisions Locked In covering the two name rules and the 12-byte bound, and replace the described TUI surface with the new keymap.
+Re-slug every example: `auth-refactor` stays, `Schema migration` becomes `schema-migration`, `pr-review` stays, `ci-bot` becomes `ci.bot`. In `VISION.md`, add a fifth entry to Decisions Locked In covering the two name rules and the 12-byte bound, including that a name may not end with a dot, and replace the described TUI surface with the new keymap.
+
+- [ ] **Step 5b: Update `docs/backend.md`**
+
+It currently states the pre-rewrite mention rule — "A name is `[A-Za-z0-9]` plus `_`/`-` after the first byte" — and no other task owns that sentence, so it would survive as a false claim. Replace it with the new tokenizer behaviour: `mentions.Parse` scans a run of `[A-Za-z][A-Za-z.]*`, trims trailing dots so `@alice. what changed?` yields `alice`, treats a token a looser charset would have continued as not a name at all so `@alice2` stays prose, and resolves the trimmed token against names that start and end with a letter. Leave the rest of the file alone.
 
 - [ ] **Step 6: Verify no doc names a deleted thing**
 
