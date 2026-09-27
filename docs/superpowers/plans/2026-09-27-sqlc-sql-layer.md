@@ -23,10 +23,10 @@ These apply to every task. They are copied verbatim from the spec.
 - **The JSON wire contract must not change.** `store.Channel`, `store.Thread`, `store.Message`, `store.Reaction`, `store.Session`, `store.SessionEvent`, and `store.ThreadContext` are marshaled directly by `apiserver` and unmarshaled by `tui`. They carry almost no JSON tags, so Go field names *are* the API field names. Generated `internal/db` types are never marshaled.
 - **`emit_json_tags: false` is load-bearing.** With it `true`, sqlc emits `json:"RepoHeadSha"` while the field is `RepoHeadSHA`, silently changing the API.
 - Every read query keeps its `COALESCE(col,'')` wrappers. This is what keeps `Channel.RepoAbsPath` and friends pointer-free.
-- **Empty-slice convention is per-method and API-visible.** `null` and `[]` are different JSON. Preserve exactly:
-  - return **nil** (marshals to `null`): `ListChannels`, `ListThreads`, `ListMessages`, `ListReactions`
-  - return **non-nil** (marshals to `[]`): `ListInbox`, `ListSessions`, `ListSessionEvents`
-  With `emit_empty_slices: false`, sqlc's `:many` returns nil, so the three non-nil methods need an explicit `if out == nil { out = []T{} }`.
+- **Empty-slice convention is per-method and must be preserved exactly.** The methods are not symmetric, so copy the right one per method:
+  - return **nil**: `ListChannels`, `ListThreads`, `ListMessages`, `ListReactions`
+  - return **non-nil** (seeded with `[]T{}` or normalized from nil): `ListInbox`, `ListSessions`, `ListSessionEvents`
+  With `emit_empty_slices: false`, sqlc's `:many` returns nil, so the three non-nil methods need an explicit `if out == nil { out = []T{} }`. Note that `apiserver` currently normalizes nil to `[]` at all five HTTP list endpoints, so this is a **store-internal** convention rather than an API-visible one — it is preserved because it is the current behavior and `store_test.go` observes it, not because the HTTP response would change. Do not "normalize" a nil-returning method to an empty slice: that is still a behavior change, just an invisible one.
 - **No existing test may be modified to accommodate a new implementation** in tasks 1-9. A test that must change means behavior changed, which requires sign-off. Task 3 (validator removal) is the single sanctioned exception and must update the affected assertions in the same commit.
 - Identifiers named `db` collide with the new `db` package. `store.go` lines 106, 118, 139, 155, 162 all bind a variable or parameter named `db`; rename to `conn`.
 - Two-phase context rollout: tasks 5-9 keep the existing `Store` method signatures and pass `context.Background()` internally. Task 10 is the one isolated commit that threads real contexts. Do not thread context early.
