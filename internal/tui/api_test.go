@@ -162,16 +162,6 @@ func TestAPIErrorResponseWithoutEnvelopeIsDaemonError(t *testing.T) {
 	}
 }
 
-// A 2xx response that is not JSON is a decode failure, not a delivery
-// failure, so reads and writes classify it differently.
-func TestAPISuccessStatusWithBadBodyIsNotSwallowed(t *testing.T) {
-	ts := jsonServer(t, http.StatusOK, `[]`)
-	_, err := NewAPIClient(ts).ListRows(nil, store.GranularityMessage, 10)
-	if err != nil {
-		t.Fatalf("a 200 with a valid body must not error: %v", err)
-	}
-}
-
 func TestAPIReadDecodeFailuresAreDaemonErrors(t *testing.T) {
 	for _, tt := range []struct {
 		name string

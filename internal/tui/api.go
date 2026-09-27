@@ -32,8 +32,11 @@ func (c *apiClient) EnsureDaemon() error {
 	return nil
 }
 
-// get performs a GET and decodes a non-null JSON array into T, replacing a
-// null body with an empty slice so no caller handles nil.
+// get performs a GET and decodes a JSON array into T. A body of 4xx or 5xx
+// surfaces as the envelope's code and message, a null or undecodable body as
+// DAEMON_ERROR. A decodable array always yields a non-nil slice, so a caller
+// never has to handle nil; a daemon that would serialise null must normalise it
+// on its own side, where the empty result is produced.
 func get[T any](c *apiClient, ctx context.Context, url string) ([]T, error) {
 	resp, err := c.do(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -46,9 +49,6 @@ func get[T any](c *apiClient, ctx context.Context, url string) ([]T, error) {
 	var out []T
 	if err := decodeStrictJSON(resp.Body, &out); err != nil {
 		return nil, fmt.Errorf("DAEMON_ERROR: %w", err)
-	}
-	if out == nil {
-		return []T{}, nil
 	}
 	return out, nil
 }

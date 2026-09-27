@@ -69,6 +69,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case threadFetchedMsg:
 		if msg.err != nil {
 			m.status = "error: " + msg.err.Error()
+			// A failed load must not leave the previous thread's messages
+			// under the newly selected thread's title, and clearing
+			// threadID lets the next syncThread retry instead of treating
+			// the failure as loaded.
+			m.thread, m.threadID = nil, 0
 			return m, nil
 		}
 		if msg.threadID != m.threadID {

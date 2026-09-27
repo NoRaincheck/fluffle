@@ -161,7 +161,10 @@ func TestRowLineTruncatedContentKeepsTheTail(t *testing.T) {
 	}
 }
 
-func TestRenderRowsLinesFillTheRequestedWidth(t *testing.T) {
+// renderRows owes the caller exactly h lines, each exactly w cells. The line
+// count is the pad-to-height loop; the width is rowLine's own pad, plus render
+// Rows' pad on the placeholder.
+func TestRenderRowsFillsTheWindowWithFullWidthLines(t *testing.T) {
 	rows := []store.Row{{ID: 1, Channel: "eng", Name: "alice", Content: "short"}}
 	for _, c := range []struct {
 		name string
@@ -170,7 +173,11 @@ func TestRenderRowsLinesFillTheRequestedWidth(t *testing.T) {
 		{"rows", rows},
 		{"empty state", nil},
 	} {
-		for i, line := range strings.Split(renderRows(100, 4, c.rows, 0, 0), "\n") {
+		lines := strings.Split(renderRows(100, 4, c.rows, 0, 0), "\n")
+		if len(lines) != 4 {
+			t.Errorf("%s: renderRows returned %d lines, want 4", c.name, len(lines))
+		}
+		for i, line := range lines {
 			if got := termtext.DisplayWidth(plain(line)); got != 100 {
 				t.Errorf("%s line %d is %d cells, want 100: %q", c.name, i, got, line)
 			}
@@ -595,6 +602,63 @@ func TestRowsFetchedForAnotherGranularityIsIgnored(t *testing.T) {
 	})
 	if got := toModel(next); len(got.rows) != before || got.rows[0].ID != 1 {
 		t.Errorf("a response for another granularity must be ignored, got %+v", got.rows)
+	}
+}
+
+// A failed fetch must leave the pane empty rather than showing the previous
+// thread under the new thread's title, and it must stay retryable.
+func TestFailedThreadFetchClearsThePaneAndRetries(t *testing.T) {
+	var paths []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"ID":1,"ThreadID":1,"Content":"thread A"}]`))
+	}))
+	defer ts.Close()
+
+	next, _ := toModel(New(ts.URL)).Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	next, _ = next.Update(rowsFetchedMsg{granularity: store.GranularityMessage, rows: []store.Row{
+		{ID: 1, ThreadID: 1, Channel: "eng", Thread: "a"},
+		{ID: 2, ThreadID: 2, Channel: "eng", Thread: "b"},
+	}})
+	m := toModel(next)
+	if m.threadID != 1 {
+		t.Fatalf("threadID = %d, want 1", m.threadID)
+	}
+	next, _ = m.Update(threadFetchedMsg{threadID: 1, messages: []store.Message{{ID: 1, Content: "A"}}})
+	m = toModel(next)
+	if len(m.thread) != 1 {
+		t.Fatalf("thread A = %+v, want it loaded", m.thread)
+	}
+
+	next, _ = m.handleKey(key("j"))
+	m = toModel(next)
+	if m.threadID != 2 {
+		t.Fatalf("threadID = %d, want 2 after moving to b", m.threadID)
+	}
+	next, _ = m.Update(threadFetchedMsg{threadID: 2, err: errors.New("DAEMON_DOWN: connection refused")})
+	m = toModel(next)
+
+	if len(m.thread) != 0 {
+		t.Errorf("a failed fetch left thread A's messages in the pane: %+v", m.thread)
+	}
+	if m.threadID != 0 {
+		t.Errorf("threadID = %d, want 0 so the next syncThread retries", m.threadID)
+	}
+	if got := m.threadTitle(); got != "eng › b" {
+		t.Errorf("threadTitle = %q, want the selected thread's title", got)
+	}
+
+	paths = nil
+	cmd := m.syncThread()
+	if cmd == nil {
+		t.Fatal("the failed thread must be retried, not cached as loaded")
+	}
+	if _, ok := cmd().(threadFetchedMsg); !ok {
+		t.Fatal("the retry must be a threadFetchedMsg")
+	}
+	if len(paths) != 1 || paths[0] != "/v1/threads/2/messages" {
+		t.Errorf("retried %v, want [/v1/threads/2/messages]", paths)
 	}
 }
 
