@@ -110,14 +110,56 @@ func (m model) View() string {
 }
 
 // bodyView is title, body, hint, and status: chromeH rows of chrome around
-// exactly the rest. Task 8 adds the split pane and the fullscreen thread.
+// exactly the rest. In a split terminal the thread sits beside the list; in a
+// stacked one it replaces the list; either way it is the same renderThread.
 func (m model) bodyView() string {
+	h := m.height - chromeH
+	var body string
+	switch {
+	case m.detail:
+		body = renderThread(m.paneWidth(), h, m.threadTitle(), m.thread)
+	case m.split():
+		body = sideBySide(
+			renderRows(ListW, h, m.rows, m.cursor, m.scroll),
+			renderThread(m.paneWidth(), h, m.threadTitle(), m.thread))
+	default:
+		body = renderRows(m.width, h, m.rows, m.cursor, m.scroll)
+	}
 	return strings.Join([]string{
 		m.titleLine(),
-		renderRows(m.width, m.height-chromeH, m.rows, m.cursor, m.scroll),
+		body,
 		dimStyle.Render("↑↓ nav · g group · v sort · Enter read · r reply · q quit"),
 		statusStyle.Width(m.width - 2).Render(termtext.Truncate(m.statusLine(), m.width-2, "…")),
 	}, "\n")
+}
+
+// paneWidth is the width the thread is drawn at, whether it sits beside the
+// list or fills the terminal. It is the only place that arithmetic lives, so
+// both placements cannot drift apart.
+func (m model) paneWidth() int {
+	if m.split() && !m.detail {
+		return m.width - ListW
+	}
+	return m.width
+}
+
+// sideBySide puts the thread pane to the right of the list, one list row and
+// one thread row per output row. Joining the two blocks instead would stack
+// them, which costs a row and is not a split.
+func sideBySide(list, thread string) string {
+	l, r := strings.Split(list, "\n"), strings.Split(thread, "\n")
+	rows := make([]string, 0, max(len(l), len(r)))
+	for i := range max(len(l), len(r)) {
+		rows = append(rows, rowAt(l, i)+rowAt(r, i))
+	}
+	return strings.Join(rows, "\n")
+}
+
+func rowAt(rows []string, i int) string {
+	if i < len(rows) {
+		return rows[i]
+	}
+	return ""
 }
 
 func (m model) tooNarrow() bool { return m.width < MinWidth || m.height < MinHeight }
@@ -266,8 +308,31 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.clamp()
 		return m, m.syncThread()
+	case "enter":
+		return m.openThread()
+	case "esc":
+		m.detail = false
+		return m, nil
 	}
 	return m, nil
+}
+
+// openThread reads the selected row's thread. In a split terminal it fills
+// the terminal; in a stacked one it replaces the list. Same rule either way,
+// which is what replaces the old detail view and its five state fields.
+func (m *model) openThread() (tea.Model, tea.Cmd) {
+	row, ok := m.selectedRow()
+	if !ok {
+		m.status = "no row selected"
+		return m, nil
+	}
+	if row.ThreadID == 0 {
+		m.status = "no thread on this row — press g"
+		return m, nil
+	}
+	m.detail = true
+	m.threadScroll = 0
+	return m, m.syncThread()
 }
 
 func (m *model) handleComposeSend(msg composeSendMsg) (tea.Model, tea.Cmd) {
