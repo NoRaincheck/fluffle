@@ -100,7 +100,10 @@ func (m composeModel) caret() string {
 func (m composeModel) view() string {
 	lines := []string{
 		modalTitleStyle.Render(termtext.Truncate(termtext.SanitizeLine(m.context), m.width-6, "")),
-		pad(termtext.Truncate(m.caret(), m.width-6, ""), m.width-6),
+		// Sanitized like every other draw site, and not only because the text
+		// is untrusted: a paste arrives as a tea.PasteMsg that nothing handles,
+		// so what reaches the box is not necessarily keystrokes.
+		pad(termtext.Truncate(termtext.SanitizeLine(m.caret()), m.width-6, ""), m.width-6),
 		m.errLine(),
 		modalHintStyle.Render("Enter to send · Esc to cancel"),
 	}

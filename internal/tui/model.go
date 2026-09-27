@@ -101,6 +101,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		return m, m.refresh()
 	case tea.KeyMsg:
+		// ctrl+c quits everywhere, and it is the one key Update takes before
+		// the reply box. Routing it into the box would swallow it, because
+		// the box has no case for it — and then a user who cannot send has
+		// Esc as the only way out of a process they are trying to abandon.
+		if msg.String() == "ctrl+c" {
+			m.quitting = true
+			return m, tea.Quit
+		}
 		if m.compose.active {
 			return m, m.compose.update(msg)
 		}
@@ -327,6 +335,9 @@ func (m model) refetchThread() tea.Cmd {
 }
 
 func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Update takes ctrl+c before it gets here so the reply box cannot swallow
+	// it. This is the other half of that: handleKey also answers a terminal
+	// too narrow to draw anything.
 	if msg.String() == "ctrl+c" {
 		m.quitting = true
 		return m, tea.Quit

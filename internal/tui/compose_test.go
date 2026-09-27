@@ -89,6 +89,33 @@ func TestComposeEscCancels(t *testing.T) {
 	}
 }
 
+// ctrl+c quits everywhere, and the reply box is not an exception. Update routes
+// every key into the box while it is open, and the box has no ctrl+c case, so
+// before the hoist the keystroke was swallowed: a user with a half-written
+// reply and a process they want gone had Esc as the only way out.
+func TestCtrlCQuitsWithTheReplyBoxOpen(t *testing.T) {
+	m := toModel(New("http://127.0.0.1:1"))
+	m.width, m.height = 120, 40
+	m.rows = []store.Row{{ID: 1, ThreadID: 5, Channel: "eng", Thread: "pr"}}
+	m.cursor = 0
+	next, cmd := m.handleKey(key("r"))
+	m = toModel(next)
+	if !m.compose.active {
+		t.Fatal("r did not open the reply box")
+	}
+	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	mm := toModel(next)
+	if !mm.quitting {
+		t.Error("ctrl+c with the reply box open did not quit: the keystroke reached the box, which has no case for it")
+	}
+	if cmd == nil {
+		t.Fatal("ctrl+c must return tea.Quit, not nothing")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Error("ctrl+c must quit the program, not just set a flag")
+	}
+}
+
 // composeBoxLines is the context, the text, the error line, the hint, and the
 // two border rows. The box is that tall whatever it contains.
 const composeBoxLines = 6
@@ -491,6 +518,22 @@ func TestComposeViewSanitizesTheContext(t *testing.T) {
 		t.Errorf("the compose view passed an escape sequence through: %q", got)
 	}
 	if got := plain(c.view()); !strings.Contains(got, "pr-review") {
+		t.Errorf("sanitizing dropped the text it should keep: %q", got)
+	}
+}
+
+// The typed text is the one user-derived string that reached the terminal
+// without going through SanitizeLine. A paste arrives as a tea.PasteMsg that
+// nothing handles, so the box cannot assume what is in it came from a key.
+func TestComposeViewSanitizesTheTypedText(t *testing.T) {
+	var c composeModel
+	c.resize(120)
+	c.open("reply in eng › pr-review")
+	c.text = "look\x1b[31m\x07 at this"
+	if got := c.view(); strings.Contains(got, "\x1b") || strings.Contains(got, "\x07") {
+		t.Errorf("the compose view passed a control sequence through: %q", got)
+	}
+	if got := plain(c.view()); !strings.Contains(got, "look") || !strings.Contains(got, "at this") {
 		t.Errorf("sanitizing dropped the text it should keep: %q", got)
 	}
 }

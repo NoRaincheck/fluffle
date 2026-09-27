@@ -96,6 +96,41 @@ func TestRowLineTruncatesOverlongColumns(t *testing.T) {
 	}
 }
 
+// Both name rules are ASCII, so a wide grapheme can only reach a row by
+// hand-editing the database — and cell is documented as the defence against
+// exactly that. It was not one: fmt's %*s measures runes, a wide grapheme is
+// two cells, so the column overran and pushed the count and the content across
+// the terminal. The row has to hold its width and the content has to start in
+// the same cell whichever names are in it.
+func TestRowLineHoldsItsWidthWithWideGraphemesInNames(t *testing.T) {
+	const marker = "hi"
+	wide, baseline := testRow(), testRow()
+	wide.Channel, wide.Thread, wide.Name = "全角・chan", "全角・thr", "全角・nm"
+	// A time the parser cannot read falls through to the cell path too, so the
+	// widest column in the row is covered as well.
+	wide.Time = "全角・time"
+	// Short enough to survive truncation at 71 columns, so it is findable in
+	// the finished line.
+	wide.Content, baseline.Content = marker, marker
+
+	for _, w := range []int{71, 80, 200} {
+		line, plain0 := plain(rowLine(w, wide, false)), plain(rowLine(w, baseline, false))
+		if got := termtext.DisplayWidth(line); got != w {
+			t.Errorf("rowLine(%d) with wide graphemes is %d cells, want %d: %q", w, got, w, line)
+		}
+		for name, drawn := range map[string]string{"wide": line, "plain": plain0} {
+			at := strings.LastIndex(drawn, marker)
+			if at < 0 {
+				t.Fatalf("rowLine(%d) lost the content: %q", w, drawn)
+			}
+			if got := termtext.DisplayWidth(drawn[:at]); got != rowPrefixW {
+				t.Errorf("at %d columns the %s prefix is %d cells, want %d: a wide grapheme shifted the content",
+					w, name, got, rowPrefixW)
+			}
+		}
+	}
+}
+
 func TestRowLineSanitizesTheNameColumn(t *testing.T) {
 	r := testRow()
 	r.Name = "x\x1b]0;pwned\x07y"

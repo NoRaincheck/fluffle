@@ -40,10 +40,13 @@ func contentWidth(w int) int {
 	return 0
 }
 
-// cell is one fixed-width column: sanitized, then truncated so a hand-edited
-// database cannot shift the row.
+// cell is one fixed-width column: sanitized, then truncated and padded to
+// ColW cells. The padding is measured in cells rather than runes because fmt's
+// %*s counts runes, and a wide grapheme is worth two cells — so a name the
+// rules would never accept, typed straight into the database, overran the
+// column and shifted every column after it.
 func cell(s string) string {
-	return fmt.Sprintf("%-*s", ColW, termtext.Truncate(termtext.SanitizeLine(s), ColW, ""))
+	return pad(termtext.Truncate(termtext.SanitizeLine(s), ColW, ""), ColW)
 }
 
 // firstLine is the representative message's first line. A row is a preview,

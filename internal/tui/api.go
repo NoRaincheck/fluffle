@@ -23,15 +23,6 @@ func NewAPIClient(base string) *apiClient {
 	return &apiClient{base: base, http: client.NewHTTPClient()}
 }
 
-func (c *apiClient) EnsureDaemon() error {
-	base, err := client.EnsureDaemon()
-	if err != nil {
-		return fmt.Errorf("DAEMON_DOWN: %w", err)
-	}
-	c.base = base
-	return nil
-}
-
 // get performs a GET and decodes a JSON array into T. A body of 4xx or 5xx
 // surfaces as the envelope's code and message, a null or undecodable body as
 // DAEMON_ERROR. A decodable array always yields a non-nil slice, so a caller
