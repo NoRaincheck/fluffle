@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -66,6 +67,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyRows(msg.rows)
 		return m, tea.Batch(m.syncThread(), m.tick())
 	case threadFetchedMsg:
+		// A response is stale or it is not, and the thread id that selects it
+		// is the whole test. That is true of the failure as much as the
+		// success: a late error for a thread the user has already navigated
+		// away from must not blank the pane they are now looking at.
+		if msg.threadID != m.threadID {
+			return m, nil
+		}
 		if msg.err != nil {
 			m.status = "error: " + msg.err.Error()
 			// A failed load must not leave the previous thread's messages
@@ -73,9 +81,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// threadID lets the next syncThread retry instead of treating
 			// the failure as loaded.
 			m.thread, m.threadID = nil, 0
-			return m, nil
-		}
-		if msg.threadID != m.threadID {
 			return m, nil
 		}
 		m.thread = msg.messages
@@ -89,6 +94,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.status = "sent"
 		return m, tea.Batch(m.fetchRows(), m.fetchThread(m.threadID))
+	case tickMsg:
+		return m, m.refresh()
 	case tea.KeyMsg:
 		if m.compose.active {
 			return m, m.compose.update(msg)
@@ -127,9 +134,16 @@ func (m model) bodyView() string {
 	return strings.Join([]string{
 		m.titleLine(),
 		body,
-		dimStyle.Render("↑↓ nav · g group · v sort · Enter read · r reply · q quit"),
+		hintLine(),
 		statusStyle.Width(m.width - 2).Render(termtext.Truncate(termtext.SanitizeLine(m.statusLine()), m.width-2, "…")),
 	}, "\n")
+}
+
+// hintLine names every key the TUI answers, on one row, with no `?` overlay and
+// no context-sensitive text. It has to fit the 71-column floor, which is what
+// bounds how much of the keymap can be said out loud.
+func hintLine() string {
+	return dimStyle.Render("↑↓ nav · g group · v sort · Enter read · Esc back · r reply · q quit")
 }
 
 // paneWidth is the width the thread is drawn at, whether it sits beside the
@@ -164,7 +178,7 @@ func rowAt(rows []string, i int) string {
 func (m model) tooNarrow() bool { return m.width < MinWidth || m.height < MinHeight }
 
 // split reports whether the terminal is wide enough for the list and the
-// thread side by side. Task 8 uses it.
+// thread side by side.
 func (m model) split() bool { return m.width >= MinSplitWidth }
 
 func (m model) titleLine() string {
@@ -293,6 +307,20 @@ func (m *model) syncThread() tea.Cmd {
 	return m.fetchThread(row.ThreadID)
 }
 
+// refetchThread re-reads the selected row's thread whatever is already loaded.
+// It is the tick's counterpart to syncThread, and it has to be a different call:
+// syncThread exists so j and k do not refetch a thread that is already on
+// screen, but an agent's reply is exactly that — a message appended to the
+// thread already loaded — and nothing about the selection has changed for
+// syncThread to notice.
+func (m model) refetchThread() tea.Cmd {
+	row, ok := m.selectedRow()
+	if !ok || row.ThreadID == 0 {
+		return nil
+	}
+	return m.fetchThread(row.ThreadID)
+}
+
 func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "ctrl+c" {
 		m.quitting = true
@@ -323,6 +351,20 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.openReply()
 	case "esc":
 		m.detail = false
+		return m, nil
+	case "g":
+		// Another granularity is another list, so the row the cursor was on has
+		// no counterpart in it. Reset rather than match by id.
+		m.granularity = m.nextGranularity()
+		m.cursor, m.scroll = 0, 0
+		m.threadID = 0
+		m.thread = nil
+		return m, m.fetchRows()
+	case "v":
+		// The same rows in the other order, so the cursor can be carried across
+		// by id and does not have to be.
+		m.reversed = !m.reversed
+		m.applyRows(m.rows)
 		return m, nil
 	}
 	return m, nil
@@ -378,5 +420,42 @@ func (m *model) openReply() (tea.Model, tea.Cmd) {
 	return m, m.syncThread()
 }
 
-// tick is the poll clock. Task 10 replaces this stub with the real tick.
-func (m model) tick() tea.Cmd { return nil }
+// tickInterval is how often the TUI re-reads its rows and the selected
+// thread. One unconditional tick replaces a six-field poll whose release
+// rules were a documented dead end: a session started in the thread you were
+// already looking at was not discovered until you moved away and back.
+const tickInterval = 2 * time.Second
+
+type tickMsg struct{}
+
+// tick arms the next refresh. It is scheduled from a response, never from a
+// timer loop, so the clock's rate is the request rate and nothing runs behind
+// it.
+func (m model) tick() tea.Cmd {
+	return tea.Tick(tickInterval, func(time.Time) tea.Msg { return tickMsg{} })
+}
+
+// refresh re-reads the rows and the selected thread. It arms no tick of its
+// own: the clock is armed by the rows response this refresh produces, and by
+// nothing else. Arming one here as well would double the count every round —
+// a tick from the refresh and a tick from that refresh's own response — so two
+// become four, then eight, and the TUI ends up hammering the daemon instead of
+// reading it. One tick per outstanding refetch is the whole invariant.
+//
+// New messages append, so the row the cursor is on is still in the list, and
+// applyRows carries the cursor across by id. The window moves only as far as
+// the carried cursor needs it to.
+func (m model) refresh() tea.Cmd {
+	return tea.Batch(m.fetchRows(), m.refetchThread())
+}
+
+func (m model) nextGranularity() string {
+	switch m.granularity {
+	case store.GranularityMessage:
+		return store.GranularityThread
+	case store.GranularityThread:
+		return store.GranularityChannel
+	default:
+		return store.GranularityMessage
+	}
+}
