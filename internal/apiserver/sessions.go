@@ -1,6 +1,7 @@
 package apiserver
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -49,7 +50,7 @@ func (d Deps) startSessionForMessage(threadID, messageID int64, content string) 
 	d.Starter.Start(threadID, messageID, names)
 }
 
-func (d Deps) startSessionsForBatch(s *store.Store, threadID int64, events []store.AppendEvent, results []store.AppendResult) {
+func (d Deps) startSessionsForBatch(ctx context.Context, s *store.Store, threadID int64, events []store.AppendEvent, results []store.AppendResult) {
 	if d.Starter == nil {
 		return
 	}
@@ -60,7 +61,7 @@ func (d Deps) startSessionsForBatch(s *store.Store, threadID int64, events []sto
 		if names, _ := mentions.Parse(events[i].Content); len(names) == 0 {
 			continue
 		}
-		msg, err := s.MessageByID(r.MessageID)
+		msg, err := s.MessageByID(ctx, r.MessageID)
 		if err != nil || msg.AuthorType == "agent" {
 			continue
 		}
@@ -83,7 +84,7 @@ func registerSessionRoutes(mux *http.ServeMux, s *store.Store, d Deps) {
 				writeErr(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
 				return
 			}
-			serveSession(s, id, w)
+			serveSession(r.Context(), s, id, w)
 		case len(parts) == 2 && parts[1] == "cancel":
 			if r.Method != http.MethodPost {
 				writeErr(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
@@ -103,13 +104,13 @@ func registerSessionRoutes(mux *http.ServeMux, s *store.Store, d Deps) {
 	})
 }
 
-func serveSession(s *store.Store, id int64, w http.ResponseWriter) {
-	sess, err := s.GetSession(id)
+func serveSession(ctx context.Context, s *store.Store, id int64, w http.ResponseWriter) {
+	sess, err := s.GetSession(ctx, id)
 	if err != nil {
 		writeSessionError(w, err)
 		return
 	}
-	events, err := s.ListSessionEvents(id)
+	events, err := s.ListSessionEvents(ctx, id)
 	if err != nil {
 		writeSessionError(w, err)
 		return
@@ -125,7 +126,7 @@ func serveCancel(s *store.Store, d Deps, id int64, w http.ResponseWriter, r *htt
 		writeErr(w, http.StatusForbidden, "AGENT_FORBIDDEN", "agents cannot cancel sessions")
 		return
 	}
-	if _, err := s.GetSession(id); err != nil {
+	if _, err := s.GetSession(r.Context(), id); err != nil {
 		writeSessionError(w, err)
 		return
 	}

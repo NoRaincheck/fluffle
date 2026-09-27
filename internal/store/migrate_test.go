@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"path/filepath"
@@ -23,7 +24,7 @@ func TestMigrateUpAppliesInitialSchema(t *testing.T) {
 	if v != 1 {
 		t.Fatalf("version = %d, want 1", v)
 	}
-	channels, err := s.ListChannels("", true)
+	channels, err := s.ListChannels(context.Background(), "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +39,7 @@ func TestMigrateUpIsIdempotentOnReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s1.CreateChannel("c", "/r", "", "", "", false); err != nil {
+	if _, err := s1.CreateChannel(context.Background(), "c", "/r", "", "", "", false); err != nil {
 		t.Fatal(err)
 	}
 	s1.Close()
@@ -47,7 +48,7 @@ func TestMigrateUpIsIdempotentOnReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s2.Close()
-	channels, err := s2.ListChannels("", true)
+	channels, err := s2.ListChannels(context.Background(), "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +121,7 @@ func TestMigrateUpAdoptsCurrentShapeWithoutDataLoss(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s1.CreateChannel("keepme", "/r", "", "", "", false); err != nil {
+	if _, err := s1.CreateChannel(context.Background(), "keepme", "/r", "", "", "", false); err != nil {
 		t.Fatal(err)
 	}
 	s1.Close()
@@ -137,7 +138,7 @@ func TestMigrateUpAdoptsCurrentShapeWithoutDataLoss(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s2.Close()
-	channels, err := s2.ListChannels("", true)
+	channels, err := s2.ListChannels(context.Background(), "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +169,7 @@ func TestForeignKeyViolationMapsToNotFound(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if _, err := s.CreateThread(99999, "t"); !errors.Is(err, ErrNotFound) {
+	if _, err := s.CreateThread(context.Background(), 99999, "t"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("got %v, want ErrNotFound", err)
 	}
 }

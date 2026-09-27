@@ -26,8 +26,8 @@ type Store struct {
 	q  *db.Queries
 }
 
-func (s *Store) tx() (*sql.Tx, *db.Queries, error) {
-	tx, err := s.db.Begin()
+func (s *Store) tx(ctx context.Context) (*sql.Tx, *db.Queries, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -77,7 +77,7 @@ func prepare(conn *sql.DB) error {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-func (s *Store) CreateChannel(name, repoAbsPath, repoRemote, repoHeadSHA, repoHeadBranch string, orphaned bool) (int64, error) {
+func (s *Store) CreateChannel(ctx context.Context, name, repoAbsPath, repoRemote, repoHeadSHA, repoHeadBranch string, orphaned bool) (int64, error) {
 	if strings.TrimSpace(name) == "" {
 		return 0, invalid("channel name required")
 	}
@@ -94,7 +94,7 @@ func (s *Store) CreateChannel(name, repoAbsPath, repoRemote, repoHeadSHA, repoHe
 		}
 		abs = &repoAbsPath
 	}
-	id, err := s.q.CreateChannel(context.Background(), db.CreateChannelParams{
+	id, err := s.q.CreateChannel(ctx, db.CreateChannelParams{
 		Name:           name,
 		RepoAbsPath:    abs,
 		RepoRemote:     nullIfEmpty(repoRemote),
@@ -108,8 +108,7 @@ func (s *Store) CreateChannel(name, repoAbsPath, repoRemote, repoHeadSHA, repoHe
 	return id, nil
 }
 
-func (s *Store) ListChannels(repoAbsPath string, includeOrphaned bool) ([]Channel, error) {
-	ctx := context.Background()
+func (s *Store) ListChannels(ctx context.Context, repoAbsPath string, includeOrphaned bool) ([]Channel, error) {
 	switch {
 	case repoAbsPath != "" && !includeOrphaned:
 		rows, err := s.q.ListChannelsByRepoNonOrphaned(ctx, db.ListChannelsByRepoNonOrphanedParams{RepoAbsPath: &repoAbsPath})
@@ -249,19 +248,19 @@ type InboxMessage struct {
 	ThreadTitle string `json:"thread_title"`
 }
 
-func (s *Store) CreateThread(channelID int64, title string) (int64, error) {
+func (s *Store) CreateThread(ctx context.Context, channelID int64, title string) (int64, error) {
 	if strings.TrimSpace(title) == "" {
 		return 0, invalid("title required")
 	}
-	id, err := s.q.CreateThread(context.Background(), db.CreateThreadParams{ChannelID: channelID, Title: title})
+	id, err := s.q.CreateThread(ctx, db.CreateThreadParams{ChannelID: channelID, Title: title})
 	if err != nil {
 		return 0, classify(err)
 	}
 	return id, nil
 }
 
-func (s *Store) ListThreads(channelID int64) ([]Thread, error) {
-	rows, err := s.q.ListThreads(context.Background(), db.ListThreadsParams{ChannelID: channelID})
+func (s *Store) ListThreads(ctx context.Context, channelID int64) ([]Thread, error) {
+	rows, err := s.q.ListThreads(ctx, db.ListThreadsParams{ChannelID: channelID})
 	if err != nil {
 		return nil, err
 	}
@@ -272,25 +271,25 @@ func (s *Store) ListThreads(channelID int64) ([]Thread, error) {
 	return out, nil
 }
 
-func (s *Store) AppendMessage(threadID int64, name, authorType, role, content string) (int64, error) {
-	return s.AppendMessageWithParent(threadID, name, authorType, role, content, 0)
+func (s *Store) AppendMessage(ctx context.Context, threadID int64, name, authorType, role, content string) (int64, error) {
+	return s.AppendMessageWithParent(ctx, threadID, name, authorType, role, content, 0)
 }
 
-func (s *Store) AppendMessageWithParent(threadID int64, name, authorType, role, content string, parentID int64) (int64, error) {
-	return s.AppendMessageAtWithParent(threadID, name, authorType, role, content, "", parentID)
+func (s *Store) AppendMessageWithParent(ctx context.Context, threadID int64, name, authorType, role, content string, parentID int64) (int64, error) {
+	return s.AppendMessageAtWithParent(ctx, threadID, name, authorType, role, content, "", parentID)
 }
 
-func (s *Store) AppendMessageAt(threadID int64, name, authorType, role, content, createdAt string) (int64, error) {
-	return s.AppendMessageAtWithParent(threadID, name, authorType, role, content, createdAt, 0)
+func (s *Store) AppendMessageAt(ctx context.Context, threadID int64, name, authorType, role, content, createdAt string) (int64, error) {
+	return s.AppendMessageAtWithParent(ctx, threadID, name, authorType, role, content, createdAt, 0)
 }
 
-func (s *Store) AppendMessageAtWithParent(threadID int64, name, authorType, role, content, createdAt string, parentID int64) (int64, error) {
-	tx, q, err := s.tx()
+func (s *Store) AppendMessageAtWithParent(ctx context.Context, threadID int64, name, authorType, role, content, createdAt string, parentID int64) (int64, error) {
+	tx, q, err := s.tx(ctx)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()
-	seq, _, err := s.appendMessage(q, threadID, name, authorType, role, content, createdAt, parentID)
+	seq, _, err := s.appendMessage(ctx, q, threadID, name, authorType, role, content, createdAt, parentID)
 	if err != nil {
 		return 0, err
 	}
@@ -300,13 +299,13 @@ func (s *Store) AppendMessageAtWithParent(threadID int64, name, authorType, role
 	return seq, nil
 }
 
-func (s *Store) AppendMessageByParentSeq(threadID, parentSeq int64, name, authorType, role, content, createdAt string) (int64, int64, error) {
-	tx, q, err := s.tx()
+func (s *Store) AppendMessageByParentSeq(ctx context.Context, threadID, parentSeq int64, name, authorType, role, content, createdAt string) (int64, int64, error) {
+	tx, q, err := s.tx(ctx)
 	if err != nil {
 		return 0, 0, err
 	}
 	defer tx.Rollback()
-	seq, id, err := s.appendMessageByParentSeq(q, threadID, parentSeq, name, authorType, role, content, createdAt)
+	seq, id, err := s.appendMessageByParentSeq(ctx, q, threadID, parentSeq, name, authorType, role, content, createdAt)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -316,8 +315,7 @@ func (s *Store) AppendMessageByParentSeq(threadID, parentSeq int64, name, author
 	return seq, id, nil
 }
 
-func (s *Store) appendMessage(q *db.Queries, threadID int64, name, authorType, role, content, createdAt string, parentID int64) (int64, int64, error) {
-	ctx := context.Background()
+func (s *Store) appendMessage(ctx context.Context, q *db.Queries, threadID int64, name, authorType, role, content, createdAt string, parentID int64) (int64, int64, error) {
 	seq, err := nextMessageSeq(ctx, q, threadID)
 	if err != nil {
 		return 0, 0, err
@@ -373,8 +371,8 @@ func nullIfInt64(v int64) sql.NullInt64 {
 	return sql.NullInt64{Int64: v, Valid: true}
 }
 
-func (s *Store) MessageIDBySeq(threadID, seq int64) (int64, error) {
-	id, err := s.q.GetMessageIDByThreadSeq(context.Background(), db.GetMessageIDByThreadSeqParams{
+func (s *Store) MessageIDBySeq(ctx context.Context, threadID, seq int64) (int64, error) {
+	id, err := s.q.GetMessageIDByThreadSeq(ctx, db.GetMessageIDByThreadSeqParams{
 		ThreadID: threadID,
 		Seq:      seq,
 	})
@@ -384,8 +382,7 @@ func (s *Store) MessageIDBySeq(threadID, seq int64) (int64, error) {
 	return id, err
 }
 
-func (s *Store) ListMessages(threadID int64, lastN int) ([]Message, error) {
-	ctx := context.Background()
+func (s *Store) ListMessages(ctx context.Context, threadID int64, lastN int) ([]Message, error) {
 	if lastN > 0 {
 		rows, err := s.q.ListMessagesLastN(ctx, db.ListMessagesLastNParams{ThreadID: threadID, Limit: int64(lastN)})
 		if err != nil {
@@ -408,8 +405,8 @@ func (s *Store) ListMessages(threadID int64, lastN int) ([]Message, error) {
 	return out, nil
 }
 
-func (s *Store) ListMessagesAfter(threadID, afterSeq int64) ([]Message, error) {
-	rows, err := s.q.ListMessagesAfter(context.Background(), db.ListMessagesAfterParams{
+func (s *Store) ListMessagesAfter(ctx context.Context, threadID, afterSeq int64) ([]Message, error) {
+	rows, err := s.q.ListMessagesAfter(ctx, db.ListMessagesAfterParams{
 		ThreadID: threadID,
 		Seq:      afterSeq,
 	})
@@ -465,14 +462,14 @@ func inboxFromRow(r db.ListInboxRow) InboxMessage {
 	}
 }
 
-func (s *Store) ListInbox(limit int) ([]InboxMessage, error) {
+func (s *Store) ListInbox(ctx context.Context, limit int) ([]InboxMessage, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	if limit > 200 {
 		limit = 200
 	}
-	rows, err := s.q.ListInbox(context.Background(), db.ListInboxParams{Limit: int64(limit)})
+	rows, err := s.q.ListInbox(ctx, db.ListInboxParams{Limit: int64(limit)})
 	if err != nil {
 		return nil, err
 	}
@@ -486,26 +483,26 @@ func (s *Store) ListInbox(limit int) ([]InboxMessage, error) {
 	return out, nil
 }
 
-func (s *Store) AddReaction(messageID int64, emoji, name, authorType string) error {
-	tx, q, err := s.tx()
+func (s *Store) AddReaction(ctx context.Context, messageID int64, emoji, name, authorType string) error {
+	tx, q, err := s.tx(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := s.messageThreadID(q, messageID); err != nil {
+	if _, err := s.messageThreadID(ctx, q, messageID); err != nil {
 		return err
 	}
-	if _, _, err := s.addReaction(q, messageID, emoji, name, authorType, ""); err != nil {
+	if _, _, err := s.addReaction(ctx, q, messageID, emoji, name, authorType, ""); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-func (s *Store) messageThreadID(q *db.Queries, messageID int64) (int64, error) {
+func (s *Store) messageThreadID(ctx context.Context, q *db.Queries, messageID int64) (int64, error) {
 	if messageID <= 0 {
 		return 0, ErrNotFound
 	}
-	threadID, err := q.GetMessageThreadIDByID(context.Background(), db.GetMessageThreadIDByIDParams{ID: messageID})
+	threadID, err := q.GetMessageThreadIDByID(ctx, db.GetMessageThreadIDByIDParams{ID: messageID})
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, ErrNotFound
 	}
@@ -515,8 +512,8 @@ func (s *Store) messageThreadID(q *db.Queries, messageID int64) (int64, error) {
 	return threadID, nil
 }
 
-func (s *Store) ListReactions(threadID int64) ([]Reaction, error) {
-	rows, err := s.q.ListReactions(context.Background(), db.ListReactionsParams{ThreadID: threadID})
+func (s *Store) ListReactions(ctx context.Context, threadID int64) ([]Reaction, error) {
+	rows, err := s.q.ListReactions(ctx, db.ListReactionsParams{ThreadID: threadID})
 	if err != nil {
 		return nil, err
 	}
@@ -527,20 +524,20 @@ func (s *Store) ListReactions(threadID int64) ([]Reaction, error) {
 	return out, nil
 }
 
-func (s *Store) AddReactionBySeq(threadID, messageSeq int64, emoji, name, authorType string) error {
-	tx, q, err := s.tx()
+func (s *Store) AddReactionBySeq(ctx context.Context, threadID, messageSeq int64, emoji, name, authorType string) error {
+	tx, q, err := s.tx(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, _, err := s.addReactionBySeq(q, threadID, messageSeq, emoji, name, authorType, ""); err != nil {
+	if _, _, err := s.addReactionBySeq(ctx, q, threadID, messageSeq, emoji, name, authorType, ""); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-func (s *Store) addReactionBySeq(q *db.Queries, threadID, messageSeq int64, emoji, name, authorType, createdAt string) (int64, int64, error) {
-	messageID, err := q.GetMessageIDByThreadSeq(context.Background(), db.GetMessageIDByThreadSeqParams{
+func (s *Store) addReactionBySeq(ctx context.Context, q *db.Queries, threadID, messageSeq int64, emoji, name, authorType, createdAt string) (int64, int64, error) {
+	messageID, err := q.GetMessageIDByThreadSeq(ctx, db.GetMessageIDByThreadSeqParams{
 		ThreadID: threadID,
 		Seq:      messageSeq,
 	})
@@ -550,11 +547,10 @@ func (s *Store) addReactionBySeq(q *db.Queries, threadID, messageSeq int64, emoj
 	if err != nil {
 		return 0, 0, err
 	}
-	return s.addReaction(q, messageID, emoji, name, authorType, createdAt)
+	return s.addReaction(ctx, q, messageID, emoji, name, authorType, createdAt)
 }
 
-func (s *Store) addReaction(q *db.Queries, messageID int64, emoji, name, authorType, createdAt string) (int64, int64, error) {
-	ctx := context.Background()
+func (s *Store) addReaction(ctx context.Context, q *db.Queries, messageID int64, emoji, name, authorType, createdAt string) (int64, int64, error) {
 	var (
 		reactionID int64
 		err        error
@@ -584,8 +580,8 @@ func (s *Store) addReaction(q *db.Queries, messageID int64, emoji, name, authorT
 	return messageID, reactionID, nil
 }
 
-func (s *Store) AppendBatch(threadID int64, events []AppendEvent) ([]AppendResult, error) {
-	tx, q, err := s.tx()
+func (s *Store) AppendBatch(ctx context.Context, threadID int64, events []AppendEvent) ([]AppendResult, error) {
+	tx, q, err := s.tx(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -595,7 +591,7 @@ func (s *Store) AppendBatch(threadID int64, events []AppendEvent) ([]AppendResul
 			return nil, err
 		}
 	}
-	nextSeq, err := nextThreadSeq(q, threadID)
+	nextSeq, err := nextThreadSeq(ctx, q, threadID)
 	if err != nil {
 		return nil, err
 	}
@@ -611,7 +607,7 @@ func (s *Store) AppendBatch(threadID int64, events []AppendEvent) ([]AppendResul
 			if mapped, ok := sourceSeqs[parentSeq]; ok {
 				parentSeq = mapped
 			}
-			seq, messageID, err := s.appendMessageByParentSeq(q, threadID, parentSeq, event.Name, event.AuthorType, event.Role, event.Content, event.CreatedAt)
+			seq, messageID, err := s.appendMessageByParentSeq(ctx, q, threadID, parentSeq, event.Name, event.AuthorType, event.Role, event.Content, event.CreatedAt)
 			if err != nil {
 				return nil, err
 			}
@@ -621,7 +617,7 @@ func (s *Store) AppendBatch(threadID int64, events []AppendEvent) ([]AppendResul
 			if mapped, ok := sourceSeqs[messageSeq]; ok {
 				messageSeq = mapped
 			}
-			messageID, reactionID, err := s.addReactionBySeq(q, threadID, messageSeq, event.Emoji, event.Name, event.AuthorType, event.CreatedAt)
+			messageID, reactionID, err := s.addReactionBySeq(ctx, q, threadID, messageSeq, event.Emoji, event.Name, event.AuthorType, event.CreatedAt)
 			if err != nil {
 				return nil, err
 			}
@@ -658,14 +654,14 @@ func validateAppendEvent(event AppendEvent) error {
 	return nil
 }
 
-func (s *Store) appendMessageByParentSeq(q *db.Queries, threadID, parentSeq int64, name, authorType, role, content, createdAt string) (int64, int64, error) {
+func (s *Store) appendMessageByParentSeq(ctx context.Context, q *db.Queries, threadID, parentSeq int64, name, authorType, role, content, createdAt string) (int64, int64, error) {
 	if parentSeq < 0 {
 		return 0, 0, invalid("parent_seq must be non-negative")
 	}
 	var parentID int64
 	if parentSeq > 0 {
 		var err error
-		parentID, err = q.GetMessageIDByThreadSeq(context.Background(), db.GetMessageIDByThreadSeqParams{
+		parentID, err = q.GetMessageIDByThreadSeq(ctx, db.GetMessageIDByThreadSeqParams{
 			ThreadID: threadID,
 			Seq:      parentSeq,
 		})
@@ -676,11 +672,11 @@ func (s *Store) appendMessageByParentSeq(q *db.Queries, threadID, parentSeq int6
 			return 0, 0, err
 		}
 	}
-	return s.appendMessage(q, threadID, name, authorType, role, content, createdAt, parentID)
+	return s.appendMessage(ctx, q, threadID, name, authorType, role, content, createdAt, parentID)
 }
 
-func nextThreadSeq(q *db.Queries, threadID int64) (int64, error) {
-	return nextMessageSeq(context.Background(), q, threadID)
+func nextThreadSeq(ctx context.Context, q *db.Queries, threadID int64) (int64, error) {
+	return nextMessageSeq(ctx, q, threadID)
 }
 
 func nextMessageSeq(ctx context.Context, q *db.Queries, threadID int64) (int64, error) {

@@ -59,7 +59,7 @@ type ThreadContext struct {
 	RepoAbsPath *string
 }
 
-func (s *Store) CreateSession(threadID, triggerMessageID int64, agentName, status, replyMode, command string, cwd *string) (int64, error) {
+func (s *Store) CreateSession(ctx context.Context, threadID, triggerMessageID int64, agentName, status, replyMode, command string, cwd *string) (int64, error) {
 	if strings.TrimSpace(agentName) == "" || strings.TrimSpace(command) == "" {
 		return 0, invalid("agent_name and command required")
 	}
@@ -73,7 +73,6 @@ func (s *Store) CreateSession(threadID, triggerMessageID int64, agentName, statu
 	default:
 		return 0, invalid("bad reply mode %q", replyMode)
 	}
-	ctx := context.Background()
 	msgThread, err := s.q.GetMessageThreadIDByID(ctx, db.GetMessageThreadIDByIDParams{ID: triggerMessageID})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -106,8 +105,8 @@ func nullIfEmptyPtr(v *string) *string {
 	return v
 }
 
-func (s *Store) ListSessions(threadID int64) ([]Session, error) {
-	rows, err := s.q.ListSessions(context.Background(), db.ListSessionsParams{ThreadID: threadID})
+func (s *Store) ListSessions(ctx context.Context, threadID int64) ([]Session, error) {
+	rows, err := s.q.ListSessions(ctx, db.ListSessionsParams{ThreadID: threadID})
 	if err != nil {
 		return nil, err
 	}
@@ -118,8 +117,8 @@ func (s *Store) ListSessions(threadID int64) ([]Session, error) {
 	return out, nil
 }
 
-func (s *Store) GetSession(id int64) (Session, error) {
-	r, err := s.q.GetSession(context.Background(), db.GetSessionParams{ID: id})
+func (s *Store) GetSession(ctx context.Context, id int64) (Session, error) {
+	r, err := s.q.GetSession(ctx, db.GetSessionParams{ID: id})
 	if errors.Is(err, sql.ErrNoRows) {
 		return Session{}, ErrNotFound
 	}
@@ -148,8 +147,8 @@ func sessionFromRow(r db.AgentSession) Session {
 	}
 }
 
-func (s *Store) MarkSessionRunning(id int64, startedAt string) error {
-	n, err := s.q.MarkSessionRunning(context.Background(), db.MarkSessionRunningParams{
+func (s *Store) MarkSessionRunning(ctx context.Context, id int64, startedAt string) error {
+	n, err := s.q.MarkSessionRunning(ctx, db.MarkSessionRunningParams{
 		Status:    SessionRunning,
 		StartedAt: &startedAt,
 		ID:        id,
@@ -164,8 +163,8 @@ func (s *Store) MarkSessionRunning(id int64, startedAt string) error {
 	return nil
 }
 
-func (s *Store) SetSessionReply(id int64, replyMessageID int64) error {
-	n, err := s.q.SetSessionReply(context.Background(), db.SetSessionReplyParams{
+func (s *Store) SetSessionReply(ctx context.Context, id int64, replyMessageID int64) error {
+	n, err := s.q.SetSessionReply(ctx, db.SetSessionReplyParams{
 		ReplyMessageID: &replyMessageID,
 		ID:             id,
 	})
@@ -178,13 +177,13 @@ func (s *Store) SetSessionReply(id int64, replyMessageID int64) error {
 	return nil
 }
 
-func (s *Store) FinishSession(id int64, status string, exitCode *int64, errMsg *string, finishedAt string) error {
+func (s *Store) FinishSession(ctx context.Context, id int64, status string, exitCode *int64, errMsg *string, finishedAt string) error {
 	switch status {
 	case SessionSucceeded, SessionFailed, SessionCanceled:
 	default:
 		return invalid("bad terminal session status %q", status)
 	}
-	n, err := s.q.FinishSession(context.Background(), db.FinishSessionParams{
+	n, err := s.q.FinishSession(ctx, db.FinishSessionParams{
 		Status:     status,
 		ExitCode:   exitCode,
 		Error:      nullIfEmptyPtr(errMsg),
@@ -200,18 +199,17 @@ func (s *Store) FinishSession(id int64, status string, exitCode *int64, errMsg *
 	return nil
 }
 
-func (s *Store) AppendSessionEvent(sessionID int64, eventType, content string) (int64, int64, error) {
+func (s *Store) AppendSessionEvent(ctx context.Context, sessionID int64, eventType, content string) (int64, int64, error) {
 	switch eventType {
 	case SessionEventPrompt, SessionEventStdout, SessionEventStderr, SessionEventExit, SessionEventError:
 	default:
 		return 0, 0, invalid("bad session event type %q", eventType)
 	}
-	tx, q, err := s.tx()
+	tx, q, err := s.tx(ctx)
 	if err != nil {
 		return 0, 0, err
 	}
 	defer tx.Rollback()
-	ctx := context.Background()
 	seq, err := nextSessionEventSeq(ctx, q, sessionID)
 	if err != nil {
 		return 0, 0, err
@@ -242,8 +240,8 @@ func nextSessionEventSeq(ctx context.Context, q *db.Queries, sessionID int64) (i
 	return last + 1, nil
 }
 
-func (s *Store) ListSessionEvents(sessionID int64) ([]SessionEvent, error) {
-	rows, err := s.q.ListSessionEvents(context.Background(), db.ListSessionEventsParams{SessionID: sessionID})
+func (s *Store) ListSessionEvents(ctx context.Context, sessionID int64) ([]SessionEvent, error) {
+	rows, err := s.q.ListSessionEvents(ctx, db.ListSessionEventsParams{SessionID: sessionID})
 	if err != nil {
 		return nil, err
 	}
@@ -261,8 +259,8 @@ func (s *Store) ListSessionEvents(sessionID int64) ([]SessionEvent, error) {
 	return out, nil
 }
 
-func (s *Store) CountAgentMessagesAfter(threadID int64, name string, afterSeq int64) (int, error) {
-	n, err := s.q.CountAgentMessagesAfter(context.Background(), db.CountAgentMessagesAfterParams{
+func (s *Store) CountAgentMessagesAfter(ctx context.Context, threadID int64, name string, afterSeq int64) (int, error) {
+	n, err := s.q.CountAgentMessagesAfter(ctx, db.CountAgentMessagesAfterParams{
 		ThreadID: threadID,
 		Name:     name,
 		Seq:      afterSeq,
@@ -270,8 +268,8 @@ func (s *Store) CountAgentMessagesAfter(threadID int64, name string, afterSeq in
 	return int(n), err
 }
 
-func (s *Store) ThreadContext(threadID int64) (ThreadContext, error) {
-	r, err := s.q.GetThreadContext(context.Background(), db.GetThreadContextParams{ID: threadID})
+func (s *Store) ThreadContext(ctx context.Context, threadID int64) (ThreadContext, error) {
+	r, err := s.q.GetThreadContext(ctx, db.GetThreadContextParams{ID: threadID})
 	if errors.Is(err, sql.ErrNoRows) {
 		return ThreadContext{}, ErrNotFound
 	}
@@ -287,8 +285,8 @@ func (s *Store) ThreadContext(threadID int64) (ThreadContext, error) {
 	}, nil
 }
 
-func (s *Store) MessageByID(id int64) (Message, error) {
-	r, err := s.q.GetMessageByIDWithParent(context.Background(), db.GetMessageByIDWithParentParams{ID: id})
+func (s *Store) MessageByID(ctx context.Context, id int64) (Message, error) {
+	r, err := s.q.GetMessageByIDWithParent(ctx, db.GetMessageByIDWithParentParams{ID: id})
 	if errors.Is(err, sql.ErrNoRows) {
 		return Message{}, ErrNotFound
 	}
@@ -298,8 +296,8 @@ func (s *Store) MessageByID(id int64) (Message, error) {
 	return messageFromDetailRow(r), nil
 }
 
-func (s *Store) ReconcileSessions(finishedAt string) (int, error) {
-	n, err := s.q.ReconcileSessions(context.Background(), db.ReconcileSessionsParams{
+func (s *Store) ReconcileSessions(ctx context.Context, finishedAt string) (int, error) {
+	n, err := s.q.ReconcileSessions(ctx, db.ReconcileSessionsParams{
 		Status:     SessionCanceled,
 		FinishedAt: &finishedAt,
 		Status_2:   SessionQueued,

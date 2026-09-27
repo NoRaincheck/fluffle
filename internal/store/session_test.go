@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"testing"
 )
@@ -16,11 +17,11 @@ func newSessionFixture(t *testing.T) (*Store, int64) {
 			t.Errorf("close: %v", err)
 		}
 	})
-	chID, err := s.CreateChannel("c", "/repo", "", "", "", false)
+	chID, err := s.CreateChannel(context.Background(), "c", "/repo", "", "", "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	thID, err := s.CreateThread(chID, "t")
+	thID, err := s.CreateThread(context.Background(), chID, "t")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,11 +30,11 @@ func newSessionFixture(t *testing.T) (*Store, int64) {
 
 func triggerMessage(t *testing.T, s *Store, thID int64, content string) int64 {
 	t.Helper()
-	seq, err := s.AppendMessage(thID, "alice", "human", "user", content)
+	seq, err := s.AppendMessage(context.Background(), thID, "alice", "human", "user", content)
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := s.MessageIDBySeq(thID, seq)
+	id, err := s.MessageIDBySeq(context.Background(), thID, seq)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,11 +45,11 @@ func TestCreateSessionAndReadBack(t *testing.T) {
 	s, thID := newSessionFixture(t)
 	msgID := triggerMessage(t, s, thID, "@probe hi")
 	cwd := "/repo"
-	id, err := s.CreateSession(thID, msgID, "probe", SessionQueued, "auto", "probe -p {prompt}", &cwd)
+	id, err := s.CreateSession(context.Background(), thID, msgID, "probe", SessionQueued, "auto", "probe -p {prompt}", &cwd)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.GetSession(id)
+	got, err := s.GetSession(context.Background(), id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,13 +73,13 @@ func TestCreateSessionAndReadBack(t *testing.T) {
 func TestCreateSessionIsIdempotentPerTriggerAndAgent(t *testing.T) {
 	s, thID := newSessionFixture(t)
 	msgID := triggerMessage(t, s, thID, "@probe hi")
-	if _, err := s.CreateSession(thID, msgID, "probe", SessionQueued, "auto", "c", nil); err != nil {
+	if _, err := s.CreateSession(context.Background(), thID, msgID, "probe", SessionQueued, "auto", "c", nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CreateSession(thID, msgID, "probe", SessionQueued, "auto", "c", nil); !errors.Is(err, ErrConflict) {
+	if _, err := s.CreateSession(context.Background(), thID, msgID, "probe", SessionQueued, "auto", "c", nil); !errors.Is(err, ErrConflict) {
 		t.Fatalf("err = %v, want ErrConflict", err)
 	}
-	if _, err := s.CreateSession(thID, msgID, "other", SessionQueued, "auto", "c", nil); err != nil {
+	if _, err := s.CreateSession(context.Background(), thID, msgID, "other", SessionQueued, "auto", "c", nil); err != nil {
 		t.Fatalf("a second agent for the same message should succeed: %v", err)
 	}
 }
@@ -86,33 +87,33 @@ func TestCreateSessionIsIdempotentPerTriggerAndAgent(t *testing.T) {
 func TestCreateSessionValidates(t *testing.T) {
 	s, thID := newSessionFixture(t)
 	msgID := triggerMessage(t, s, thID, "@probe hi")
-	if _, err := s.CreateSession(thID, 9999, "probe", SessionQueued, "auto", "c", nil); !errors.Is(err, ErrNotFound) {
+	if _, err := s.CreateSession(context.Background(), thID, 9999, "probe", SessionQueued, "auto", "c", nil); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing trigger: err = %v, want ErrNotFound", err)
 	}
-	if _, err := s.CreateSession(thID, msgID, "  ", SessionQueued, "auto", "c", nil); !errors.Is(err, ErrInvalid) {
+	if _, err := s.CreateSession(context.Background(), thID, msgID, "  ", SessionQueued, "auto", "c", nil); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("blank name: err = %v, want ErrInvalid", err)
 	}
-	if _, err := s.CreateSession(thID, msgID, "probe", "weird", "auto", "c", nil); !errors.Is(err, ErrInvalid) {
+	if _, err := s.CreateSession(context.Background(), thID, msgID, "probe", "weird", "auto", "c", nil); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("bad status: err = %v, want ErrInvalid", err)
 	}
-	if _, err := s.CreateSession(thID, msgID, "probe", SessionQueued, "nope", "c", nil); !errors.Is(err, ErrInvalid) {
+	if _, err := s.CreateSession(context.Background(), thID, msgID, "probe", SessionQueued, "nope", "c", nil); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("bad reply mode: err = %v, want ErrInvalid", err)
 	}
 }
 
 func TestCreateSessionRejectsCrossThreadTrigger(t *testing.T) {
 	s, thID := newSessionFixture(t)
-	chID, _ := s.ListChannels("", false)
-	other, _ := s.CreateThread(chID[0].ID, "other")
+	chID, _ := s.ListChannels(context.Background(), "", false)
+	other, _ := s.CreateThread(context.Background(), chID[0].ID, "other")
 	msgID := triggerMessage(t, s, other, "hi")
-	if _, err := s.CreateSession(thID, msgID, "probe", SessionQueued, "auto", "c", nil); !errors.Is(err, ErrInvalid) {
+	if _, err := s.CreateSession(context.Background(), thID, msgID, "probe", SessionQueued, "auto", "c", nil); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("err = %v, want ErrInvalid", err)
 	}
 }
 
 func TestGetSessionMissingIsNotFound(t *testing.T) {
 	s, _ := newSessionFixture(t)
-	if _, err := s.GetSession(9999); !errors.Is(err, ErrNotFound) {
+	if _, err := s.GetSession(context.Background(), 9999); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
 }
@@ -120,27 +121,27 @@ func TestGetSessionMissingIsNotFound(t *testing.T) {
 func TestSessionLifecycle(t *testing.T) {
 	s, thID := newSessionFixture(t)
 	msgID := triggerMessage(t, s, thID, "@probe hi")
-	id, _ := s.CreateSession(thID, msgID, "probe", SessionQueued, "auto", "c", nil)
-	if err := s.MarkSessionRunning(id, "2026-01-01T00:00:00Z"); err != nil {
+	id, _ := s.CreateSession(context.Background(), thID, msgID, "probe", SessionQueued, "auto", "c", nil)
+	if err := s.MarkSessionRunning(context.Background(), id, "2026-01-01T00:00:00Z"); err != nil {
 		t.Fatal(err)
 	}
-	got, _ := s.GetSession(id)
+	got, _ := s.GetSession(context.Background(), id)
 	if got.Status != SessionRunning || got.StartedAt == nil || *got.StartedAt != "2026-01-01T00:00:00Z" {
 		t.Fatalf("after running: %+v", got)
 	}
-	replySeq, err := s.AppendMessage(thID, "probe", "agent", "assistant", "the reply")
+	replySeq, err := s.AppendMessage(context.Background(), thID, "probe", "agent", "assistant", "the reply")
 	if err != nil {
 		t.Fatal(err)
 	}
-	replyID, _ := s.MessageIDBySeq(thID, replySeq)
-	if err := s.SetSessionReply(id, replyID); err != nil {
+	replyID, _ := s.MessageIDBySeq(context.Background(), thID, replySeq)
+	if err := s.SetSessionReply(context.Background(), id, replyID); err != nil {
 		t.Fatal(err)
 	}
 	code := int64(0)
-	if err := s.FinishSession(id, SessionSucceeded, &code, nil, "2026-01-01T00:01:00Z"); err != nil {
+	if err := s.FinishSession(context.Background(), id, SessionSucceeded, &code, nil, "2026-01-01T00:01:00Z"); err != nil {
 		t.Fatal(err)
 	}
-	got, _ = s.GetSession(id)
+	got, _ = s.GetSession(context.Background(), id)
 	if got.Status != SessionSucceeded || got.ExitCode == nil || *got.ExitCode != 0 {
 		t.Fatalf("after finish: %+v", got)
 	}
@@ -155,18 +156,18 @@ func TestSessionLifecycle(t *testing.T) {
 func TestMarkSessionRunningRejectsNonQueuedRow(t *testing.T) {
 	s, thID := newSessionFixture(t)
 	msgID := triggerMessage(t, s, thID, "@probe hi")
-	id, _ := s.CreateSession(thID, msgID, "probe", SessionQueued, "auto", "c", nil)
-	if err := s.MarkSessionRunning(id, "2026-01-01T00:00:00Z"); err != nil {
+	id, _ := s.CreateSession(context.Background(), thID, msgID, "probe", SessionQueued, "auto", "c", nil)
+	if err := s.MarkSessionRunning(context.Background(), id, "2026-01-01T00:00:00Z"); err != nil {
 		t.Fatal(err)
 	}
 	code := int64(0)
-	if err := s.FinishSession(id, SessionSucceeded, &code, nil, "2026-01-01T00:01:00Z"); err != nil {
+	if err := s.FinishSession(context.Background(), id, SessionSucceeded, &code, nil, "2026-01-01T00:01:00Z"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.MarkSessionRunning(id, "2026-01-01T00:02:00Z"); !errors.Is(err, ErrNotFound) {
+	if err := s.MarkSessionRunning(context.Background(), id, "2026-01-01T00:02:00Z"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("MarkSessionRunning on a succeeded row = %v, want ErrNotFound", err)
 	}
-	got, _ := s.GetSession(id)
+	got, _ := s.GetSession(context.Background(), id)
 	if got.Status != SessionSucceeded {
 		t.Fatalf("status = %q, want succeeded: a finished session must not be resurrected", got.Status)
 	}
@@ -174,10 +175,10 @@ func TestMarkSessionRunningRejectsNonQueuedRow(t *testing.T) {
 
 func TestSessionUpdatesRejectMissingRow(t *testing.T) {
 	s, _ := newSessionFixture(t)
-	if err := s.MarkSessionRunning(9999, "t"); !errors.Is(err, ErrNotFound) {
+	if err := s.MarkSessionRunning(context.Background(), 9999, "t"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("MarkSessionRunning: %v", err)
 	}
-	if err := s.SetSessionReply(9999, 1); !errors.Is(err, ErrNotFound) {
+	if err := s.SetSessionReply(context.Background(), 9999, 1); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("SetSessionReply: %v", err)
 	}
 }
@@ -185,12 +186,12 @@ func TestSessionUpdatesRejectMissingRow(t *testing.T) {
 func TestFinishSessionStoresError(t *testing.T) {
 	s, thID := newSessionFixture(t)
 	msgID := triggerMessage(t, s, thID, "@probe hi")
-	id, _ := s.CreateSession(thID, msgID, "probe", SessionQueued, "auto", "c", nil)
+	id, _ := s.CreateSession(context.Background(), thID, msgID, "probe", SessionQueued, "auto", "c", nil)
 	msg := "agent timed out"
-	if err := s.FinishSession(id, SessionFailed, nil, &msg, "2026-01-01T00:01:00Z"); err != nil {
+	if err := s.FinishSession(context.Background(), id, SessionFailed, nil, &msg, "2026-01-01T00:01:00Z"); err != nil {
 		t.Fatal(err)
 	}
-	got, _ := s.GetSession(id)
+	got, _ := s.GetSession(context.Background(), id)
 	if got.Status != SessionFailed || got.Error == nil || *got.Error != msg {
 		t.Fatalf("session = %+v", got)
 	}
@@ -199,8 +200,8 @@ func TestFinishSessionStoresError(t *testing.T) {
 func TestFinishSessionRejectsNonTerminalStatus(t *testing.T) {
 	s, thID := newSessionFixture(t)
 	msgID := triggerMessage(t, s, thID, "@probe hi")
-	id, _ := s.CreateSession(thID, msgID, "probe", SessionQueued, "auto", "c", nil)
-	if err := s.FinishSession(id, SessionRunning, nil, nil, "t"); !errors.Is(err, ErrInvalid) {
+	id, _ := s.CreateSession(context.Background(), thID, msgID, "probe", SessionQueued, "auto", "c", nil)
+	if err := s.FinishSession(context.Background(), id, SessionRunning, nil, nil, "t"); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("err = %v, want ErrInvalid", err)
 	}
 }
@@ -208,8 +209,8 @@ func TestFinishSessionRejectsNonTerminalStatus(t *testing.T) {
 func TestSessionEventsGetMonotonicSeq(t *testing.T) {
 	s, thID := newSessionFixture(t)
 	msgID := triggerMessage(t, s, thID, "@probe hi")
-	id, _ := s.CreateSession(thID, msgID, "probe", SessionQueued, "auto", "c", nil)
-	none, err := s.ListSessionEvents(id)
+	id, _ := s.CreateSession(context.Background(), thID, msgID, "probe", SessionQueued, "auto", "c", nil)
+	none, err := s.ListSessionEvents(context.Background(), id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +219,7 @@ func TestSessionEventsGetMonotonicSeq(t *testing.T) {
 	}
 	types := []string{SessionEventPrompt, SessionEventStdout, SessionEventStdout, SessionEventExit}
 	for i, typ := range types {
-		seq, _, err := s.AppendSessionEvent(id, typ, "chunk")
+		seq, _, err := s.AppendSessionEvent(context.Background(), id, typ, "chunk")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -226,7 +227,7 @@ func TestSessionEventsGetMonotonicSeq(t *testing.T) {
 			t.Fatalf("event %d seq = %d, want %d", i, seq, i+1)
 		}
 	}
-	events, err := s.ListSessionEvents(id)
+	events, err := s.ListSessionEvents(context.Background(), id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,18 +247,18 @@ func TestSessionEventsGetMonotonicSeq(t *testing.T) {
 func TestAppendSessionEventRejectsBadTypeAndSession(t *testing.T) {
 	s, thID := newSessionFixture(t)
 	msgID := triggerMessage(t, s, thID, "@probe hi")
-	id, _ := s.CreateSession(thID, msgID, "probe", SessionQueued, "auto", "c", nil)
-	if _, _, err := s.AppendSessionEvent(id, "note", "x"); !errors.Is(err, ErrInvalid) {
+	id, _ := s.CreateSession(context.Background(), thID, msgID, "probe", SessionQueued, "auto", "c", nil)
+	if _, _, err := s.AppendSessionEvent(context.Background(), id, "note", "x"); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("bad type: err = %v, want ErrInvalid", err)
 	}
-	if _, _, err := s.AppendSessionEvent(9999, SessionEventStdout, "x"); !errors.Is(err, ErrNotFound) {
+	if _, _, err := s.AppendSessionEvent(context.Background(), 9999, SessionEventStdout, "x"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing session: err = %v, want ErrNotFound", err)
 	}
 }
 
 func TestListSessionsIsOldestFirstAndNeverNil(t *testing.T) {
 	s, thID := newSessionFixture(t)
-	empty, err := s.ListSessions(thID)
+	empty, err := s.ListSessions(context.Background(), thID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,11 +267,11 @@ func TestListSessionsIsOldestFirstAndNeverNil(t *testing.T) {
 	}
 	msgID := triggerMessage(t, s, thID, "@a hi")
 	for _, name := range []string{"a", "b", "c"} {
-		if _, err := s.CreateSession(thID, msgID, name, SessionQueued, "auto", "c", nil); err != nil {
+		if _, err := s.CreateSession(context.Background(), thID, msgID, name, SessionQueued, "auto", "c", nil); err != nil {
 			t.Fatal(err)
 		}
 	}
-	list, err := s.ListSessions(thID)
+	list, err := s.ListSessions(context.Background(), thID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,15 +284,15 @@ func TestListSessionsIsOldestFirstAndNeverNil(t *testing.T) {
 
 func TestListSessionsIsScopedToItsThread(t *testing.T) {
 	s, thID := newSessionFixture(t)
-	chID, err := s.ListChannels("", false)
+	chID, err := s.ListChannels(context.Background(), "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	other, err := s.CreateThread(chID[0].ID, "other")
+	other, err := s.CreateThread(context.Background(), chID[0].ID, "other")
 	if err != nil {
 		t.Fatal(err)
 	}
-	empty, err := s.CreateThread(chID[0].ID, "empty")
+	empty, err := s.CreateThread(context.Background(), chID[0].ID, "empty")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -304,7 +305,7 @@ func TestListSessionsIsScopedToItsThread(t *testing.T) {
 		msgID := triggerMessage(t, s, threadID, "@probe hi")
 		ids := make([]int64, 0, len(names))
 		for _, name := range names {
-			id, err := s.CreateSession(threadID, msgID, name, SessionQueued, "auto", "c", nil)
+			id, err := s.CreateSession(context.Background(), threadID, msgID, name, SessionQueued, "auto", "c", nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -317,7 +318,7 @@ func TestListSessionsIsScopedToItsThread(t *testing.T) {
 
 	assertScoped := func(threadID int64, want []int64) {
 		t.Helper()
-		list, err := s.ListSessions(threadID)
+		list, err := s.ListSessions(context.Background(), threadID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -340,7 +341,7 @@ func TestListSessionsIsScopedToItsThread(t *testing.T) {
 	assertScoped(thID, wantOwn)
 	assertScoped(other, wantOther)
 
-	none, err := s.ListSessions(empty)
+	none, err := s.ListSessions(context.Background(), empty)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,7 +359,7 @@ func TestMarkSessionRunningUnknownIDIsNotFound(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if err := s.MarkSessionRunning(9999, "2026-01-01T00:00:00Z"); !errors.Is(err, ErrNotFound) {
+	if err := s.MarkSessionRunning(context.Background(), 9999, "2026-01-01T00:00:00Z"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("got %v, want ErrNotFound", err)
 	}
 }
@@ -366,14 +367,14 @@ func TestMarkSessionRunningUnknownIDIsNotFound(t *testing.T) {
 func TestMarkSessionRunningEmptyStartedAtStoresEmptyString(t *testing.T) {
 	s, thID := newSessionFixture(t)
 	msgID := triggerMessage(t, s, thID, "@probe hi")
-	id, err := s.CreateSession(thID, msgID, "probe", SessionQueued, "auto", "c", nil)
+	id, err := s.CreateSession(context.Background(), thID, msgID, "probe", SessionQueued, "auto", "c", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.MarkSessionRunning(id, ""); err != nil {
+	if err := s.MarkSessionRunning(context.Background(), id, ""); err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.GetSession(id)
+	got, err := s.GetSession(context.Background(), id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -391,17 +392,17 @@ func TestMarkSessionRunningEmptyStartedAtStoresEmptyString(t *testing.T) {
 func TestSetSessionReplyZeroStoresZeroNotNull(t *testing.T) {
 	s, thID := newSessionFixture(t)
 	msgID := triggerMessage(t, s, thID, "@probe hi")
-	id, err := s.CreateSession(thID, msgID, "probe", SessionQueued, "auto", "c", nil)
+	id, err := s.CreateSession(context.Background(), thID, msgID, "probe", SessionQueued, "auto", "c", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.db.Exec(`INSERT INTO messages(id, thread_id, seq, name, author_type, role, content) VALUES (0, ?, 2, 'human', 'human', 'user', 'seed')`, thID); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetSessionReply(id, 0); err != nil {
+	if err := s.SetSessionReply(context.Background(), id, 0); err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.GetSession(id)
+	got, err := s.GetSession(context.Background(), id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -416,14 +417,14 @@ func TestSetSessionReplyZeroStoresZeroNotNull(t *testing.T) {
 func TestSetSessionReplyRejectsMissingMessageTarget(t *testing.T) {
 	s, thID := newSessionFixture(t)
 	msgID := triggerMessage(t, s, thID, "@probe hi")
-	id, err := s.CreateSession(thID, msgID, "probe", SessionQueued, "auto", "c", nil)
+	id, err := s.CreateSession(context.Background(), thID, msgID, "probe", SessionQueued, "auto", "c", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetSessionReply(id, 9999); !errors.Is(err, ErrNotFound) {
+	if err := s.SetSessionReply(context.Background(), id, 9999); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing reply target error = %v, want ErrNotFound", err)
 	}
-	got, err := s.GetSession(id)
+	got, err := s.GetSession(context.Background(), id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -434,29 +435,29 @@ func TestSetSessionReplyRejectsMissingMessageTarget(t *testing.T) {
 
 func TestCountAgentMessagesAfter(t *testing.T) {
 	s, thID := newSessionFixture(t)
-	humanSeq, _ := s.AppendMessage(thID, "alice", "human", "user", "human words")
-	agentSeq, _ := s.AppendMessage(thID, "probe", "agent", "assistant", "agent words")
-	if _, err := s.AppendMessage(thID, "probe", "human", "user", "human words"); err != nil {
+	humanSeq, _ := s.AppendMessage(context.Background(), thID, "alice", "human", "user", "human words")
+	agentSeq, _ := s.AppendMessage(context.Background(), thID, "probe", "agent", "assistant", "agent words")
+	if _, err := s.AppendMessage(context.Background(), thID, "probe", "human", "user", "human words"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.AppendMessage(thID, "other", "agent", "assistant", "other agent words"); err != nil {
+	if _, err := s.AppendMessage(context.Background(), thID, "other", "agent", "assistant", "other agent words"); err != nil {
 		t.Fatal(err)
 	}
-	n, err := s.CountAgentMessagesAfter(thID, "probe", 0)
+	n, err := s.CountAgentMessagesAfter(context.Background(), thID, "probe", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {
 		t.Fatalf("count = %d, want 1: a human post by the agent's name and another agent's post must not count", n)
 	}
-	n, err = s.CountAgentMessagesAfter(thID, "probe", humanSeq)
+	n, err = s.CountAgentMessagesAfter(context.Background(), thID, "probe", humanSeq)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {
 		t.Fatalf("count after the trigger = %d, want 1", n)
 	}
-	n, err = s.CountAgentMessagesAfter(thID, "probe", agentSeq)
+	n, err = s.CountAgentMessagesAfter(context.Background(), thID, "probe", agentSeq)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -467,9 +468,9 @@ func TestCountAgentMessagesAfter(t *testing.T) {
 
 func TestThreadContextAndMessageByID(t *testing.T) {
 	s, thID := newSessionFixture(t)
-	seq, _ := s.AppendMessage(thID, "alice", "human", "user", "hello")
-	msgID, _ := s.MessageIDBySeq(thID, seq)
-	tc, err := s.ThreadContext(thID)
+	seq, _ := s.AppendMessage(context.Background(), thID, "alice", "human", "user", "hello")
+	msgID, _ := s.MessageIDBySeq(context.Background(), thID, seq)
+	tc, err := s.ThreadContext(context.Background(), thID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -479,17 +480,17 @@ func TestThreadContextAndMessageByID(t *testing.T) {
 	if tc.RepoAbsPath == nil || *tc.RepoAbsPath != "/repo" {
 		t.Fatalf("repo = %v", tc.RepoAbsPath)
 	}
-	m, err := s.MessageByID(msgID)
+	m, err := s.MessageByID(context.Background(), msgID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if m.Content != "hello" || m.Name != "alice" {
 		t.Fatalf("message = %+v", m)
 	}
-	if _, err := s.MessageByID(9999); !errors.Is(err, ErrNotFound) {
+	if _, err := s.MessageByID(context.Background(), 9999); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
-	if _, err := s.ThreadContext(9999); !errors.Is(err, ErrNotFound) {
+	if _, err := s.ThreadContext(context.Background(), 9999); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("ThreadContext: err = %v, want ErrNotFound", err)
 	}
 }
@@ -500,9 +501,9 @@ func TestThreadContextOrphanHasNoRepo(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
-	chID, _ := s.CreateChannel("orphan", "", "", "", "", true)
-	thID, _ := s.CreateThread(chID, "t")
-	tc, err := s.ThreadContext(thID)
+	chID, _ := s.CreateChannel(context.Background(), "orphan", "", "", "", "", true)
+	thID, _ := s.CreateThread(context.Background(), chID, "t")
+	tc, err := s.ThreadContext(context.Background(), thID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -514,15 +515,15 @@ func TestThreadContextOrphanHasNoRepo(t *testing.T) {
 func TestReconcileSessionsTerminatesOnlyNonTerminal(t *testing.T) {
 	s, thID := newSessionFixture(t)
 	msgID := triggerMessage(t, s, thID, "@a hi")
-	wasRunning, _ := s.CreateSession(thID, msgID, "a", SessionQueued, "auto", "c", nil)
-	if err := s.MarkSessionRunning(wasRunning, "2026-01-01T00:00:00Z"); err != nil {
+	wasRunning, _ := s.CreateSession(context.Background(), thID, msgID, "a", SessionQueued, "auto", "c", nil)
+	if err := s.MarkSessionRunning(context.Background(), wasRunning, "2026-01-01T00:00:00Z"); err != nil {
 		t.Fatal(err)
 	}
 	msg2 := triggerMessage(t, s, thID, "@b hi")
-	wasQueued, _ := s.CreateSession(thID, msg2, "b", SessionQueued, "auto", "c", nil)
-	done, _ := s.CreateSession(thID, msgID, "done", SessionSucceeded, "auto", "c", nil)
+	wasQueued, _ := s.CreateSession(context.Background(), thID, msg2, "b", SessionQueued, "auto", "c", nil)
+	done, _ := s.CreateSession(context.Background(), thID, msgID, "done", SessionSucceeded, "auto", "c", nil)
 
-	n, err := s.ReconcileSessions("2026-01-01T00:10:00Z")
+	n, err := s.ReconcileSessions(context.Background(), "2026-01-01T00:10:00Z")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -536,7 +537,7 @@ func TestReconcileSessionsTerminatesOnlyNonTerminal(t *testing.T) {
 		{wasRunning, "daemon restarted while running"},
 		{wasQueued, "daemon restarted while queued"},
 	} {
-		got, _ := s.GetSession(want.id)
+		got, _ := s.GetSession(context.Background(), want.id)
 		if got.Status != SessionCanceled {
 			t.Fatalf("session %d status = %q", want.id, got.Status)
 		}
@@ -550,7 +551,7 @@ func TestReconcileSessionsTerminatesOnlyNonTerminal(t *testing.T) {
 			t.Fatalf("session %d error = %q, want %q", want.id, *got.Error, want.wantErr)
 		}
 	}
-	untouched, _ := s.GetSession(done)
+	untouched, _ := s.GetSession(context.Background(), done)
 	if untouched.Status != SessionSucceeded {
 		t.Fatalf("terminal session was modified: %q", untouched.Status)
 	}
@@ -559,18 +560,18 @@ func TestReconcileSessionsTerminatesOnlyNonTerminal(t *testing.T) {
 func TestReconcileSessionsEmptyFinishedAtStoresEmptyString(t *testing.T) {
 	s, thID := newSessionFixture(t)
 	msgID := triggerMessage(t, s, thID, "@probe hi")
-	id, err := s.CreateSession(thID, msgID, "probe", SessionQueued, "auto", "c", nil)
+	id, err := s.CreateSession(context.Background(), thID, msgID, "probe", SessionQueued, "auto", "c", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	n, err := s.ReconcileSessions("")
+	n, err := s.ReconcileSessions(context.Background(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {
 		t.Fatalf("reconciled = %d, want 1", n)
 	}
-	got, err := s.GetSession(id)
+	got, err := s.GetSession(context.Background(), id)
 	if err != nil {
 		t.Fatal(err)
 	}

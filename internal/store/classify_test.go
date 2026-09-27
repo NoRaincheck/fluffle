@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"path/filepath"
@@ -40,7 +41,7 @@ func TestClassifyConstraintCodes(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if _, err := s.CreateChannel("c", "/r", "", "", "", false); err != nil {
+	if _, err := s.CreateChannel(context.Background(), "c", "/r", "", "", "", false); err != nil {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
@@ -75,7 +76,7 @@ func TestClassifyForeignKeyViolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if _, err := s.CreateChannel("c", "/r", "", "", "", false); err != nil {
+	if _, err := s.CreateChannel(context.Background(), "c", "/r", "", "", "", false); err != nil {
 		t.Fatal(err)
 	}
 	_, err = s.db.Exec(`INSERT INTO threads(channel_id, title) VALUES(99999, 't')`)

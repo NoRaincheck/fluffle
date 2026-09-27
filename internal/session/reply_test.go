@@ -17,7 +17,7 @@ func cfgWith(reply string) string {
 
 func selfPost(t *testing.T, s *store.Store, thID int64, name, text string) {
 	t.Helper()
-	if _, err := s.AppendMessage(thID, name, "agent", "assistant", text); err != nil {
+	if _, err := s.AppendMessage(context.Background(), thID, name, "agent", "assistant", text); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -33,7 +33,7 @@ func TestStdoutModePostsTrimmedReplyParentedToTrigger(t *testing.T) {
 	if got.ReplyMessageID == nil {
 		t.Fatal("no reply message recorded")
 	}
-	msg, err := s.MessageByID(*got.ReplyMessageID)
+	msg, err := s.MessageByID(context.Background(), *got.ReplyMessageID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func TestStdoutModeWithBlankOutputPostsNothingButSucceeds(t *testing.T) {
 	if got.ReplyMessageID != nil {
 		t.Fatalf("unexpected reply %d", *got.ReplyMessageID)
 	}
-	msgs, _ := s.ListMessages(thID, 0)
+	msgs, _ := s.ListMessages(context.Background(), thID, 0)
 	if len(msgs) != 1 {
 		t.Fatalf("messages = %+v", msgs)
 	}
@@ -71,7 +71,7 @@ func TestCliModeNeverPostsOnTheAgentsBehalf(t *testing.T) {
 	if got.ReplyMessageID != nil {
 		t.Fatalf("cli mode posted a reply: %d", *got.ReplyMessageID)
 	}
-	msgs, _ := s.ListMessages(thID, 0)
+	msgs, _ := s.ListMessages(context.Background(), thID, 0)
 	if len(msgs) != 1 {
 		t.Fatalf("cli mode appended a message: %+v", msgs)
 	}
@@ -121,7 +121,7 @@ func TestAutoModeWithSelfPostDoesNotDuplicate(t *testing.T) {
 	if got.ReplyMessageID != nil {
 		t.Fatalf("auto mode duplicated the reply: %d", *got.ReplyMessageID)
 	}
-	msgs, _ := s.ListMessages(thID, 0)
+	msgs, _ := s.ListMessages(context.Background(), thID, 0)
 	if len(msgs) != 2 {
 		t.Fatalf("messages = %+v, want trigger plus one agent post", msgs)
 	}
@@ -137,7 +137,7 @@ func TestAutoModeFallsBackToStdoutWhenSilent(t *testing.T) {
 	if got.ReplyMessageID == nil {
 		t.Fatal("auto mode did not fall back to stdout")
 	}
-	msg, _ := s.MessageByID(*got.ReplyMessageID)
+	msg, _ := s.MessageByID(context.Background(), *got.ReplyMessageID)
 	if msg.Content != "fallback reply" {
 		t.Fatalf("content = %q", msg.Content)
 	}
@@ -161,7 +161,7 @@ func TestAutoModeWaitsForALateAgentPost(t *testing.T) {
 	if got.ReplyMessageID != nil {
 		t.Fatalf("the exit race produced a duplicate reply: %d", *got.ReplyMessageID)
 	}
-	msgs, _ := s.ListMessages(thID, 0)
+	msgs, _ := s.ListMessages(context.Background(), thID, 0)
 	if len(msgs) != 2 {
 		t.Fatalf("messages = %+v, want trigger plus the late agent post", msgs)
 	}
@@ -182,7 +182,7 @@ func TestHumanPostDoesNotCountAsSelfPost(t *testing.T) {
 	s, m, thID, msgID := harness(t, cfgWith("auto"), &fakeRunner{stdout: "should post"})
 	fr := m.runner.(*fakeRunner)
 	fr.onStart = func() {
-		if _, err := s.AppendMessage(thID, "alice", "human", "user", "human follow up"); err != nil {
+		if _, err := s.AppendMessage(context.Background(), thID, "alice", "human", "user", "human follow up"); err != nil {
 			t.Error(err)
 		}
 	}
@@ -205,16 +205,16 @@ func TestASecondSessionDoesNotCountTheFirstSessionsEarlierPost(t *testing.T) {
 		t.Fatalf("first session = %+v", first)
 	}
 
-	seq, err := s.AppendMessage(thID, "alice", "human", "user", "@probe again")
+	seq, err := s.AppendMessage(context.Background(), thID, "alice", "human", "user", "@probe again")
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondTrigger, err := s.MessageIDBySeq(thID, seq)
+	secondTrigger, err := s.MessageIDBySeq(context.Background(), thID, seq)
 	if err != nil {
 		t.Fatal(err)
 	}
 	m.Start(thID, secondTrigger, []string{"probe"})
-	sessions, err := s.ListSessions(thID)
+	sessions, err := s.ListSessions(context.Background(), thID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,14 +229,14 @@ func TestASecondSessionDoesNotCountTheFirstSessionsEarlierPost(t *testing.T) {
 	if second.ReplyMessageID == nil {
 		t.Fatal("the second session counted the first session's post as its own reply")
 	}
-	msg, err := s.MessageByID(*second.ReplyMessageID)
+	msg, err := s.MessageByID(context.Background(), *second.ReplyMessageID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if msg.Content != "second stdout" {
 		t.Fatalf("content = %q", msg.Content)
 	}
-	msgs, _ := s.ListMessages(thID, 0)
+	msgs, _ := s.ListMessages(context.Background(), thID, 0)
 	if len(msgs) != 4 {
 		t.Fatalf("messages = %+v, want two triggers, the first post, and the second stdout fallback", msgs)
 	}
@@ -248,7 +248,7 @@ func TestDetectionIsBoundedBySeqNotByWallClock(t *testing.T) {
 	var once sync.Once
 	fr.onStart = func() {
 		once.Do(func() {
-			if _, err := s.AppendMessageAt(thID, "probe", "agent", "assistant", "first reply", "2999-01-01T00:00:00.000Z"); err != nil {
+			if _, err := s.AppendMessageAt(context.Background(), thID, "probe", "agent", "assistant", "first reply", "2999-01-01T00:00:00.000Z"); err != nil {
 				t.Error(err)
 			}
 		})
@@ -260,16 +260,16 @@ func TestDetectionIsBoundedBySeqNotByWallClock(t *testing.T) {
 		t.Fatalf("first session = %+v", first)
 	}
 
-	seq, err := s.AppendMessage(thID, "alice", "human", "user", "@probe again")
+	seq, err := s.AppendMessage(context.Background(), thID, "alice", "human", "user", "@probe again")
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondTrigger, err := s.MessageIDBySeq(thID, seq)
+	secondTrigger, err := s.MessageIDBySeq(context.Background(), thID, seq)
 	if err != nil {
 		t.Fatal(err)
 	}
 	m.Start(thID, secondTrigger, []string{"probe"})
-	sessions, err := s.ListSessions(thID)
+	sessions, err := s.ListSessions(context.Background(), thID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,7 +301,7 @@ func TestCancelDuringReplyGraceCancelsAndPostsNothing(t *testing.T) {
 			if got.ReplyMessageID != nil {
 				t.Fatalf("reply %d was posted after the cancel", *got.ReplyMessageID)
 			}
-			msgs, _ := s.ListMessages(thID, 0)
+			msgs, _ := s.ListMessages(context.Background(), thID, 0)
 			if len(msgs) != 1 {
 				t.Fatalf("messages = %+v, want the trigger only", msgs)
 			}
@@ -316,11 +316,11 @@ func TestPostReplyOnACanceledContextCancelsAndAppendsNothing(t *testing.T) {
 	s, m, thID, msgID := harness(t, cfgWith("stdout"), &fakeRunner{})
 	entry := agentcfg.Entry{Agent: agentcfg.Agent{Name: "probe", Reply: "stdout", Command: "/bin/probe"}}
 	tc := store.ThreadContext{ThreadID: thID}
-	trigger, err := s.MessageByID(msgID)
+	trigger, err := s.MessageByID(context.Background(), msgID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := s.CreateSession(thID, msgID, "probe", store.SessionQueued, "stdout", "/bin/probe", nil)
+	id, err := s.CreateSession(context.Background(), thID, msgID, "probe", store.SessionQueued, "stdout", "/bin/probe", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +329,7 @@ func TestPostReplyOnACanceledContextCancelsAndAppendsNothing(t *testing.T) {
 
 	m.postReply(ctx, id, entry, tc, trigger, "must not be posted", int64ptr(9))
 
-	got, err := s.GetSession(id)
+	got, err := s.GetSession(context.Background(), id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,7 +339,7 @@ func TestPostReplyOnACanceledContextCancelsAndAppendsNothing(t *testing.T) {
 	if got.ReplyMessageID != nil {
 		t.Fatalf("reply %d was posted after the cancel", *got.ReplyMessageID)
 	}
-	msgs, _ := s.ListMessages(thID, 0)
+	msgs, _ := s.ListMessages(context.Background(), thID, 0)
 	if len(msgs) != 1 {
 		t.Fatalf("messages = %+v, want the trigger only", msgs)
 	}

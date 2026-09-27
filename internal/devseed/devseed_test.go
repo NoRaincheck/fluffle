@@ -1,6 +1,7 @@
 package devseed
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -22,18 +23,18 @@ func fixture(t *testing.T) *store.Store {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
-	chID, err := s.CreateChannel("agents", "", "", "", "", true)
+	chID, err := s.CreateChannel(context.Background(), "agents", "", "", "", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	thID, err := s.CreateThread(chID, "session states")
+	thID, err := s.CreateThread(context.Background(), chID, "session states")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.AppendMessageAt(thID, "alice", "human", "user", "@summarizer take a look", triggerAt); err != nil {
+	if _, err := s.AppendMessageAt(context.Background(), thID, "alice", "human", "user", "@summarizer take a look", triggerAt); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.AppendMessageAt(thID, "summarizer", "agent", "assistant", "Looks fine to me.", replyAt); err != nil {
+	if _, err := s.AppendMessageAt(context.Background(), thID, "summarizer", "agent", "assistant", "Looks fine to me.", replyAt); err != nil {
 		t.Fatal(err)
 	}
 	return s
@@ -74,7 +75,7 @@ func TestStageEveryStatus(t *testing.T) {
 	if len(ids) != len(statuses) {
 		t.Fatalf("got %d ids, want %d", len(ids), len(statuses))
 	}
-	got, err := s.ListSessions(threadIDOf(t, s))
+	got, err := s.ListSessions(context.Background(), threadIDOf(t, s))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,11 +108,11 @@ func TestStageTwoAgentsOnOneTriggerMessage(t *testing.T) {
 	if ids[0] >= ids[1] {
 		t.Errorf("second session id %d not after first %d", ids[1], ids[0])
 	}
-	got, err := s.GetSession(ids[1])
+	got, err := s.GetSession(context.Background(), ids[1])
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := s.GetSession(ids[0])
+	first, err := s.GetSession(context.Background(), ids[0])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,11 +134,11 @@ func TestStageSetsTriggerMessageFromSeq(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.GetSession(ids[0])
+	got, err := s.GetSession(context.Background(), ids[0])
 	if err != nil {
 		t.Fatal(err)
 	}
-	msgs, err := s.ListMessages(got.ThreadID, 0)
+	msgs, err := s.ListMessages(context.Background(), got.ThreadID, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,14 +155,14 @@ func TestStageLinksAgentReply(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.GetSession(ids[0])
+	got, err := s.GetSession(context.Background(), ids[0])
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.ReplyMessageID == nil {
 		t.Fatal("reply message not linked")
 	}
-	msgs, err := s.ListMessages(got.ThreadID, 0)
+	msgs, err := s.ListMessages(context.Background(), got.ThreadID, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +177,7 @@ func TestStageOmitsReplyWhenUnset(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.GetSession(ids[0])
+	got, err := s.GetSession(context.Background(), ids[0])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +195,7 @@ func TestStageFailedCarriesExitCodeAndError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.GetSession(ids[0])
+	got, err := s.GetSession(context.Background(), ids[0])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +215,7 @@ func TestStageTimestampsFollowTrigger(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.GetSession(ids[0])
+	got, err := s.GetSession(context.Background(), ids[0])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +251,7 @@ func TestStageQueuedHasNoStartOrFinish(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.GetSession(ids[0])
+	got, err := s.GetSession(context.Background(), ids[0])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +269,7 @@ func TestStageRunningHasNoFinish(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.GetSession(ids[0])
+	got, err := s.GetSession(context.Background(), ids[0])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +295,7 @@ func TestStageAppendsEventsInOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	events, err := s.ListSessionEvents(ids[0])
+	events, err := s.ListSessionEvents(context.Background(), ids[0])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +328,7 @@ func TestStageVerboseRunKeepsEveryEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	events, err := s.ListSessionEvents(ids[0])
+	events, err := s.ListSessionEvents(context.Background(), ids[0])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +393,7 @@ func TestStageNoSpecs(t *testing.T) {
 
 func threadIDOf(t *testing.T, s *store.Store) int64 {
 	t.Helper()
-	channels, err := s.ListChannels("", true)
+	channels, err := s.ListChannels(context.Background(), "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -400,7 +401,7 @@ func threadIDOf(t *testing.T, s *store.Store) int64 {
 		if ch.Name != "agents" {
 			continue
 		}
-		threads, err := s.ListThreads(ch.ID)
+		threads, err := s.ListThreads(context.Background(), ch.ID)
 		if err != nil {
 			t.Fatal(err)
 		}

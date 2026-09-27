@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -1819,13 +1820,13 @@ func TestDaemonStartReconcilesStaleSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	chID, _ := s.CreateChannel("c", "/repo", "", "", "", false)
-	thID, _ := s.CreateThread(chID, "t")
-	seq, _ := s.AppendMessage(thID, "alice", "human", "user", "@probe hi")
-	msgID, _ := s.MessageIDBySeq(thID, seq)
-	running, _ := s.CreateSession(thID, msgID, "probe", store.SessionRunning, "stdout", "c", nil)
-	queued, _ := s.CreateSession(thID, msgID, "other", store.SessionQueued, "stdout", "c", nil)
-	done, _ := s.CreateSession(thID, msgID, "done", store.SessionSucceeded, "stdout", "c", nil)
+	chID, _ := s.CreateChannel(context.Background(), "c", "/repo", "", "", "", false)
+	thID, _ := s.CreateThread(context.Background(), chID, "t")
+	seq, _ := s.AppendMessage(context.Background(), thID, "alice", "human", "user", "@probe hi")
+	msgID, _ := s.MessageIDBySeq(context.Background(), thID, seq)
+	running, _ := s.CreateSession(context.Background(), thID, msgID, "probe", store.SessionRunning, "stdout", "c", nil)
+	queued, _ := s.CreateSession(context.Background(), thID, msgID, "other", store.SessionQueued, "stdout", "c", nil)
+	done, _ := s.CreateSession(context.Background(), thID, msgID, "done", store.SessionSucceeded, "stdout", "c", nil)
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -1843,7 +1844,7 @@ func TestDaemonStartReconcilesStaleSessions(t *testing.T) {
 	}
 
 	for _, id := range []int64{running, queued} {
-		got, err := reopened.GetSession(id)
+		got, err := reopened.GetSession(context.Background(), id)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1857,7 +1858,7 @@ func TestDaemonStartReconcilesStaleSessions(t *testing.T) {
 			t.Fatalf("session %d error = %v", id, got.Error)
 		}
 	}
-	untouched, _ := reopened.GetSession(done)
+	untouched, _ := reopened.GetSession(context.Background(), done)
 	if untouched.Status != store.SessionSucceeded {
 		t.Fatalf("terminal session was modified: %q", untouched.Status)
 	}

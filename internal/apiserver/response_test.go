@@ -1,6 +1,7 @@
 package apiserver
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -58,7 +59,7 @@ func TestSuccessfulPostsUseJSONContentType(t *testing.T) {
 		t.Fatalf("message seq = %d", message.Seq)
 	}
 
-	messages, err := s.ListMessages(thread.ID, 0)
+	messages, err := s.ListMessages(context.Background(), thread.ID, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,11 +96,11 @@ func TestStoreFailuresUseDaemonErrorEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	channelID, err := s.CreateChannel("c", "/repo", "", "", "", false)
+	channelID, err := s.CreateChannel(context.Background(), "c", "/repo", "", "", "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	threadID, err := s.CreateThread(channelID, "t")
+	threadID, err := s.CreateThread(context.Background(), channelID, "t")
 	if err != nil {
 		t.Fatal(err)
 	}
