@@ -1280,8 +1280,9 @@ First entity migration. Adds the `q` field and the row-to-wire converters, then 
 - Produces:
   - `type Store struct { db *sql.DB; q *db.Queries }`
   - `func (s *Store) tx() (*sql.Tx, *db.Queries, error)`
-  - `func channelFromRow(r db.ListChannelsRow) Channel` and its three sibling row types
-  - `func threadFromRow(r db.ListThreadsRow) Thread`
+  - `func channelFromFields(id int64, name, repoAbsPath, repoRemote, repoHeadSHA, repoHeadBranch string, isOrphaned int64, createdAt string) Channel`
+  - `func channelsFromRows[T any](rows []T, f func(T) Channel) []Channel`
+  - `func threadFromFields(id, channelID int64, title, createdAt string) Thread`
 
 - [ ] **Step 1: Write the failing test for the four-way switch**
 
@@ -1367,26 +1368,47 @@ In `Open`, after `prepare` succeeds, return `&Store{db: conn, q: db.New(conn)}`.
 
 - [ ] **Step 4: Add the row converters**
 
+sqlc emits **one row struct per query and never dedupes**, so the four `ListChannels*` queries produce four distinct types: `ListChannelsAllRow`, `ListChannelsByRepoRow`, `ListChannelsNonOrphanedRow`, `ListChannelsByRepoNonOrphanedRow`. A single shared converter taking scalars avoids depending on those names:
+
 ```go
-func channelFromRow(r db.ListChannelsRow) Channel {
+func channelFromFields(id int64, name, repoAbsPath, repoRemote, repoHeadSHA, repoHeadBranch string, isOrphaned int64, createdAt string) Channel {
 	return Channel{
-		ID:             r.ID,
-		Name:           r.Name,
-		RepoAbsPath:    r.RepoAbsPath,
-		RepoRemote:     r.RepoRemote,
-		RepoHeadSHA:    r.RepoHeadSha,
-		RepoHeadBranch: r.RepoHeadBranch,
-		IsOrphaned:     r.IsOrphaned == 1,
-		CreatedAt:      r.CreatedAt,
+		ID:             id,
+		Name:           name,
+		RepoAbsPath:    repoAbsPath,
+		RepoRemote:     repoRemote,
+		RepoHeadSHA:    repoHeadSHA,
+		RepoHeadBranch: repoHeadBranch,
+		IsOrphaned:     isOrphaned == 1,
+		CreatedAt:      createdAt,
 	}
 }
 
-func threadFromRow(r db.ListThreadsRow) Thread {
-	return Thread{ID: r.ID, ChannelID: r.ChannelID, Title: r.Title, CreatedAt: r.CreatedAt}
+func channelsFromRows[T any](rows []T, f func(T) Channel) []Channel {
+	var out []Channel
+	for _, r := range rows {
+		out = append(out, f(r))
+	}
+	return out
+}
+
+func threadFromFields(id, channelID int64, title, createdAt string) Thread {
+	return Thread{ID: id, ChannelID: channelID, Title: title, CreatedAt: createdAt}
 }
 ```
 
-Check the actual generated field names before writing this: run `rg -n "type ListChannelsRow" -A 10 internal/db/channels.sql.go` and `rg -n "type ListThreadsRow" -A 6 internal/db/threads.sql.go`. sqlc names the aliased `repo_head_sha` column field from the column name, not the `rename` entry, so it may be `RepoHeadSha` on the row struct. Use the generated names verbatim.
+`channelsFromRows` is a generic helper, not a generated type: it accepts any of the four row slices and returns the `nil`-when-empty slice the wire contract requires. In step 6, pass a closure per query:
+
+```go
+	rows, err = s.q.ListChannelsAll(ctx)
+	// then
+	return channelsFromRows(rows, func(r db.ListChannelsAllRow) Channel {
+		return channelFromFields(r.ID, r.Name, r.RepoAbsPath, r.RepoRemote, r.RepoHeadSha, r.RepoHeadBranch, r.IsOrphaned, r.CreatedAt)
+	}), nil
+```
+
+Field names inside the closure come from the generated struct. Confirm them with
+`rg -n "type ListChannels\w+Row struct" -A 9 internal/db/channels.sql.go` before writing. The `COALESCE`-aliased columns yield plain `string`; `is_orphaned` yields `int64` because SQLite has no boolean.
 
 - [ ] **Step 5: Rewrite CreateChannel**
 
@@ -1440,33 +1462,50 @@ Add `"context"` and `"github.com/NoRaincheck/fluffle/internal/db"` to the import
 
 - [ ] **Step 6: Rewrite ListChannels as a four-way switch**
 
+`repo_abs_path` is a **nullable** column, so sqlc infers the comparison parameter as nullable too. With `emit_pointers_for_null_types: true` that is `*string`, so these two params take a pointer:
+
 ```go
 func (s *Store) ListChannels(repoAbsPath string, includeOrphaned bool) ([]Channel, error) {
 	ctx := context.Background()
-	var rows []db.ListChannelsRow
-	var err error
 	switch {
 	case repoAbsPath != "" && !includeOrphaned:
-		rows, err = s.q.ListChannelsByRepoNonOrphaned(ctx, repoAbsPath)
+		rows, err := s.q.ListChannelsByRepoNonOrphaned(ctx, db.ListChannelsByRepoNonOrphanedParams{RepoAbsPath: &repoAbsPath})
+		if err != nil {
+			return nil, err
+		}
+		return channelsFromRows(rows, func(r db.ListChannelsByRepoNonOrphanedRow) Channel {
+			return channelFromFields(r.ID, r.Name, r.RepoAbsPath, r.RepoRemote, r.RepoHeadSha, r.RepoHeadBranch, r.IsOrphaned, r.CreatedAt)
+		}), nil
 	case repoAbsPath != "":
-		rows, err = s.q.ListChannelsByRepo(ctx, repoAbsPath)
+		rows, err := s.q.ListChannelsByRepo(ctx, db.ListChannelsByRepoParams{RepoAbsPath: &repoAbsPath})
+		if err != nil {
+			return nil, err
+		}
+		return channelsFromRows(rows, func(r db.ListChannelsByRepoRow) Channel {
+			return channelFromFields(r.ID, r.Name, r.RepoAbsPath, r.RepoRemote, r.RepoHeadSha, r.RepoHeadBranch, r.IsOrphaned, r.CreatedAt)
+		}), nil
 	case !includeOrphaned:
-		rows, err = s.q.ListChannelsNonOrphaned(ctx)
+		rows, err := s.q.ListChannelsNonOrphaned(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return channelsFromRows(rows, func(r db.ListChannelsNonOrphanedRow) Channel {
+			return channelFromFields(r.ID, r.Name, r.RepoAbsPath, r.RepoRemote, r.RepoHeadSha, r.RepoHeadBranch, r.IsOrphaned, r.CreatedAt)
+		}), nil
 	default:
-		rows, err = s.q.ListChannelsAll(ctx)
+		rows, err := s.q.ListChannelsAll(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return channelsFromRows(rows, func(r db.ListChannelsAllRow) Channel {
+			return channelFromFields(r.ID, r.Name, r.RepoAbsPath, r.RepoRemote, r.RepoHeadSha, r.RepoHeadBranch, r.IsOrphaned, r.CreatedAt)
+		}), nil
 	}
-	if err != nil {
-		return nil, err
-	}
-	var out []Channel
-	for _, r := range rows {
-		out = append(out, channelFromRow(r))
-	}
-	return out, nil
 }
 ```
 
-`out` stays nil when empty, which is required: `ListChannels` must marshal to `null`, not `[]`.
+`channelsFromRows` returns nil for an empty slice, which is required: `ListChannels`
+must marshal to `null`, not `[]`.
 
 - [ ] **Step 7: Rewrite CreateThread and ListThreads**
 
@@ -1492,7 +1531,7 @@ func (s *Store) ListThreads(channelID int64) ([]Thread, error) {
 	}
 	var out []Thread
 	for _, r := range rows {
-		out = append(out, threadFromRow(r))
+		out = append(out, threadFromFields(r.ID, r.ChannelID, r.Title, r.CreatedAt))
 	}
 	return out, nil
 }
@@ -1528,7 +1567,7 @@ The highest-value task: removes four duplicated `*sql.DB`/`*sql.Tx` pairs and al
 
 **Interfaces:**
 - Consumes: `s.tx()` and `s.q` from task 5
-- Produces: `func messageFromRow(r db.ListMessagesRow) Message`, `func (s *Store) appendMessage(q *db.Queries, ...) (int64, int64, error)`
+- Produces: `func messageFromFields(id, threadID, seq int64, parentID, parentSeq sql.NullInt64, name, authorType, role, content, createdAt string) Message`, `func (s *Store) appendMessage(q *db.Queries, ...) (int64, int64, error)`
 
 - [ ] **Step 1: Write the failing test for the lastN ordering**
 
@@ -1565,24 +1604,36 @@ Expected: PASS. It pins the current triple-subselect behavior before the rewrite
 
 - [ ] **Step 3: Add the message converter**
 
+Four queries project the same message columns — `ListMessages`, `ListMessagesLastN`,
+`ListMessagesAfter`, `GetMessageByIDWithParent` — so sqlc emits four distinct row
+types. Use a field-level constructor, as in task 5:
+
 ```go
-func messageFromRow(r db.ListMessagesRow) Message {
+func messageFromFields(id, threadID, seq int64, parentID sql.NullInt64, parentSeq sql.NullInt64, name, authorType, role, content, createdAt string) Message {
 	return Message{
-		ID:         r.ID,
-		ThreadID:   r.ThreadID,
-		Seq:        r.Seq,
-		ParentID:   r.ParentID,
-		ParentSeq:  sql.NullInt64{Int64: r.ParentSeq.Int64, Valid: r.ParentSeq.Valid},
-		Name:       r.Name,
-		AuthorType: r.AuthorType,
-		Role:       r.Role,
-		Content:    r.Content,
-		CreatedAt:  r.CreatedAt,
+		ID:         id,
+		ThreadID:   threadID,
+		Seq:        seq,
+		ParentID:   parentID,
+		ParentSeq:  parentSeq,
+		Name:       name,
+		AuthorType: authorType,
+		Role:       role,
+		Content:    content,
+		CreatedAt:  createdAt,
 	}
 }
 ```
 
-Inspect the generated row struct first: `rg -n "type ListMessagesRow" -A 12 internal/db/messages.sql.go`. If `parent_seq` is generated as `sql.NullInt64` (because `p.seq` is a nullable LEFT JOIN column), the conversion is a direct assignment: `ParentSeq: r.ParentSeq`. Use whatever the generated types actually are.
+`parent_id` is `sql.NullInt64` because of the `overrides` entry in `sqlc.yaml`.
+`parent_seq` comes from `LEFT JOIN messages p` on a nullable column, so it is also
+nullable — most likely `sql.NullInt64` as well. Confirm before writing:
+
+Run: `rg -n "type ListMessagesRow struct" -A 12 internal/db/messages.sql.go`
+Expected: `ParentID sql.NullInt64` and `ParentSeq sql.NullInt64`. If `ParentSeq` comes
+out as `sql.NullInt64`, pass it straight through; if it comes out as `int64`, wrap it
+with `sql.NullInt64{Int64: r.ParentSeq, Valid: true}` so the `json:"-"` field keeps
+its type.
 
 - [ ] **Step 4: Rewrite the four AppendMessage variants onto one helper**
 
@@ -1738,19 +1789,24 @@ Inside `AppendBatch` and `AppendSessionEvent`, replace `messageIDBySeqTx(tx, ...
 ```go
 func (s *Store) ListMessages(threadID int64, lastN int) ([]Message, error) {
 	ctx := context.Background()
-	var rows []db.ListMessagesRow
-	var err error
 	if lastN > 0 {
-		rows, err = s.q.ListMessagesLastN(ctx, db.ListMessagesLastNParams{ThreadID: threadID, Limit: int64(lastN)})
-	} else {
-		rows, err = s.q.ListMessages(ctx, threadID)
+		rows, err := s.q.ListMessagesLastN(ctx, db.ListMessagesLastNParams{ThreadID: threadID, Limit: int64(lastN)})
+		if err != nil {
+			return nil, err
+		}
+		var out []Message
+		for _, r := range rows {
+			out = append(out, messageFromFields(r.ID, r.ThreadID, r.Seq, r.ParentID, r.ParentSeq, r.Name, r.AuthorType, r.Role, r.Content, r.CreatedAt))
+		}
+		return out, nil
 	}
+	rows, err := s.q.ListMessages(ctx, threadID)
 	if err != nil {
 		return nil, err
 	}
 	var out []Message
 	for _, r := range rows {
-		out = append(out, messageFromRow(r))
+		out = append(out, messageFromFields(r.ID, r.ThreadID, r.Seq, r.ParentID, r.ParentSeq, r.Name, r.AuthorType, r.Role, r.Content, r.CreatedAt))
 	}
 	return out, nil
 }
@@ -1765,7 +1821,7 @@ func (s *Store) ListMessagesAfter(threadID, afterSeq int64) ([]Message, error) {
 	}
 	var out []Message
 	for _, r := range rows {
-		out = append(out, messageFromRow(r))
+		out = append(out, messageFromFields(r.ID, r.ThreadID, r.Seq, r.ParentID, r.ParentSeq, r.Name, r.AuthorType, r.Role, r.Content, r.CreatedAt))
 	}
 	return out, nil
 }
