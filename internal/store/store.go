@@ -434,6 +434,41 @@ func (m Message) ParentIDValue() int64 {
 	return 0
 }
 
+func messageFromDetailRow(r db.GetMessageByIDWithParentRow) Message {
+	return messageFromFields(r.ID, r.ThreadID, r.Seq, r.ParentID, r.ParentSeq, r.Name, r.AuthorType, r.Role, r.Content, r.CreatedAt)
+}
+
+func reactionFromRow(r db.ListReactionsRow) Reaction {
+	return Reaction{
+		ID:         r.ID,
+		MessageID:  r.MessageID,
+		MessageSeq: r.MessageSeq,
+		Emoji:      r.Emoji,
+		Name:       r.Name,
+		AuthorType: r.AuthorType,
+		CreatedAt:  r.CreatedAt,
+	}
+}
+
+func inboxFromRow(r db.ListInboxRow) InboxMessage {
+	return InboxMessage{
+		Message: Message{
+			ID:         r.ID,
+			ThreadID:   r.ThreadID,
+			Seq:        r.Seq,
+			ParentID:   r.ParentID,
+			Name:       r.Name,
+			AuthorType: r.AuthorType,
+			Role:       r.Role,
+			Content:    r.Content,
+			CreatedAt:  r.CreatedAt,
+		},
+		ChannelName: r.ChannelName,
+		ChannelID:   r.ChannelID,
+		ThreadTitle: r.ThreadTitle,
+	}
+}
+
 func (s *Store) ListInbox(limit int) ([]InboxMessage, error) {
 	if limit <= 0 {
 		limit = 100
@@ -441,58 +476,40 @@ func (s *Store) ListInbox(limit int) ([]InboxMessage, error) {
 	if limit > 200 {
 		limit = 200
 	}
-	q := `SELECT m.id, m.thread_id, m.seq, m.parent_id, m.name, m.author_type, m.role, m.content, COALESCE(m.created_at,''),
-                 c.name, c.id, t.title
-          FROM messages m
-          JOIN threads t ON t.id = m.thread_id
-          JOIN channels c ON c.id = t.channel_id
-          ORDER BY m.created_at DESC, m.id DESC LIMIT ?`
-	rows, err := s.db.Query(q, limit)
+	rows, err := s.q.ListInbox(context.Background(), db.ListInboxParams{Limit: int64(limit)})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []InboxMessage
-	for rows.Next() {
-		var im InboxMessage
-		if err := rows.Scan(&im.ID, &im.ThreadID, &im.Seq, &im.ParentID, &im.Name, &im.AuthorType, &im.Role, &im.Content, &im.CreatedAt, &im.ChannelName, &im.ChannelID, &im.ThreadTitle); err != nil {
-			return nil, err
-		}
-		out = append(out, im)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+	out := []InboxMessage{}
+	for _, r := range rows {
+		out = append(out, inboxFromRow(r))
 	}
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
 		out[i], out[j] = out[j], out[i]
-	}
-	if out == nil {
-		out = []InboxMessage{}
 	}
 	return out, nil
 }
 
 func (s *Store) AddReaction(messageID int64, emoji, name, authorType string) error {
-	tx, err := s.db.Begin()
+	tx, q, err := s.tx()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := messageThreadIDTx(tx, messageID); err != nil {
+	if _, err := s.messageThreadID(q, messageID); err != nil {
 		return err
 	}
-	if _, _, err := addReactionTx(tx, messageID, emoji, name, authorType, ""); err != nil {
+	if _, _, err := s.addReaction(q, messageID, emoji, name, authorType, ""); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-func messageThreadIDTx(tx *sql.Tx, messageID int64) (int64, error) {
+func (s *Store) messageThreadID(q *db.Queries, messageID int64) (int64, error) {
 	if messageID <= 0 {
 		return 0, ErrNotFound
 	}
-	var threadID int64
-	err := tx.QueryRow(`SELECT thread_id FROM messages WHERE id = ?`, messageID).Scan(&threadID)
+	threadID, err := q.GetMessageThreadIDByID(context.Background(), db.GetMessageThreadIDByIDParams{ID: messageID})
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, ErrNotFound
 	}
@@ -503,20 +520,15 @@ func messageThreadIDTx(tx *sql.Tx, messageID int64) (int64, error) {
 }
 
 func (s *Store) ListReactions(threadID int64) ([]Reaction, error) {
-	rows, err := s.db.Query(`SELECT r.id, r.message_id, m.seq, r.emoji, r.name, r.author_type, COALESCE(r.created_at,'') FROM reactions r JOIN messages m ON m.id = r.message_id WHERE m.thread_id = ? ORDER BY m.seq ASC, r.created_at ASC, r.id ASC`, threadID)
+	rows, err := s.q.ListReactions(context.Background(), db.ListReactionsParams{ThreadID: threadID})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var out []Reaction
-	for rows.Next() {
-		var reaction Reaction
-		if err := rows.Scan(&reaction.ID, &reaction.MessageID, &reaction.MessageSeq, &reaction.Emoji, &reaction.Name, &reaction.AuthorType, &reaction.CreatedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, reaction)
+	for _, r := range rows {
+		out = append(out, reactionFromRow(r))
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (s *Store) AddReactionBySeq(threadID, messageSeq int64, emoji, name, authorType string) error {
@@ -525,13 +537,13 @@ func (s *Store) AddReactionBySeq(threadID, messageSeq int64, emoji, name, author
 		return err
 	}
 	defer tx.Rollback()
-	if _, _, err := addReactionBySeqTx(tx, q, threadID, messageSeq, emoji, name, authorType, ""); err != nil {
+	if _, _, err := s.addReactionBySeq(q, threadID, messageSeq, emoji, name, authorType, ""); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-func addReactionBySeqTx(tx *sql.Tx, q *db.Queries, threadID, messageSeq int64, emoji, name, authorType, createdAt string) (int64, int64, error) {
+func (s *Store) addReactionBySeq(q *db.Queries, threadID, messageSeq int64, emoji, name, authorType, createdAt string) (int64, int64, error) {
 	messageID, err := q.GetMessageIDByThreadSeq(context.Background(), db.GetMessageIDByThreadSeqParams{
 		ThreadID: threadID,
 		Seq:      messageSeq,
@@ -542,28 +554,36 @@ func addReactionBySeqTx(tx *sql.Tx, q *db.Queries, threadID, messageSeq int64, e
 	if err != nil {
 		return 0, 0, err
 	}
-	return addReactionTx(tx, messageID, emoji, name, authorType, createdAt)
+	return s.addReaction(q, messageID, emoji, name, authorType, createdAt)
 }
 
-func addReactionTx(tx *sql.Tx, messageID int64, emoji, name, authorType, createdAt string) (int64, int64, error) {
+func (s *Store) addReaction(q *db.Queries, messageID int64, emoji, name, authorType, createdAt string) (int64, int64, error) {
+	ctx := context.Background()
 	var (
-		res sql.Result
-		err error
+		reactionID int64
+		err        error
 	)
 	if createdAt != "" {
 		if _, err := time.Parse(time.RFC3339, createdAt); err != nil {
 			return 0, 0, invalid("created_at %q is not RFC3339: %v", createdAt, err)
 		}
-		res, err = tx.Exec(`INSERT INTO reactions(message_id, emoji, name, author_type, created_at) VALUES(?,?,?,?,?)`, messageID, emoji, name, authorType, createdAt)
+		reactionID, err = q.InsertReaction(ctx, db.InsertReactionParams{
+			MessageID:  messageID,
+			Emoji:      emoji,
+			Name:       name,
+			AuthorType: authorType,
+			CreatedAt:  createdAt,
+		})
 	} else {
-		res, err = tx.Exec(`INSERT INTO reactions(message_id, emoji, name, author_type) VALUES(?,?,?,?)`, messageID, emoji, name, authorType)
+		reactionID, err = q.InsertReactionDefaultCreatedAt(ctx, db.InsertReactionDefaultCreatedAtParams{
+			MessageID:  messageID,
+			Emoji:      emoji,
+			Name:       name,
+			AuthorType: authorType,
+		})
 	}
 	if err != nil {
 		return 0, 0, classify(err)
-	}
-	reactionID, err := res.LastInsertId()
-	if err != nil {
-		return 0, 0, err
 	}
 	return messageID, reactionID, nil
 }
@@ -595,7 +615,20 @@ func (s *Store) AppendBatch(threadID int64, events []AppendEvent) ([]AppendResul
 			if mapped, ok := sourceSeqs[parentSeq]; ok {
 				parentSeq = mapped
 			}
-			seq, messageID, err := s.appendMessageByParentSeq(q, threadID, parentSeq, event.Name, event.AuthorType, event.Role, event.Content, event.CreatedAt)
+			var parentID int64
+			if parentSeq > 0 {
+				parentID, err = q.GetMessageIDByThreadSeq(context.Background(), db.GetMessageIDByThreadSeqParams{
+					ThreadID: threadID,
+					Seq:      parentSeq,
+				})
+				if err != nil {
+					if errors.Is(err, sql.ErrNoRows) {
+						return nil, ErrNotFound
+					}
+					return nil, err
+				}
+			}
+			seq, messageID, err := s.appendMessage(q, threadID, event.Name, event.AuthorType, event.Role, event.Content, event.CreatedAt, parentID)
 			if err != nil {
 				return nil, err
 			}
@@ -605,7 +638,7 @@ func (s *Store) AppendBatch(threadID int64, events []AppendEvent) ([]AppendResul
 			if mapped, ok := sourceSeqs[messageSeq]; ok {
 				messageSeq = mapped
 			}
-			messageID, reactionID, err := addReactionBySeqTx(tx, q, threadID, messageSeq, event.Emoji, event.Name, event.AuthorType, event.CreatedAt)
+			messageID, reactionID, err := s.addReactionBySeq(q, threadID, messageSeq, event.Emoji, event.Name, event.AuthorType, event.CreatedAt)
 			if err != nil {
 				return nil, err
 			}

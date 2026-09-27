@@ -1063,3 +1063,20 @@ func TestListMessagesLastNKeepsAscendingOrder(t *testing.T) {
 		t.Fatalf("last seq = %d, want 5 (last 2 of 1..5)", got[1].Seq)
 	}
 }
+
+func TestListInboxReturnsEmptySliceNotNil(t *testing.T) {
+	s, _, threadID := newStoreWithThread(t, ":memory:")
+	if _, err := s.AppendMessage(threadID, "human", "human", "user", "hi"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ListInbox(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil {
+		t.Fatal("ListInbox returned nil; must return an empty slice so JSON is [] not null")
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d, want 1", len(got))
+	}
+}

@@ -1,9 +1,12 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"strings"
+
+	"github.com/NoRaincheck/fluffle/internal/db"
 )
 
 const (
@@ -225,35 +228,40 @@ func (s *Store) ListSessionEvents(sessionID int64) ([]SessionEvent, error) {
 }
 
 func (s *Store) CountAgentMessagesAfter(threadID int64, name string, afterSeq int64) (int, error) {
-	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE thread_id = ? AND name = ? AND author_type = 'agent' AND seq > ?`, threadID, name, afterSeq).Scan(&n)
-	return n, err
+	n, err := s.q.CountAgentMessagesAfter(context.Background(), db.CountAgentMessagesAfterParams{
+		ThreadID: threadID,
+		Name:     name,
+		Seq:      afterSeq,
+	})
+	return int(n), err
 }
 
 func (s *Store) ThreadContext(threadID int64) (ThreadContext, error) {
-	var tc ThreadContext
-	err := s.db.QueryRow(`SELECT t.id, t.title, c.id, c.name, c.repo_abs_path
-		FROM threads t JOIN channels c ON c.id = t.channel_id
-		WHERE t.id = ?`, threadID).
-		Scan(&tc.ThreadID, &tc.ThreadTitle, &tc.ChannelID, &tc.ChannelName, &tc.RepoAbsPath)
+	r, err := s.q.GetThreadContext(context.Background(), db.GetThreadContextParams{ID: threadID})
 	if errors.Is(err, sql.ErrNoRows) {
 		return ThreadContext{}, ErrNotFound
 	}
 	if err != nil {
 		return ThreadContext{}, err
 	}
-	return tc, nil
+	return ThreadContext{
+		ThreadID:    r.ThreadID,
+		ThreadTitle: r.ThreadTitle,
+		ChannelID:   r.ChannelID,
+		ChannelName: r.ChannelName,
+		RepoAbsPath: r.RepoAbsPath,
+	}, nil
 }
 
 func (s *Store) MessageByID(id int64) (Message, error) {
-	row := s.db.QueryRow(`SELECT m.id, m.thread_id, m.seq, m.parent_id, p.seq, m.name, m.author_type, m.role, m.content, COALESCE(m.created_at,'')
-		FROM messages m LEFT JOIN messages p ON p.id = m.parent_id WHERE m.id = ?`, id)
-	var m Message
-	err := row.Scan(&m.ID, &m.ThreadID, &m.Seq, &m.ParentID, &m.ParentSeq, &m.Name, &m.AuthorType, &m.Role, &m.Content, &m.CreatedAt)
+	r, err := s.q.GetMessageByIDWithParent(context.Background(), db.GetMessageByIDWithParentParams{ID: id})
 	if errors.Is(err, sql.ErrNoRows) {
 		return Message{}, ErrNotFound
 	}
-	return m, err
+	if err != nil {
+		return Message{}, err
+	}
+	return messageFromDetailRow(r), nil
 }
 
 func (s *Store) ReconcileSessions(finishedAt string) (int, error) {
