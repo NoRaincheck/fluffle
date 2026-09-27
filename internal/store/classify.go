@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"fmt"
 
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
@@ -17,11 +18,11 @@ func classify(err error) error {
 	}
 	switch se.Code() {
 	case sqlite3.SQLITE_CONSTRAINT_UNIQUE:
-		return ErrConflict
+		return fmt.Errorf("%w: %s", ErrConflict, se.Error())
 	case sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY:
-		return ErrNotFound
+		return fmt.Errorf("%w: %s", ErrNotFound, se.Error())
 	case sqlite3.SQLITE_CONSTRAINT_CHECK, sqlite3.SQLITE_CONSTRAINT_NOTNULL:
-		return ErrInvalid
+		return fmt.Errorf("%w: %s", ErrInvalid, se.Error())
 	}
 	return err
 }
