@@ -2,7 +2,7 @@
 
 A local-first, TUI-first communication hub for developer teams and local AI agents.
 
-**Glossary:** Channel = repo-anchored or `--orphaned` room · Thread = titled conversation in a channel · Message = chat line in a thread (reply via `--reply-to` or `--reply-to-seq`) · Reaction = emoji attached to a message · Inbox = unified view of recent messages across all channels · **Agent session** = one local agent run started by an `@mention`, with its prompt, output, and result. Two unrelated things were once both called a *session*, so: an **agent session** is a subprocess run recorded in the `agent_sessions` table and is never part of an export, whereas the portable thing an export carries is the **thread** itself. Only the `session.jsonl` filename in the examples below still uses the older name.
+**Glossary:** Channel = repo-anchored or `--orphaned` room · Thread = titled conversation in a channel · Message = chat line in a thread (reply via `--reply-to` or `--reply-to-seq`) · Reaction = emoji attached to a message · Row = one line of the TUI's cross-channel feed, where one row is a message, a thread, or a channel depending on the granularity the daemon answers · **Agent session** = one local agent run started by an `@mention`, with its prompt, output, and result. Two unrelated things were once both called a *session*, so: an **agent session** is a subprocess run recorded in the `agent_sessions` table and is never part of an export, whereas the portable thing an export carries is the **thread** itself. Only the `session.jsonl` filename in the examples below still uses the older name.
 
 ```bash
 go build ./cmd/flf
@@ -19,7 +19,7 @@ go build ./cmd/flf
 # agent read — portable JSONL with thread-local sequences + reactions
 ./flf agent read --thread 1 --last 5 --json   # last 5 messages as JSONL
 ./flf agent read --thread 1 --after-seq 3     # cursor-based reads
-./flf agent append --thread 1 --file response.jsonl --agent-id my-agent
+./flf agent append --thread 1 --file response.jsonl --agent-id my.agent
 
 # repo-anchored channel/thread
 ./flf channel create --name refactor --repo . --json
@@ -37,22 +37,26 @@ printf '[[agents]]\nname="reviewer"\ncommand="claude"\nargs=["-p","{prompt}"]\n'
 ./flf thread export --thread 1 --format jsonl > session.jsonl
 ./flf thread import --file session.jsonl --channel refactor
 
-# inbox — unified view of recent messages across channels
+# inbox — the cross-channel feed; one row is a message, a thread, or a channel
+# depending on the granularity the daemon answers (this asks for messages)
 ./flf inbox --limit 50 --json
 
 # init — prepare a repo for fluffle
 ./flf init --repo .
 
-# TUI — lands on a unified inbox of recent messages across all channels
+# TUI — a feed of rows beside the thread under the cursor; g cycles what one row
+# is (message → thread → channel), and the list takes the whole terminal below
+# 110 columns, where Enter still reads the thread
 ./flf tui
-#  Inbox:   ↑↓/j/k nav · Enter open · r reply · n new thread · C new channel · v sort · f filter · l layout · q quit
-#  Detail:  ↑↓/j/k scroll · g/G top/bottom · r reply · e react · n new thread · Esc back
-#  Channels: ↑↓/j/k nav · Enter open · n new thread · C new channel · q quit
+#  List:    ↑↓/j/k nav · g group · v sort · Enter read · Esc back · r reply · q quit
+#  Compose: type · Enter send · Esc cancel
+#  Needs 71x24. Reply appends to the thread; creating, reacting, and reading an
+#  agent run are CLI commands.
 
 ./flf daemon stop
 ```
 
-Docs: `VISION.md` for scope and the `kata`/`roborev` division of labor · `docs/backend.md` for the daemon, API, and CLI reference · `docs/agent-sessions.md` for why local agent runs are shaped the way they are, and what is out of scope · `docs/tui-architecture.md` and `docs/tui-keybindings.md` for the TUI.
+Docs: `VISION.md` for scope and the `kata`/`roborev` division of labor · `docs/backend.md` for the daemon, API, and CLI reference · `docs/agent-sessions.md` for why local agent runs are shaped the way they are, and what is out of scope · `docs/tui-architecture.md`, `docs/tui-keybindings.md`, and `docs/tui-extending.md` for the TUI.
 
 ## Development
 
@@ -75,6 +79,6 @@ A query change is the same three beats against the matching file in `internal/st
 
 Neither `just test` nor `just diff` starts the daemon, so before calling a change done, build the binary and smoke-test it against a scratch database file — [Verifying a change](docs/backend.md#verifying-a-change) has the recipe and the JSON spot-checks, which matter because a wire-contract regression is invisible to the unit suite.
 
-Manual QA: `./scripts/seed-tui.sh` builds a scratch install under `.tui-seed/`, seeds orphan and repo-anchored channels, threads, replies, reactions, and agent sessions across a 14-day timestamp spread, fires one live `@mention`, verifies the result, and execs the TUI. No environment setup, no daemon to start by hand. `--no-tui` stops after seeding; `SEED_AGENT_SLEEP` tunes how long the live agent runs.
+Manual QA: `./scripts/seed-tui.sh` builds a scratch install under `.tui-seed/`, seeds orphan and repo-anchored channels, threads, replies, and reactions across a 14-day timestamp spread, stages one long agent transcript, fires one live `@mention`, verifies that every channel and thread it declared was actually created, and execs the TUI. No environment setup, no daemon to start by hand. `--no-tui` stops after seeding; `SEED_AGENT_SLEEP` tunes how long the live agent runs.
 
-Thread data lives in `scripts/fixtures/*.jsonl`, where `@T-14d` style tokens are resolved against the clock at seed time. Agent sessions are staged by `scripts/seed-sessions.go` through `internal/store`, which needs the daemon stopped — the store has no WAL and no `busy_timeout`. `queued` and `running` sessions are deliberately never staged: the daemon reconciles both to `canceled` on startup, so only the live `@mention` can show those states.
+Thread data lives in `scripts/fixtures/*.jsonl`, where `@T-14d` style tokens are resolved against the clock at seed time. Every channel name, thread title, and author name in them is a legal name or slug — at most 12 bytes, ASCII, leading letter — because the store refuses anything else and the script runs under `set -e`: a fixture the rules reject dies the whole seed on the first one. The two fixtures that existed only to show an agent session's *state* are gone, because the rewrite left the TUI with no session pane and no key that opens one; their nearest representable equivalents are a thread with no agent activity at all, as the negative control for the tick, and a wide thread from several authors, which is what the row columns and the thread pane can still show. One agent session is still staged, by `scripts/seed-sessions.go` through `internal/store`, which needs the daemon stopped — the store has no WAL and no `busy_timeout`. It is not for the TUI, which cannot show it; it is for `flf agent session --id N`.

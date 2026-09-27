@@ -380,23 +380,30 @@ func NewHandlerWithDeps(s *store.Store, d Deps) http.Handler {
 	mux.HandleFunc("/v1/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	})
-	mux.HandleFunc("/v1/inbox", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/rows", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeErr(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
 			return
 		}
-		limit := 100
+		limit := 200
 		if v := r.URL.Query().Get("limit"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil {
 				limit = n
 			}
 		}
-		msgs, err := s.ListInbox(r.Context(), limit)
+		rows, err := s.ListRows(r.Context(), r.URL.Query().Get("g"), limit)
 		if err != nil {
-			writeErr(w, 500, "DAEMON_ERROR", err.Error())
+			if errors.Is(err, store.ErrInvalid) {
+				writeErr(w, http.StatusBadRequest, "BAD_ARGS", err.Error())
+				return
+			}
+			writeErr(w, http.StatusInternalServerError, "DAEMON_ERROR", err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, msgs)
+		if rows == nil {
+			rows = []store.Row{}
+		}
+		writeJSON(w, http.StatusOK, rows)
 	})
 	mux.HandleFunc("/v1/channels", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {

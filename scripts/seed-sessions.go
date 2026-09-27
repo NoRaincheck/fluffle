@@ -15,8 +15,7 @@ import (
 
 const (
 	agentsChannel = "agents"
-	statesThread  = "session states"
-	verboseThread = "verbose run"
+	verboseThread = "verbose-run"
 )
 
 func verboseEvents() []devseed.Event {
@@ -35,72 +34,14 @@ func verboseEvents() []devseed.Event {
 	)
 }
 
+// One staged session, not seven. The rewrite left the TUI with no session pane
+// and no key that opens one, so a thread whose only purpose was to show failed
+// and canceled and succeeded side by side has nothing to show: the states were
+// never drawn, they were columns in a view that no longer exists. A long
+// transcript is still worth staging, because `flf agent session --id N` reads
+// it, and because it is the one run the TUI cannot show but a person can.
 func specs() []devseed.SessionSpec {
 	return []devseed.SessionSpec{
-		{
-			Channel: agentsChannel, Orphaned: true, Thread: statesThread,
-			TriggerSeq: 1, Agent: "replacer", Status: store.SessionFailed,
-			ReplyMode: "auto", Command: "replacer run",
-			ExitCode: 2, Error: "runner exited 2: context deadline exceeded",
-			Duration: 8 * time.Minute,
-			Events: []devseed.Event{
-				{Type: store.SessionEventPrompt, Content: "the inbox wraps on bytes, not display width"},
-				{Type: store.SessionEventStdout, Content: "reading internal/tui/inbox_layout.go"},
-				{Type: store.SessionEventStderr, Content: "panic: negative wrap index"},
-				{Type: store.SessionEventError, Content: "runner exited 2: context deadline exceeded"},
-			},
-		},
-		{
-			Channel: agentsChannel, Orphaned: true, Thread: statesThread,
-			TriggerSeq: 2, Agent: "replacer", Status: store.SessionCanceled,
-			ReplyMode: "auto", Command: "replacer run", Duration: 30 * time.Second,
-			Events: []devseed.Event{
-				{Type: store.SessionEventPrompt, Content: "the filter matches on channel but not on thread"},
-				{Type: store.SessionEventStdout, Content: "canceled by a human"},
-			},
-		},
-		{
-			Channel: agentsChannel, Orphaned: true, Thread: statesThread,
-			TriggerSeq: 2, Agent: "summarizer", Status: store.SessionSucceeded,
-			ReplyMode: "auto", Command: "summarizer run", Duration: 20 * time.Second,
-			Events: []devseed.Event{
-				{Type: store.SessionEventPrompt, Content: "summarize the filter bug"},
-				{Type: store.SessionEventStdout, Content: "filter matches channel, then channel/thread"},
-				{Type: store.SessionEventExit, Content: "exit 0"},
-			},
-		},
-		{
-			Channel: agentsChannel, Orphaned: true, Thread: statesThread,
-			TriggerSeq: 3, Agent: "replacer", Status: store.SessionSucceeded,
-			ReplyMode: "auto", Command: "replacer run", Duration: 3 * time.Minute,
-			ReplyToSeq: 6,
-			Events: []devseed.Event{
-				{Type: store.SessionEventPrompt, Content: "run the full suite on main"},
-				{Type: store.SessionEventStdout, Content: "ok  internal/tui"},
-				{Type: store.SessionEventStdout, Content: "ok  internal/apiserver"},
-				{Type: store.SessionEventExit, Content: "exit 0"},
-			},
-		},
-		{
-			Channel: agentsChannel, Orphaned: true, Thread: statesThread,
-			TriggerSeq: 4, Agent: "summarizer", Status: store.SessionSucceeded,
-			ReplyMode: "stdout", Command: "summarizer run", Duration: 45 * time.Second,
-			Events: []devseed.Event{
-				{Type: store.SessionEventPrompt, Content: "what is the state of the wrap bug"},
-				{Type: store.SessionEventStdout, Content: "fixed in 9717ecd"},
-				{Type: store.SessionEventExit, Content: "exit 0"},
-			},
-		},
-		{
-			Channel: agentsChannel, Orphaned: true, Thread: statesThread,
-			TriggerSeq: 5, Agent: "replacer", Status: store.SessionSucceeded,
-			ReplyMode: "cli", Command: "replacer run", Duration: 15 * time.Second,
-			Events: []devseed.Event{
-				{Type: store.SessionEventPrompt, Content: "cancel this one, it is stale"},
-				{Type: store.SessionEventStdout, Content: "nothing to do"},
-				{Type: store.SessionEventExit, Content: "exit 0"},
-			},
-		},
 		{
 			Channel: agentsChannel, Orphaned: true, Thread: verboseThread,
 			TriggerSeq: 1, Agent: "replacer", Status: store.SessionSucceeded,

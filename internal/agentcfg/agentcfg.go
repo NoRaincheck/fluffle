@@ -5,7 +5,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -13,6 +12,8 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/NoRaincheck/fluffle/internal/names"
 )
 
 const (
@@ -21,8 +22,6 @@ const (
 )
 
 const maxTimeoutSecs = 9223372036
-
-var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 
 type Agent struct {
 	Name         string
@@ -121,8 +120,8 @@ func Parse(data []byte, source string) ([]Entry, error) {
 
 func validate(a Agent, source string, i int) error {
 	where := fmt.Sprintf("%s: agents[%d]", source, i)
-	if !nameRe.MatchString(a.Name) {
-		return fmt.Errorf("%s: invalid name %q: must match %s", where, a.Name, nameRe.String())
+	if err := names.Name(a.Name); err != nil {
+		return fmt.Errorf("%s: invalid name: %v", where, err)
 	}
 	if strings.TrimSpace(a.Command) == "" {
 		return fmt.Errorf("%s: command required", where)

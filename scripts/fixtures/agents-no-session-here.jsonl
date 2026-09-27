@@ -1,2 +1,0 @@
-{"seq":1,"role":"user","name":"grace","content":"This thread deliberately has no agent session at all, so pressing s here must say no session on this message.","timestamp":"@T-5h"}
-{"seq":2,"parent_seq":1,"role":"user","name":"henry","content":"The pane must keep showing whatever it already had rather than blanking.","timestamp":"@T-4h"}

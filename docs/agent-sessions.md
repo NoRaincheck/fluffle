@@ -4,9 +4,9 @@ Why fluffle runs local agents the way it does, and what was deliberately left ou
 
 This is the *rationale* document. For the reference — config format, resolution
 order, endpoints, wire format, prompt assembly, reply modes — see
-[backend.md](backend.md#agent-sessions). For the preview pane and its bounded
-poll see [tui-architecture.md](tui-architecture.md). For key bindings see
-[tui-keybindings.md](tui-keybindings.md).
+[backend.md](backend.md#agent-sessions). For how the TUI shows a reply, and its
+2-second refresh, see [tui-architecture.md](tui-architecture.md). For key bindings
+see [tui-keybindings.md](tui-keybindings.md).
 
 ## What a session is
 
@@ -26,6 +26,13 @@ Three properties follow, and they are the reason the feature is shaped this way:
 - One mention produces one run. A one-shot subprocess has no state to resume, and
   the thread history already contains the previous reply, so a follow-up mention
   needs nothing carried across runs.
+
+**What the TUI shows of a session is its reply.** The reply is an ordinary
+agent-authored message in the thread, and the TUI re-reads the selected thread
+every two seconds, so it appears without a keypress. The run itself is not on
+screen: no pane, no key, and no session state in the model. Read a transcript
+with `flf agent session --id N`, or list a thread's runs with
+`GET /v1/threads/:id/sessions`.
 
 ## Prior art
 
@@ -47,7 +54,9 @@ A local agent runner with a TUI split into a job queue and a selected document.
 - **A per-agent command override**, so a profile can point at a non-default
   binary path.
 - **A split screen: a list on one side, the selected document on the other.**
-  fluffle reuses the existing `p` preview pane rather than adding a screen.
+  fluffle's TUI is split the same way — a feed of rows beside the thread under
+  the cursor — and the run itself is not one of the two panes. A session is
+  read with `flf agent session --id N`.
 - **One document per job**, so a run is addressable and auditable.
 
 **Rejected**
@@ -107,7 +116,7 @@ agent profile is fluffle's own configuration.
 | Config location | `<repo>/.flf.toml` then `~/.fluffle/config.toml` | Repo-anchored by default, like every other fluffle entity. |
 | Session lifetime | One new session per mention | A one-shot subprocess has no state to resume, and the thread history is the context, so a follow-up mention already sees the prior reply. |
 | Trigger detection | Daemon, leading mentions only | One code path for the TUI and the CLI. Leading-only keeps prose like `don't @reviewer do that` inert. |
-| Preview surface | The existing `p` pane, in session mode | No new screen, and it matches roborev's queue + document split. |
+| TUI surface | The reply, in the thread | The reply is an ordinary message in the thread the TUI already shows, and the TUI re-reads that thread every two seconds, so a run's output appears without a keypress. The transcript is `flf agent session --id N`, not a pane. |
 
 Three of these were open questions resolved by default rather than by discussion.
 
@@ -162,16 +171,26 @@ content, allowing whitespace between them, and returns each distinct name once.
 | `@reviewer, can you look` | `[reviewer]` | `, can you look` |
 
 The last row is intended. The mention is leading and the comma is the
-separator. Requiring whitespace-or-end after the name would also accept it, and
-would additionally reject `@reviewer-x`, which the name charset already allows.
-**The name charset, not the delimiter, defines the token.**
+separator. **The name charset, not the delimiter, defines the token.** `-` is
+not a name byte at all but a continuation byte, so `@reviewer-x` is not a
+mention of `reviewer` that runs into a dash: the token is not a name, and it
+yields nothing, exactly as `@reviewer2` does.
 
-The parse charset and the config charset are deliberately different widths:
+The mention charset and the config charset are the same charset, and
+`internal/names` is the only place either is written down:
 
-- `mentions.Parse` accepts `[A-Za-z0-9]` then `[A-Za-z0-9_-]`, because a mention
-  is a lexical scan of arbitrary text.
-- `agentcfg` requires a profile name to match `^[a-z0-9][a-z0-9_-]*$`, lowercase
-  and case-sensitive.
+- A name is `^[A-Za-z](?:[A-Za-z.]*[A-Za-z])?$` and at most 12 bytes: ASCII
+  letters and dots, starting and ending with a letter. An agent profile is named
+  `ci.bot`, never `ci-bot`, `ci_bot`, or `ci2`.
+- `mentions.Parse` scans a mention token with that charset, and a token the
+  charset would have continued is not a name at all: `@alice2`, `@alice-bot`,
+  and `@alice_bot` parse to no name rather than to `alice`, because a mention is
+  a lexical scan of arbitrary text and `alice2` is far more likely to be prose
+  than an agent called `alice`. A mention of a 13-byte token is not a name
+  either.
+- A name may not end with a dot: `mentions` trims trailing dots off a token, so
+  an agent named `ci.` could never be mentioned and would silently never
+  trigger.
 
 So `@Reviewer hi` parses as the name `Reviewer` and then resolves to nothing —
 inert text, no session, no error. That is the same outcome as any unresolvable
@@ -189,8 +208,9 @@ Three behaviours look like bugs and are not. Each has a test that says so.
 `@token` that matches no configured agent is ordinary message text — no session
 row, no subprocess, no error. A name that *does* resolve but whose `command` is
 missing or whose `timeout_secs` is invalid is a session that starts and then
-fails visibly, with the error in the session events and in the TUI preview.
-Configuration errors must not be silent; unknown names must not be errors.
+fails visibly, with the error in the session events — which is where
+`flf agent session --id N` reads it from. Configuration errors must not be
+silent; unknown names must not be errors.
 
 **`auto` waits two seconds before concluding the agent stayed silent.** The
 agent's last `flf message send` can still be in flight when its process exits.
@@ -233,7 +253,7 @@ while the real code leaked a process group or lost the exit code.
 | `internal/store` | Session insert; the `UNIQUE(trigger_message_id, agent_name)` violation returns `ErrConflict`; event append assigns monotonic `seq`; duplicate `seq` rejected; status transition validation; listing by thread in creation order; `ListSession` with events. |
 | `internal/session` | Lifecycle and status transitions; the concurrency cap with `MaxConcurrentSessions+3` sessions; prompt assembly for all three reply modes; streaming coalescing; every reply-resolution row including the late self-post grace period; a cancel during the grace period; a persistent store error while posting a reply. |
 | `internal/apiserver` | A leading resolvable mention creates a session; a non-leading mention does not; an unresolvable name does not; an append carrying `X-Fluffle-Agent` never creates a session; a session event batch scans every message event; the shapes of the three GET routes; cancel is 403 for an agent and 409 for a terminal session. |
-| `internal/tui` | `s` flips the pane; `s` on a message without a session falls back to the thread; a running session renders a status line instead of a duration; the tick stops at all-terminal; the tick re-arms across hide/show, a detail round trip, a resize, and a thread switch; a stale or superseded tick chain is discarded; a hidden pane issues no fetches; the pane follows the cursor; one thread's session never renders in another's. |
+| `internal/tui` | The TUI holds no session state, so this row is what replaced the pane's tests: a tick re-reads the selected thread and shows an appended reply with no keypress, issues exactly one rows request and one thread request per tick, keeps the cursor on the same row across it, and drops a stale response. A run's transcript is the CLI's, and `flf agent session` is covered there. |
 | `cmd/flf` (e2e) | The full loop against a fake agent script: `flf message send --text "@probe hi"` → poll → assert the reply landed → `flf agent session --id 1` returns the events. This is the test that proves the feature works end to end rather than in each layer. |
 
 ## Out of scope

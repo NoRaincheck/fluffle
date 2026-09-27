@@ -131,11 +131,13 @@ Two rules define the layer, and both exist to keep the wire contract checkable:
 
 ### The wire contract
 
-`store.Channel`, `store.Thread`, `store.Message`, `store.Reaction`, `store.Session`, `store.SessionEvent`, and `store.ThreadContext` are marshaled straight to JSON by `apiserver` and unmarshaled straight by `tui` and `internal/client`. They carry almost no JSON tags — only `json:"-"` on `Message.ParentSeq` and three tags on `InboxMessage` — so **the Go field names are the API field names.** Promoting a generated `db` model into a wire position would silently become the API, which is why generated types are never marshaled and why `emit_json_tags: false` is load-bearing: set it `true` and sqlc emits `json:"RepoHeadSha"` against a field named `RepoHeadSHA`.
+`store.Channel`, `store.Thread`, `store.Message`, `store.Reaction`, `store.Row`, `store.Session`, `store.SessionEvent`, and `store.ThreadContext` are marshaled straight to JSON by `apiserver` and unmarshaled straight by `tui` and `internal/client`. They carry almost no JSON tags — the only one in the package is `json:"-"` on `Message.ParentSeq` — so **the Go field names are the API field names.** Promoting a generated `db` model into a wire position would silently become the API, which is why generated types are never marshaled and why `emit_json_tags: false` is load-bearing: set it `true` and sqlc emits `json:"RepoHeadSha"` against a field named `RepoHeadSHA`.
 
 Nullable columns keep their `COALESCE(col, '')` wrappers in the read queries, which is what keeps `Channel.RepoAbsPath` and friends pointer-free. There are exactly two read-side exceptions and both are deliberate: `messages.parent_id` and the `p.seq AS parent_seq` projection are `sql.NullInt64` before and after the move onto sqlc. Coalescing either would turn "no parent" into a fake `0` and make the TUI's `.Valid` check read a real parent as absent.
 
 `ParentSeq` is not a column. It is a projection — `LEFT JOIN messages p ON p.id = m.parent_id` selecting `p.seq` — so it stays an explicit column in the query and a hand-written field on `store.Message`.
+
+**A correlated subquery in a read query needs `CAST(... AS TEXT)`.** sqlc's SQLite parser infers `interface{}` for a bare `COALESCE` over a correlated subquery, so `rows.sql` wraps the `name` and `content` columns of the thread and channel feeds in `CAST(COALESCE((SELECT …), '') AS TEXT)`. Without the cast those fields generate as `any` and the store's mapper has to type-assert. The wrapper is load-bearing, not decoration, and the symptom is a type error at the mapper rather than at generation — check for the cast first when a row field comes out `any`.
 
 ### Nil versus empty slices
 
@@ -143,11 +145,11 @@ The convention is per method and deliberately not symmetric:
 
 | Returns `nil` when empty | Returns non-nil `[]T{}` |
 |---|---|
-| `ListChannels`, `ListThreads`, `ListMessages`, `ListMessagesAfter`, `ListReactions` | `ListInbox`, `ListSessions`, `ListSessionEvents` |
+| `ListChannels`, `ListThreads`, `ListMessages`, `ListMessagesAfter`, `ListReactions` | `ListRows`, `ListSessions`, `ListSessionEvents` |
 
 `sqlc` runs with `emit_empty_slices: false`, so a `:many` query hands back `nil`; the three methods on the right seed an empty slice explicitly.
 
-Two of the eight are visible on the wire. The handlers for channels, threads, messages, reactions, and session events normalize `nil` to `[]` before writing, so for those five the store-side choice is an internal detail. `GET /v1/inbox` and the per-thread session list do not normalize — both hand the slice straight to `writeJSON` — so a `nil` from `ListInbox` or `ListSessions` would render an empty result as `null` rather than `[]`. Do not "fix" a `nil`-returning method into returning an empty slice either: that is still a behavior change, just an invisible one.
+One of the eight is visible on the wire. The handlers for channels, threads, messages, reactions, rows, and session events normalize `nil` to `[]` before writing, so for those six the store-side choice is an internal detail. The per-thread session list does not normalize — it hands the slice straight to `writeJSON` — so a `nil` from `ListSessions` would render an empty result as `null` rather than `[]`. Do not "fix" a `nil`-returning method into returning an empty slice either: that is still a behavior change, just an invisible one.
 
 ### Error classification
 
@@ -296,7 +298,7 @@ Agent definitions are TOML, not JSON. Two files are read: `~/.fluffle/config.tom
 
 ```toml
 [[agents]]
-name = "reviewer"           # required, ^[a-z0-9][a-z0-9_-]*$
+name = "reviewer"           # required, ^[A-Za-z](?:[A-Za-z.]*[A-Za-z])?$, <= 12 bytes
 description = "reviews diffs"
 command = "claude"          # required
 args = ["-p", "{prompt}"]  # optional
@@ -306,7 +308,7 @@ env = { ANTHROPIC_API_KEY = "…" }
 system_prompt = "You are a meticulous reviewer."
 ```
 
-`name` and `command` are required — a name must match `^[a-z0-9][a-z0-9_-]*$` and a command must be non-blank. `reply` defaults to `auto` and must be one of the three values when set; `timeout_secs` defaults to 300 and must be in `1..9223372036`. The upper bound is `math.MaxInt64` nanoseconds expressed in seconds: a larger value wraps `time.Duration` negative, and the run would then fail instantly with an unexplained `agent timed out` instead of reporting a config error. An unknown key anywhere in the file is a hard error naming every unrecognized key, not a warning — a typo in `timeouts_secs` must not silently fall back to the default. Parsed files are cached by path and re-read when the file's mtime changes.
+`name` and `command` are required — a name must match `^[A-Za-z](?:[A-Za-z.]*[A-Za-z])?$` and be at most 12 bytes, and a command must be non-blank. The rule lives in `internal/names` and is the only definition of a name in the codebase; an agent profile is `ci.bot`, never `ci-bot`. `reply` defaults to `auto` and must be one of the three values when set; `timeout_secs` defaults to 300 and must be in `1..9223372036`. The upper bound is `math.MaxInt64` nanoseconds expressed in seconds: a larger value wraps `time.Duration` negative, and the run would then fail instantly with an unexplained `agent timed out` instead of reporting a config error. An unknown key anywhere in the file is a hard error naming every unrecognized key, not a warning — a typo in `timeouts_secs` must not silently fall back to the default. Parsed files are cached by path and re-read when the file's mtime changes.
 
 `~/.fluffle/daemon.json` stays JSON; only agent definitions are TOML.
 
@@ -320,7 +322,7 @@ A mention of a name that does not resolve is inert: no session row, no subproces
 
 Sessions are created only from a **human** message append — `POST /v1/threads/:id/messages` or `POST /v1/threads/:id/events` without `X-Fluffle-Agent`. A request carrying that header is a human-only gate: an agent cannot start a session, and therefore an agent cannot start an agent. Scanning happens after the message is committed, so a session's prompt always includes its own trigger message. A mention that is not leading (`text @reviewer`) does not trigger.
 
-`mentions.Parse` accepts a run of `@name` tokens at the very start of the content, allowing whitespace between them, and returns each distinct name once. A name is `[A-Za-z0-9]` plus `_`/`-` after the first byte. It also returns the text following the mention run, but the trigger discards that value: the prompt quotes the trigger message in full, mentions and all.
+`mentions.Parse` accepts a run of `@name` tokens at the very start of the content, allowing whitespace between them, and returns each distinct name once. A name is that same charset, and a token it would have continued is not a name at all: `@alice2` and `@alice-bot` resolve to nothing rather than to `alice`. It also returns the text following the mention run, but the trigger discards that value: the prompt quotes the trigger message in full, mentions and all.
 
 `UNIQUE(trigger_message_id, agent_name)` makes a repeated trigger on the same message a no-op rather than a second run.
 
@@ -384,17 +386,21 @@ Returns `{"ok":true}` with status 200.
 
 **`GET /v1/channels?repo=&include-orphaned=1`** — List channels. `repo` filters by canonical path. `include-orphaned=1` includes orphaned channels. Returns `[]Channel`.
 
-**`POST /v1/channels`** — Create channel. Body keys are matched case-insensitively against the field names the daemon decodes: `Name`, `RepoAbsPath`, `RepoRemote`, `RepoHeadSHA`, `RepoHeadBranch`, `Orphaned`. Agents get 403. An invalid payload (blank name, missing repo path, orphaned channel with a repo path) is `400 BAD_JSONL`; a duplicate channel is `409 CHANNEL_EXISTS`; a storage failure is `500 DAEMON_ERROR`. Returns `{"id":1}`.
+**`POST /v1/channels`** — Create channel. Body keys are matched case-insensitively against the field names the daemon decodes: `Name`, `RepoAbsPath`, `RepoRemote`, `RepoHeadSHA`, `RepoHeadBranch`, `Orphaned`. Agents get 403. An invalid payload (a name that is not a legal slug, missing repo path, orphaned channel with a repo path) is `400 BAD_JSONL`; a duplicate channel is `409 CHANNEL_EXISTS`; a storage failure is `500 DAEMON_ERROR`. Returns `{"id":1}`.
 
 ### Threads
 
 **`GET /v1/channels/:id/threads`** — List threads in a channel. Returns `[]Thread`.
 
-**`POST /v1/channels/:id/threads`** — Create thread. Body: `{"title":"..."}`. Agents get 403. A blank title is `400 BAD_JSONL`, an unknown channel is `404 CHANNEL_NOT_FOUND`, and a storage failure is `500 DAEMON_ERROR`. Returns `{"id":1}`.
+**`POST /v1/channels/:id/threads`** — Create thread. Body: `{"title":"..."}`. Agents get 403. A title that is not a legal slug is `400 BAD_JSONL`, an unknown channel is `404 CHANNEL_NOT_FOUND`, and a storage failure is `500 DAEMON_ERROR`. Returns `{"id":1}`.
 
-### Inbox
+### Rows
 
-**`GET /v1/inbox?limit=N`** — List recent messages across channels and threads. The default limit is 100 and the server caps it at 200. Results are ordered by message recency.
+**`GET /v1/rows?g=<message|thread|channel>&limit=N`** — The cross-channel feed at one granularity, newest first, as `[]Row`. One row is a message, a thread, or a channel: `ID` is that entity's id, `ThreadID` is 0 at `g=channel`, `Content` is the whole representative message (at `g=thread`, the original post), and `Count` is the group's size, 1 at `g=message`. `limit` defaults to 200 and the store caps it at 500; a non-`GET` method is `405 METHOD_NOT_ALLOWED`. An unknown or missing `g` is `400 BAD_ARGS`, and a storage failure is `500 DAEMON_ERROR`. Grouping, representative selection, and the counts are the query's, so the client holds no rule about which message represents a group. An empty result is `[]`, never `null`.
+
+This replaces the flat inbox route, which no longer exists, and the message-joined row type it returned: a row is no longer a message record, so it carries no thread-local `seq`. `flf message send --reply-to-seq` is unaffected — `seq` still comes from `GET /v1/threads/:id/messages`.
+
+**A group with no messages still appears.** A thread or channel with an empty history gets a row, ordered by its own `created_at`, with `Count` 0 and `Name` and `Content` empty strings. The feed is a list of what exists, not a list of what has been written to — a channel created seconds ago is a real channel and hiding it until its first message would make the feed's membership a function of its contents. The `COALESCE` fallbacks in `rows.sql` are what produce the row; a query that filtered on the subquery instead would drop it.
 
 ### Messages
 
@@ -492,7 +498,7 @@ Fetches the thread's messages and reactions through the daemon, projects them to
 
 ### `thread import`
 
-Reads and parses the complete JSONL file before starting daemon work. With `--channel` (and `--repo` or `--orphaned`), it resolves or creates that channel and creates a new thread titled `import <basename>`. With `--thread ID`, it appends the batch to that explicit existing thread without creating a channel or thread. In both modes it sends one `import=true` event batch. Source message sequences are remapped to the destination thread; `parent_seq` and `message_seq` are resolved through that map. The event batch is atomic.
+Reads and parses the complete JSONL file before starting daemon work. With `--channel` (and `--repo` or `--orphaned`), it resolves or creates that channel and creates a new thread titled `imp-` plus the first eight hex digits of the SHA-256 of the file path. That is always exactly 12 bytes and always a legal slug, so it is never truncated or rejected — the obvious alternative, the file's base name, is not a slug at all, since a title holds no dots, spaces, or underscores and is bounded at 12 bytes. Hashing the whole path rather than the base name keeps two files of the same name in different directories from colliding on one title. With `--thread ID`, it appends the batch to that explicit existing thread without creating a channel or thread. In both modes it sends one `import=true` event batch. Source message sequences are remapped to the destination thread; `parent_seq` and `message_seq` are resolved through that map. The event batch is atomic.
 
 Import is a **data operation only**: an `import=true` batch never starts an agent session, even when a human-authored line in the file opens with `@name`. The mention trigger is live-message behavior, so a shared `.jsonl` file cannot cause a subprocess to launch on the importing machine. To run an agent against an imported thread, post the request as a live message afterwards.
 
@@ -672,6 +678,8 @@ rm -rf /tmp/fluffle-verify && mkdir -p /tmp/fluffle-verify
 go build -o /tmp/fluffle-verify/flf ./cmd/flf
 /tmp/fluffle-verify/flf daemon --help
 ```
+
+**`go test ./...` on its own is not the gate.** `cmd/flf/e2e_test.go` carries the `e2e` build tag, so a bare `go test ./...` skips the whole daemon end-to-end suite and reports green. That gap hid six broken e2e tests across six commits while the gate stayed green. `justfile` therefore runs `go test -tags e2e ./...` as a fourth line, and the tag is not optional. `go tool sqlc diff` is deliberately *not* in the gate: it is a separate recipe, and folding it in would make every gate run depend on a code generator. If an e2e run is flaky, re-run it once and report both results rather than hiding the flake.
 
 Then spot-check the wire contract, since Go field names are the API and a regression here is invisible to the unit tests unless a test happens to assert it. Against a daemon running on a scratch database file:
 

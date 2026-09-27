@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
+	"strconv"
 
 	"github.com/NoRaincheck/fluffle/internal/client"
 	"github.com/NoRaincheck/fluffle/internal/store"
@@ -23,20 +23,12 @@ func NewAPIClient(base string) *apiClient {
 	return &apiClient{base: base, http: client.NewHTTPClient()}
 }
 
-func (c *apiClient) EnsureDaemon() error {
-	base, err := client.EnsureDaemon()
-	if err != nil {
-		return fmt.Errorf("DAEMON_DOWN: %w", err)
-	}
-	c.base = base
-	return nil
-}
-
-func (c *apiClient) ListChannels(ctx context.Context, repo, filter string) ([]store.Channel, error) {
-	url := c.base + "/v1/channels?include-orphaned=1"
-	if repo != "" {
-		url += "&repo=" + repo
-	}
+// get performs a GET and decodes a JSON array into T. A body of 4xx or 5xx
+// surfaces as the envelope's code and message, a null or undecodable body as
+// DAEMON_ERROR. A decodable array always yields a non-nil slice, so a caller
+// never has to handle nil; a daemon that would serialise null must normalise it
+// on its own side, where the empty result is produced.
+func get[T any](c *apiClient, ctx context.Context, url string) ([]T, error) {
 	resp, err := c.do(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("DAEMON_DOWN: %w", err)
@@ -45,144 +37,32 @@ func (c *apiClient) ListChannels(ctx context.Context, repo, filter string) ([]st
 	if resp.StatusCode >= 400 {
 		return nil, readAPIError(resp)
 	}
-	var channels []store.Channel
-	if err := decodeStrictJSON(resp.Body, &channels); err != nil {
+	var out []T
+	if err := decodeStrictJSON(resp.Body, &out); err != nil {
 		return nil, fmt.Errorf("DAEMON_ERROR: %w", err)
 	}
-	if channels == nil {
-		channels = []store.Channel{}
-	}
-	if filter != "" {
-		channels = filterChannels(channels, filter)
-	}
-	return channels, nil
+	return out, nil
 }
 
-func (c *apiClient) CreateChannel(ctx context.Context, name, repo, branch string, orphaned bool) (int64, error) {
-	body := map[string]any{"Name": name, "Orphaned": orphaned}
-	if !orphaned {
-		body["RepoAbsPath"] = repo
-		body["RepoHeadBranch"] = branch
+func (c *apiClient) ListRows(ctx context.Context, granularity string, limit int) ([]store.Row, error) {
+	if limit <= 0 {
+		limit = 200
 	}
-	return c.doJSON(ctx, c.base+"/v1/channels", http.MethodPost, body)
-}
-
-func (c *apiClient) ListThreads(ctx context.Context, channelID int64) ([]store.Thread, error) {
-	url := c.base + "/v1/channels/" + fmt.Sprintf("%d", channelID) + "/threads"
-	resp, err := c.do(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("DAEMON_DOWN: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return nil, readAPIError(resp)
-	}
-	var threads []store.Thread
-	if err := decodeStrictJSON(resp.Body, &threads); err != nil {
-		return nil, fmt.Errorf("DAEMON_ERROR: %w", err)
-	}
-	if threads == nil {
-		threads = []store.Thread{}
-	}
-	return threads, nil
-}
-
-func (c *apiClient) CreateThread(ctx context.Context, channelID int64, title string) (int64, error) {
-	return c.doJSON(ctx, c.base+"/v1/channels/"+fmt.Sprintf("%d", channelID)+"/threads", http.MethodPost, map[string]any{"Title": title})
+	url := fmt.Sprintf("%s/v1/rows?g=%s&limit=%d", c.base, granularity, limit)
+	return get[store.Row](c, ctx, url)
 }
 
 func (c *apiClient) ListMessages(ctx context.Context, threadID int64) ([]store.Message, error) {
-	url := c.base + "/v1/threads/" + fmt.Sprintf("%d", threadID) + "/messages"
-	resp, err := c.do(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("DAEMON_DOWN: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return nil, readAPIError(resp)
-	}
-	var msgs []store.Message
-	if err := decodeStrictJSON(resp.Body, &msgs); err != nil {
-		return nil, fmt.Errorf("DAEMON_ERROR: %w", err)
-	}
-	if msgs == nil {
-		msgs = []store.Message{}
-	}
-	return msgs, nil
+	url := c.base + "/v1/threads/" + strconv.FormatInt(threadID, 10) + "/messages"
+	return get[store.Message](c, ctx, url)
 }
 
-func (c *apiClient) ListSessions(ctx context.Context, threadID int64) ([]store.Session, error) {
-	url := c.base + "/v1/threads/" + fmt.Sprintf("%d", threadID) + "/sessions"
-	resp, err := c.do(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("DAEMON_DOWN: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return nil, readAPIError(resp)
-	}
-	var sessions []store.Session
-	if err := decodeStrictJSON(resp.Body, &sessions); err != nil {
-		return nil, fmt.Errorf("DAEMON_ERROR: %w", err)
-	}
-	if sessions == nil {
-		sessions = []store.Session{}
-	}
-	return sessions, nil
-}
-
-func (c *apiClient) GetSession(ctx context.Context, sessionID int64) (store.Session, []store.SessionEvent, error) {
-	url := c.base + "/v1/sessions/" + fmt.Sprintf("%d", sessionID)
-	resp, err := c.do(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return store.Session{}, nil, fmt.Errorf("DAEMON_DOWN: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return store.Session{}, nil, readAPIError(resp)
-	}
-	var payload struct {
-		Session store.Session        `json:"session"`
-		Events  []store.SessionEvent `json:"events"`
-	}
-	if err := decodeStrictJSON(resp.Body, &payload); err != nil {
-		return store.Session{}, nil, fmt.Errorf("DAEMON_ERROR: %w", err)
-	}
-	if payload.Session.ID <= 0 {
-		return store.Session{}, nil, fmt.Errorf("DAEMON_ERROR: session response without an id")
-	}
-	if payload.Events == nil {
-		payload.Events = []store.SessionEvent{}
-	}
-	return payload.Session, payload.Events, nil
-}
-
-func (c *apiClient) ListInbox(ctx context.Context, limit int) ([]store.InboxMessage, error) {
-	if limit <= 0 {
-		limit = 100
-	}
-	url := fmt.Sprintf("%s/v1/inbox?limit=%d", c.base, limit)
-	resp, err := c.do(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("DAEMON_DOWN: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return nil, readAPIError(resp)
-	}
-	var msgs []store.InboxMessage
-	if err := decodeStrictJSON(resp.Body, &msgs); err != nil {
-		return nil, fmt.Errorf("DAEMON_ERROR: %w", err)
-	}
-	if msgs == nil {
-		msgs = []store.InboxMessage{}
-	}
-	return msgs, nil
-}
-
-func (c *apiClient) SendMessage(ctx context.Context, threadID, parentID int64, text string) error {
-	body := map[string]any{"Name": "you", "Role": "user", "Content": text, "ParentID": parentID}
-	resp, err := c.do(ctx, http.MethodPost, c.base+"/v1/threads/"+fmt.Sprintf("%d", threadID)+"/messages", jsonBody(body))
+// SendReply appends to a thread. The TUI never sets parent_id: a reply is a
+// message in the thread, not a nested answer.
+func (c *apiClient) SendReply(ctx context.Context, threadID int64, text string) error {
+	body := map[string]any{"Name": "you", "Role": "user", "Content": text}
+	resp, err := c.do(ctx, http.MethodPost,
+		c.base+"/v1/threads/"+strconv.FormatInt(threadID, 10)+"/messages", jsonBody(body))
 	if err != nil {
 		return mutationTransportError(err)
 	}
@@ -198,28 +78,6 @@ func (c *apiClient) SendMessage(ctx context.Context, threadID, parentID int64, t
 	}
 	if ack.Seq <= 0 {
 		return fmt.Errorf("DELIVERY_UNKNOWN: message acknowledgement without an assigned sequence")
-	}
-	return nil
-}
-
-func (c *apiClient) AddReaction(ctx context.Context, messageID int64, emoji string) error {
-	body := map[string]any{"Emoji": emoji, "Name": "you"}
-	resp, err := c.do(ctx, http.MethodPost, c.base+"/v1/messages/"+fmt.Sprintf("%d", messageID)+"/reactions", jsonBody(body))
-	if err != nil {
-		return mutationTransportError(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return readAPIError(resp)
-	}
-	var ack struct {
-		OK *bool `json:"ok"`
-	}
-	if err := decodeStrictJSON(resp.Body, &ack); err != nil {
-		return mutationTransportError(err)
-	}
-	if ack.OK == nil || !*ack.OK {
-		return fmt.Errorf("DELIVERY_UNKNOWN: reaction response did not acknowledge the write")
 	}
 	return nil
 }
@@ -247,27 +105,6 @@ func mutationTransportError(err error) error {
 		return fmt.Errorf("DAEMON_DOWN: %w", err)
 	}
 	return fmt.Errorf("DELIVERY_UNKNOWN: %w", err)
-}
-
-func (c *apiClient) doJSON(ctx context.Context, url, method string, body any) (int64, error) {
-	resp, err := c.do(ctx, method, url, jsonBody(body))
-	if err != nil {
-		return 0, mutationTransportError(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return 0, readAPIError(resp)
-	}
-	var out struct {
-		ID int64 `json:"id"`
-	}
-	if err := decodeStrictJSON(resp.Body, &out); err != nil {
-		return 0, fmt.Errorf("DELIVERY_UNKNOWN: %w", err)
-	}
-	if out.ID <= 0 {
-		return 0, fmt.Errorf("DELIVERY_UNKNOWN: creation acknowledged without an id")
-	}
-	return out.ID, nil
 }
 
 func jsonBody(v any) *bytes.Reader {
@@ -303,19 +140,4 @@ func decodeStrictJSON(r io.Reader, out any) error {
 		return errors.New("null JSON response")
 	}
 	return json.Unmarshal(raw, out)
-}
-
-func filterChannels(channels []store.Channel, filter string) []store.Channel {
-	if filter == "" {
-		return channels
-	}
-	filter = strings.ToLower(filter)
-	out := make([]store.Channel, 0, len(channels))
-	for _, c := range channels {
-		if strings.Contains(strings.ToLower(c.RepoAbsPath), filter) ||
-			strings.Contains(strings.ToLower(c.Name), filter) {
-			out = append(out, c)
-		}
-	}
-	return out
 }

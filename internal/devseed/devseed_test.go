@@ -27,7 +27,7 @@ func fixture(t *testing.T) *store.Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	thID, err := s.CreateThread(context.Background(), chID, "session states")
+	thID, err := s.CreateThread(context.Background(), chID, "sess-states")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func baseSpec(status string) SessionSpec {
 	return SessionSpec{
 		Channel:    "agents",
 		Orphaned:   true,
-		Thread:     "session states",
+		Thread:     "sess-states",
 		TriggerSeq: triggerSeq,
 		Agent:      "summarizer",
 		Status:     status,
@@ -66,7 +66,7 @@ func TestStageEveryStatus(t *testing.T) {
 	specs := make([]SessionSpec, len(statuses))
 	for i, status := range statuses {
 		specs[i] = baseSpec(status)
-		specs[i].Agent = "agent-" + status
+		specs[i].Agent = "a." + status
 	}
 	ids, err := Stage(s, specs)
 	if err != nil {
@@ -86,8 +86,8 @@ func TestStageEveryStatus(t *testing.T) {
 		if got[i].Status != want {
 			t.Errorf("session %d status = %q, want %q", got[i].ID, got[i].Status, want)
 		}
-		if got[i].AgentName != "agent-"+want {
-			t.Errorf("session %d agent = %q, want %q", got[i].ID, got[i].AgentName, "agent-"+want)
+		if got[i].AgentName != "a."+want {
+			t.Errorf("session %d agent = %q, want %q", got[i].ID, got[i].AgentName, "a."+want)
 		}
 		if got[i].ReplyMode != "auto" {
 			t.Errorf("session %d reply mode = %q", got[i].ID, got[i].ReplyMode)
@@ -406,7 +406,7 @@ func threadIDOf(t *testing.T, s *store.Store) int64 {
 			t.Fatal(err)
 		}
 		for _, th := range threads {
-			if th.Title == "session states" {
+			if th.Title == "sess-states" {
 				return th.ID
 			}
 		}

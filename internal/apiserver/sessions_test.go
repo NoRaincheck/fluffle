@@ -115,11 +115,11 @@ func TestNonLeadingMentionDoesNotTrigger(t *testing.T) {
 }
 
 func TestMultipleLeadingMentionsAreAllPassed(t *testing.T) {
-	cfg := "[[agents]]\nname=\"a1\"\ncommand=\"x\"\n\n[[agents]]\nname=\"b2\"\ncommand=\"y\"\n"
+	cfg := "[[agents]]\nname=\"aa\"\ncommand=\"x\"\n\n[[agents]]\nname=\"bb\"\ncommand=\"y\"\n"
 	_, h, starter, _, thID := newSessionHandler(t, cfg)
-	postThread(t, h, thID, "messages", `{"name":"alice","role":"user","content":"@a1 @b2 go"}`, "")
+	postThread(t, h, thID, "messages", `{"name":"alice","role":"user","content":"@aa @bb go"}`, "")
 	calls := starter.snapshot()
-	if len(calls) != 1 || calls[0] != fmt.Sprintf("%d:1:a1,b2", thID) {
+	if len(calls) != 1 || calls[0] != fmt.Sprintf("%d:1:aa,bb", thID) {
 		t.Fatalf("calls = %v", calls)
 	}
 }

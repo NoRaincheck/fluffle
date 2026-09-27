@@ -1,3 +1,3 @@
-{"seq":1,"role":"user","name":"engineering-productivity-council","content":"This channel and thread name are both far wider than their columns so every column-dropping branch in the inbox table has something to react to.","timestamp":"@T-4d"}
-{"seq":2,"parent_seq":1,"role":"user","name":"principal-engineering-manager","content":"The reply line must stay aligned to the CONTENT column at every terminal width, including the ones where TIME and CHANNEL have both been dropped.","timestamp":"@T-4d"}
-{"type":"reaction","message_seq":1,"emoji":"🫡","name":"engineering-productivity-council","timestamp":"@T-1d"}
+{"seq":1,"role":"user","name":"productivity","content":"A name at the ceiling is twelve bytes, which is exactly the NAME column, so it fills the cell with nothing to truncate and nothing left over.","timestamp":"@T-4d"}
+{"seq":2,"parent_seq":1,"role":"user","name":"directorate","content":"There is no column dropping any more: a row is drawn whole or not at all, so the CONTENT column starts in the same cell at 71 columns and at 200.","timestamp":"@T-4d"}
+{"type":"reaction","message_seq":1,"emoji":"\ud83e\udee1","name":"productivity","timestamp":"@T-1d"}

@@ -252,8 +252,8 @@ func TestUnresolvableNameCreatesNoSession(t *testing.T) {
 
 func TestBrokenConfigStartsNoSession(t *testing.T) {
 	fr := &fakeRunner{}
-	s, m, thID, msgID := harness(t, "[[agents]]\nname=\"BAD\"\ncommand=\"x\"\n", fr)
-	m.Start(thID, msgID, []string{"BAD"})
+	s, m, thID, msgID := harness(t, "[[agents]]\nname=\"bad_agent\"\ncommand=\"x\"\n", fr)
+	m.Start(thID, msgID, []string{"bad_agent"})
 	time.Sleep(200 * time.Millisecond)
 	list, _ := s.ListSessions(context.Background(), thID)
 	if len(list) != 0 {

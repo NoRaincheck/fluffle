@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -23,6 +25,7 @@ import (
 	"github.com/NoRaincheck/fluffle/internal/apiserver"
 	"github.com/NoRaincheck/fluffle/internal/client"
 	"github.com/NoRaincheck/fluffle/internal/jsonl"
+	"github.com/NoRaincheck/fluffle/internal/names"
 	"github.com/NoRaincheck/fluffle/internal/repo"
 	"github.com/NoRaincheck/fluffle/internal/runner"
 	"github.com/NoRaincheck/fluffle/internal/session"
@@ -234,19 +237,40 @@ func validateReactions(list *[]store.Reaction) apiResponseCheck {
 	})
 }
 
-func validateInbox(list *[]store.InboxMessage) apiResponseCheck {
-	return validateList(list, func(entry store.InboxMessage) error {
-		if entry.ID <= 0 || entry.ThreadID <= 0 || entry.Seq <= 0 || entry.ChannelID <= 0 {
-			return fmt.Errorf("inbox entry has invalid reference %d/%d/%d/%d", entry.ID, entry.ThreadID, entry.Seq, entry.ChannelID)
+// validateRows guards the shared feed row. It requires only what every
+// granularity guarantees: a positive id, a channel name, and a Count that
+// agrees with the representative message. A channel-granularity row has no
+// thread and no thread id, and a group with no messages has an empty name,
+// content, and count, so none of those may be required.
+func validateRows(list *[]store.Row) apiResponseCheck {
+	return validateList(list, func(row store.Row) error {
+		if row.ID <= 0 {
+			return fmt.Errorf("row has an invalid id %d", row.ID)
 		}
-		if strings.TrimSpace(entry.Name) == "" || strings.TrimSpace(entry.Content) == "" {
-			return errors.New("inbox entry has an empty name or content")
+		if strings.TrimSpace(row.Channel) == "" {
+			return errors.New("row has an empty channel")
 		}
-		if strings.TrimSpace(entry.ChannelName) == "" || strings.TrimSpace(entry.ThreadTitle) == "" {
-			return errors.New("inbox entry has an empty channel name or thread title")
+		if row.Count < 0 {
+			return fmt.Errorf("row has an invalid count %d", row.Count)
+		}
+		blankName := strings.TrimSpace(row.Name) == ""
+		blankContent := strings.TrimSpace(row.Content) == ""
+		if row.Count == 0 && (!blankName || !blankContent) {
+			return errors.New("row counts no messages but carries a name or content")
+		}
+		if row.Count > 0 && (blankName || blankContent) {
+			return errors.New("row counts messages but has an empty name or content")
 		}
 		return nil
 	})
+}
+
+// importSlug derives a valid thread title from an import file path: four
+// characters of prefix and eight of hash, which is always a legal slug and
+// never truncated.
+func importSlug(path string) string {
+	sum := sha256.Sum256([]byte(path))
+	return "imp-" + hex.EncodeToString(sum[:])[:8]
 }
 
 func validateCreatedID(id *int64) apiResponseCheck {
@@ -360,22 +384,23 @@ func inboxCmd(args []string) int {
 	if err != nil {
 		return fail("DAEMON_DOWN", err.Error())
 	}
-	var messages []store.InboxMessage
-	u := base + "/v1/inbox?limit=" + strconv.Itoa(*limit)
-	if code := apiGet(u, "", &messages, validateInbox(&messages)); code != 0 {
+	var rows []store.Row
+	u := base + "/v1/rows?g=message&limit=" + strconv.Itoa(*limit)
+	if code := apiGet(u, "", &rows, validateRows(&rows)); code != 0 {
 		return code
 	}
-	if messages == nil {
-		messages = []store.InboxMessage{}
+	if rows == nil {
+		rows = []store.Row{}
 	}
 	if *jsonOut {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		enc.Encode(messages)
+		enc.Encode(rows)
 		return 0
 	}
-	for _, message := range messages {
-		fmt.Printf("%s/%d %s/%d seq %d %s: %s\n", message.ChannelName, message.ChannelID, message.ThreadTitle, message.ThreadID, message.Seq, message.Name, message.Content)
+	for _, row := range rows {
+		first, _, _ := strings.Cut(row.Content, "\n")
+		fmt.Printf("%s/%d %s/%d %s: %s\n", row.Channel, row.ID, row.Thread, row.ThreadID, row.Name, first)
 	}
 	return 0
 }
@@ -991,8 +1016,7 @@ func threadImportCmd(args []string) int {
 	var out struct {
 		ID int64 `json:"id"`
 	}
-	title := "import " + filepath.Base(*file)
-	body := map[string]any{"Title": title}
+	body := map[string]any{"Title": importSlug(*file)}
 	if code := apiPost(base+"/v1/channels/"+strconv.FormatInt(chID, 10)+"/threads", "", body, &out, validateCreatedID(&out.ID)); code != 0 {
 		return code
 	}
@@ -1010,12 +1034,47 @@ func messageCmd(args []string) int {
 	return messageSendCmd(args[1:])
 }
 
+// legalName turns an OS username into a legal author name: ASCII letters and
+// single dots between them, no leading or trailing dot, at most MaxName bytes.
+// Underscores and digits become dots, so john_doe reads as john.doe and
+// jsmith123 as jsmith — the same shape as the names the rules already allow. A
+// username that leaves nothing usable becomes "unknown".
+//
+// The walk is over runes so that one character is one decision. Walking bytes
+// happens to give the same answer, because a UTF-8 continuation byte can be
+// neither an ASCII letter nor a dot, but it makes that a property of the
+// encoding rather than of the code. A character outside the name rule is
+// dropped, not transliterated: éclair is clair, because names.Name admits no
+// accents and inventing one the store would reject helps nobody.
+func legalName(user string) string {
+	var b strings.Builder
+	afterLetter := false
+	for _, r := range user {
+		if b.Len() >= names.MaxName {
+			break
+		}
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+			afterLetter = true
+		case afterLetter:
+			b.WriteByte('.')
+			afterLetter = false
+		}
+	}
+	out := strings.TrimRight(b.String(), ".")
+	if out == "" {
+		return "unknown"
+	}
+	return out
+}
+
 func defaultName(as string) string {
 	if as != "" {
 		return as
 	}
 	if u := os.Getenv("USER"); u != "" {
-		return u
+		return legalName(u)
 	}
 	return "unknown"
 }

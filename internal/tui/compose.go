@@ -1,298 +1,124 @@
 package tui
 
 import (
+	"slices"
+	"strings"
+
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/NoRaincheck/fluffle/internal/store"
+	"github.com/NoRaincheck/fluffle/internal/tui/termtext"
 )
 
-type composeMode int
-
-const (
-	composeModeMessage composeMode = iota
-	composeModeReply
-	composeModeNewThread
-	composeModeNewChannel
-	composeModeReact
-)
-
-type composeState struct {
-	mode      composeMode
-	context   string
-	text      string
-	cursor    int
-	error     string
-	threadID  int64
-	channelID int64
-	parentID  int64
-}
-
+// composeModel is the reply box and nothing else. There was one mode per
+// create path; the TUI no longer creates anything, so there is one mode.
 type composeModel struct {
-	state  composeState
-	active bool
-	width  int
-	height int
-}
-
-func (m composeModel) Init() tea.Cmd {
-	return nil
-}
-
-func (m *composeModel) Open(mode composeMode, context string, maxH int) {
-	m.active = true
-	m.state = composeState{
-		mode:    mode,
-		context: context,
-		text:    "",
-		cursor:  0,
-		error:   "",
-	}
-	if m.width < 30 {
-		m.width = 60
-	}
-	m.height = 4
-}
-
-func (m *composeModel) Close() {
-	m.active = false
-	m.state = composeState{}
-}
-
-func (m *composeModel) IsActive() bool {
-	return m.active
-}
-
-func (m *composeModel) Text() string {
-	return m.state.text
-}
-
-func (m *composeModel) Update(msg tea.Msg) tea.Cmd {
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.Type {
-		case tea.KeyEsc:
-			m.Close()
-			return nil
-		case tea.KeyEnter:
-			if m.state.text != "" {
-				return func() tea.Msg {
-					return composeSendMsg{text: m.state.text, mode: m.state.mode, context: m.state.context}
-				}
-			}
-			return nil
-		case tea.KeyBackspace:
-			if m.state.cursor > 0 && len(m.state.text) > 0 {
-				m.state.text = m.state.text[:m.state.cursor-1] + m.state.text[m.state.cursor:]
-				m.state.cursor--
-			}
-		case tea.KeyDelete:
-			if m.state.cursor < len(m.state.text) {
-				m.state.text = m.state.text[:m.state.cursor] + m.state.text[m.state.cursor+1:]
-			}
-		case tea.KeyLeft:
-			if m.state.cursor > 0 {
-				m.state.cursor--
-			}
-		case tea.KeyRight:
-			if m.state.cursor < len(m.state.text) {
-				m.state.cursor++
-			}
-		case tea.KeyRunes, tea.KeySpace:
-			runes := msg.Runes
-			if len(runes) == 0 && msg.Type == tea.KeySpace {
-				runes = []rune{' '}
-			}
-			for _, r := range runes {
-				m.state.text = m.state.text[:m.state.cursor] + string(r) + m.state.text[m.state.cursor:]
-				m.state.cursor += len(string(r))
-			}
-		}
-	}
-	return nil
-}
-
-func (m composeModel) View() string {
-	if !m.IsActive() {
-		return ""
-	}
-
-	lines := make([]string, 0, 4)
-
-	lines = append(lines, modalTitleStyle.Render(m.state.context))
-
-	cursorChar := "│"
-	if m.state.cursor >= len(m.state.text) {
-		cursorChar = "│ "
-	}
-	inputLine := "> " + m.state.text + cursorChar
-	lines = append(lines, inputLine)
-
-	if m.state.error != "" {
-		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("204")).Render("  "+m.state.error))
-	} else {
-		lines = append(lines, "")
-	}
-
-	lines = append(lines, modalHintStyle.Render("Enter to reply, Esc to cancel"))
-
-	return lipgloss.NewStyle().
-		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(modalBorder).
-		Foreground(modalFg).
-		Padding(0, 2).
-		Width(m.width).
-		Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
-}
-
-type channelsFetchedMsg struct {
-	channels []store.Channel
-	err      error
-}
-
-type threadsFetchedMsg struct {
-	channelID int64
-	threads   []store.Thread
-	err       error
-}
-
-type messagesFetchedMsg struct {
-	threadID int64
-	messages []store.Message
-	err      error
-}
-
-type previewThreadsFetchedMsg struct {
-	channelID int64
-	threads   []store.Thread
-	err       error
-}
-
-type previewMessagesFetchedMsg struct {
-	threadID int64
-	messages []store.Message
-	err      error
-}
-
-type composeSendMsg struct {
-	text    string
-	mode    composeMode
+	active  bool
+	width   int
 	context string
+	text    string
+	cursor  int
+	err     string
 }
 
-type threadCreatedMsg struct {
-	channelID int64
-	threadID  int64
-	title     string
-	err       error
-}
-
-type channelCreatedMsg struct {
-	channelID int64
-	name      string
-	err       error
-}
-
-func (m *composeModel) SetError(err string) {
-	m.state.error = err
-}
-
-func (m *composeModel) ClearError() {
-	m.state.error = ""
-}
-
-type filterModel struct {
-	active bool
-	text   string
-	cursor int
-	width  int
-	height int
-}
-
-func (m *filterModel) Open(initial string, maxW int) {
-	m.active = true
-	m.text = initial
-	m.cursor = len(initial)
-	if maxW < 30 {
-		maxW = 60
-	} else {
-		maxW = maxW * 80 / 100
-		if maxW < 30 {
-			maxW = 30
-		}
+func (m *composeModel) resize(w int) {
+	if w < 30 {
+		m.width = 60
+		return
 	}
-	m.width = maxW
-	m.height = 4
+	m.width = w * 80 / 100
 }
 
-func (m *filterModel) Close() {
-	m.active = false
-	m.text = ""
-	m.cursor = 0
+func (m *composeModel) open(context string) {
+	m.active, m.context, m.text, m.cursor, m.err = true, context, "", 0, ""
 }
 
-func (m *filterModel) IsActive() bool { return m.active }
+func (m *composeModel) close() {
+	m.active, m.context, m.text, m.cursor, m.err = false, "", "", 0, ""
+}
 
-func (m *filterModel) Update(msg tea.Msg) tea.Cmd {
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.Type {
-		case tea.KeyEsc:
-			m.Close()
+// runes is the text as the cursor counts it: the cursor is an index into this
+// and never a byte offset. Every edit goes through here, so there is one
+// definition of a position and a multi-byte character cannot be cut in half.
+func (m composeModel) runes() []rune { return []rune(m.text) }
+
+func (m *composeModel) setRunes(r []rune) { m.text = string(r) }
+
+func (m *composeModel) update(msg tea.KeyMsg) tea.Cmd {
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.close()
+		return nil
+	case tea.KeyEnter:
+		if strings.TrimSpace(m.text) == "" {
+			m.err = "cannot be empty"
 			return nil
-		case tea.KeyEnter:
-			t := m.text
-			m.Close()
-			return func() tea.Msg { return filterAppliedMsg{text: t} }
-		case tea.KeyBackspace:
-			if m.cursor > 0 && len(m.text) > 0 {
-				m.text = m.text[:m.cursor-1] + m.text[m.cursor:]
-				m.cursor--
-			}
-		case tea.KeyDelete:
-			if m.cursor < len(m.text) {
-				m.text = m.text[:m.cursor] + m.text[m.cursor+1:]
-			}
-		case tea.KeyLeft:
-			if m.cursor > 0 {
-				m.cursor--
-			}
-		case tea.KeyRight:
-			if m.cursor < len(m.text) {
-				m.cursor++
-			}
-		case tea.KeyRunes, tea.KeySpace:
-			runes := msg.Runes
-			if len(runes) == 0 && msg.Type == tea.KeySpace {
-				runes = []rune{' '}
-			}
-			for _, r := range runes {
-				m.text = m.text[:m.cursor] + string(r) + m.text[m.cursor:]
-				m.cursor += len(string(r))
-			}
+		}
+		m.err = ""
+		text := m.text
+		return func() tea.Msg { return composeSendMsg{text: text} }
+	case tea.KeyBackspace:
+		if m.cursor > 0 {
+			m.setRunes(slices.Delete(m.runes(), m.cursor-1, m.cursor))
+			m.cursor--
+		}
+	case tea.KeyDelete:
+		if m.cursor < len(m.runes()) {
+			m.setRunes(slices.Delete(m.runes(), m.cursor, m.cursor+1))
+		}
+	case tea.KeyLeft:
+		if m.cursor > 0 {
+			m.cursor--
+		}
+	case tea.KeyRight:
+		if m.cursor < len(m.runes()) {
+			m.cursor++
+		}
+	case tea.KeyRunes, tea.KeySpace:
+		runes := msg.Runes
+		if len(runes) == 0 && msg.Type == tea.KeySpace {
+			runes = []rune{' '}
+		}
+		if len(runes) > 0 {
+			at := min(m.cursor, len(m.runes()))
+			m.setRunes(slices.Insert(m.runes(), at, runes...))
+			m.cursor = at + len(runes)
 		}
 	}
 	return nil
 }
 
-func (m filterModel) View() string {
-	if !m.IsActive() {
-		return ""
+// caret is the text with the cursor glyph drawn between the two halves at the
+// cursor, so the box shows where the next keystroke lands. The cursor is a rune
+// index and is clamped, so a stale one splits nothing and overruns nothing.
+func (m composeModel) caret() string {
+	r := []rune(m.text)
+	at := min(max(m.cursor, 0), len(r))
+	return string(r[:at]) + "▏" + string(r[at:])
+}
+
+func (m composeModel) view() string {
+	lines := []string{
+		modalTitleStyle.Render(termtext.Truncate(termtext.SanitizeLine(m.context), m.width-6, "")),
+		// Sanitized like every other draw site, and not only because the text
+		// is untrusted: a paste arrives as a tea.PasteMsg that nothing handles,
+		// so what reaches the box is not necessarily keystrokes.
+		pad(termtext.Truncate(termtext.SanitizeLine(m.caret()), m.width-6, ""), m.width-6),
+		m.errLine(),
+		modalHintStyle.Render("Enter to send · Esc to cancel"),
 	}
-	title := modalTitleStyle.Render("Filter: channel[/thread]  (empty to clear)")
-	cursorChar := "│"
-	if m.cursor >= len(m.text) {
-		cursorChar = "│ "
-	}
-	inputLine := "> " + m.text + cursorChar
-	lines := []string{title, inputLine, "", modalHintStyle.Render("Enter to apply, Esc to cancel")}
 	return lipgloss.NewStyle().
-		BorderStyle(lipgloss.RoundedBorder()).
+		Border(lipgloss.RoundedBorder()).
 		BorderForeground(modalBorder).
 		Foreground(modalFg).
 		Padding(0, 2).
-		Width(m.width).
-		Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+		Width(m.width - 2).
+		Render(strings.Join(lines, "\n"))
 }
 
-type filterAppliedMsg struct{ text string }
+func (m composeModel) errLine() string {
+	if m.err == "" {
+		return ""
+	}
+	return modalErrorStyle.Render(m.err)
+}

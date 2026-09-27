@@ -489,7 +489,7 @@ func TestE2E_ThreadCreateList(t *testing.T) {
 	runCLI(t, env, bin, "channel", "create", "--name", "bugs", "--repo", repoDir)
 
 	// Create thread with --json
-	out := runCLI(t, env, bin, "thread", "new", "--channel", "bugs", "--repo", repoDir, "--title", "something broke", "--json")
+	out := runCLI(t, env, bin, "thread", "new", "--channel", "bugs", "--repo", repoDir, "--title", "broke-stuff", "--json")
 	var th struct {
 		ID int64 `json:"id"`
 	}
@@ -510,7 +510,7 @@ func TestE2E_ThreadCreateList(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &threads); err != nil {
 		t.Fatalf("invalid JSON: %v\n%s", err, out)
 	}
-	if len(threads) != 1 || threads[0].Title != "something broke" {
+	if len(threads) != 1 || threads[0].Title != "broke-stuff" {
 		t.Fatalf("expected 1 thread, got: %s", out)
 	}
 
@@ -682,7 +682,7 @@ func TestE2E_FullWorkflow(t *testing.T) {
 	json.Unmarshal([]byte(out), &ch)
 
 	// 2. Create thread
-	out = runCLI(t, env, bin, "thread", "new", "--channel", "code-review", "--repo", repoDir, "--title", "PR #42", "--json")
+	out = runCLI(t, env, bin, "thread", "new", "--channel", "code-review", "--repo", repoDir, "--title", "pr-42", "--json")
 	var th struct {
 		ID int64 `json:"id"`
 	}
@@ -751,7 +751,7 @@ func TestE2E_CwdInference(t *testing.T) {
 	}
 
 	// Create thread WITH --repo (should work)
-	out = runCLI(t, env, bin, "thread", "new", "--channel", "infra", "--repo", repoDir, "--title", "infra change", "--json")
+	out = runCLI(t, env, bin, "thread", "new", "--channel", "infra", "--repo", repoDir, "--title", "infra-change", "--json")
 	var th struct {
 		ID int64 `json:"id"`
 	}
@@ -783,7 +783,7 @@ func TestE2E_FullWorkflowWithCwdInference(t *testing.T) {
 	runCLI(t, env, bin, "channel", "create", "--name", "infra", "--repo", repoDir)
 
 	// Create thread from within the repo dir (no --repo needed)
-	threadCmd := exec.Command(bin, "thread", "new", "--channel", "infra", "--title", "cwd test", "--json")
+	threadCmd := exec.Command(bin, "thread", "new", "--channel", "infra", "--title", "cwd-test", "--json")
 	threadCmd.Env = append(os.Environ(), env...)
 	threadCmd.Dir = repoDir
 	out, err := threadCmd.CombinedOutput()
@@ -1144,7 +1144,7 @@ func TestE2E_AgentPortableLoop(t *testing.T) {
 		t.Fatalf("channel = %s", out)
 	}
 
-	out = runOK("", "thread", "new", "--channel", "portable", "--repo", repoDir, "--title", "portable loop", "--json")
+	out = runOK("", "thread", "new", "--channel", "portable", "--repo", repoDir, "--title", "port-loop", "--json")
 	var thread struct {
 		ID int64 `json:"id"`
 	}
@@ -1157,7 +1157,7 @@ func TestE2E_AgentPortableLoop(t *testing.T) {
 	threadID := strconv.FormatInt(thread.ID, 10)
 
 	runOK("", "message", "send", "--thread", threadID, "--text", "portable seed", "--as", "seed", "--json")
-	runOK("", "message", "send", "--thread", threadID, "--text", "portable seed 2", "--as", "seed-2", "--json")
+	runOK("", "message", "send", "--thread", threadID, "--text", "portable seed 2", "--as", "seedb", "--json")
 	runOK("", "message", "send", "--thread", threadID, "--text", "portable root", "--as", "alice", "--created-at", "2026-09-25T10:00:00Z", "--json")
 
 	type portableLine struct {
@@ -1213,16 +1213,16 @@ func TestE2E_AgentPortableLoop(t *testing.T) {
 		if events[0].Type != "message" || events[0].Seq <= 0 || events[0].Name != "seed" || events[0].Role != "user" || events[0].AuthorType != "human" || events[0].Content != "portable seed" || events[0].ParentSeq != 0 {
 			t.Fatalf("%s first seed = %+v", label, events[0])
 		}
-		if events[1].Type != "message" || events[1].Seq != events[0].Seq+1 || events[1].ParentSeq != 0 || events[1].Name != "seed-2" || events[1].Role != "user" || events[1].AuthorType != "human" || events[1].Content != "portable seed 2" {
+		if events[1].Type != "message" || events[1].Seq != events[0].Seq+1 || events[1].ParentSeq != 0 || events[1].Name != "seedb" || events[1].Role != "user" || events[1].AuthorType != "human" || events[1].Content != "portable seed 2" {
 			t.Fatalf("%s second seed = %+v", label, events[1])
 		}
 		if events[2].Type != "message" || events[2].Seq != events[1].Seq+1 || events[2].ParentSeq != 0 || events[2].Name != "alice" || events[2].Role != "user" || events[2].AuthorType != "human" || events[2].Content != "portable root" || events[2].Timestamp != "2026-09-25T10:00:00Z" {
 			t.Fatalf("%s root = %+v", label, events[2])
 		}
-		if events[3].Type != "message" || events[3].Seq != events[2].Seq+1 || events[3].ParentSeq != events[2].Seq || events[3].Name != "portable-agent" || events[3].Role != "user" || events[3].AuthorType != "agent" || events[3].Content != "portable reply" {
+		if events[3].Type != "message" || events[3].Seq != events[2].Seq+1 || events[3].ParentSeq != events[2].Seq || events[3].Name != "port.agent" || events[3].Role != "user" || events[3].AuthorType != "agent" || events[3].Content != "portable reply" {
 			t.Fatalf("%s reply = %+v, root seq %d", label, events[3], events[2].Seq)
 		}
-		if events[4].Type != "reaction" || events[4].MessageSeq != events[2].Seq || events[4].Name != "portable-agent" || events[4].AuthorType != "agent" || events[4].Emoji != "+1" || events[4].Role != "" {
+		if events[4].Type != "reaction" || events[4].MessageSeq != events[2].Seq || events[4].Name != "port.agent" || events[4].AuthorType != "agent" || events[4].Emoji != "+1" || events[4].Role != "" {
 			t.Fatalf("%s reaction = %+v, root seq %d", label, events[4], events[2].Seq)
 		}
 	}
@@ -1233,7 +1233,7 @@ func TestE2E_AgentPortableLoop(t *testing.T) {
 	}
 	rootSeq := events[2].Seq
 
-	out = runOK("portable reply", "message", "send", "--thread", threadID, "--reply-to-seq", strconv.FormatInt(rootSeq, 10), "--text", "-", "--agent-id", "portable-agent", "--as", "portable-agent", "--json")
+	out = runOK("portable reply", "message", "send", "--thread", threadID, "--reply-to-seq", strconv.FormatInt(rootSeq, 10), "--text", "-", "--agent-id", "port.agent", "--as", "port.agent", "--json")
 	var reply struct {
 		Seq       int64 `json:"seq"`
 		ParentSeq int64 `json:"parent_seq"`
@@ -1245,7 +1245,7 @@ func TestE2E_AgentPortableLoop(t *testing.T) {
 		t.Fatalf("reply = %+v, root seq %d", reply, rootSeq)
 	}
 
-	reactionOut := runOK("", "react", "add", "--thread", threadID, "--message-seq", strconv.FormatInt(rootSeq, 10), "--emoji", "+1", "--agent-id", "portable-agent", "--as", "portable-agent")
+	reactionOut := runOK("", "react", "add", "--thread", threadID, "--message-seq", strconv.FormatInt(rootSeq, 10), "--emoji", "+1", "--agent-id", "port.agent", "--as", "port.agent")
 	if reactionOut != "ok" {
 		t.Fatalf("reaction output = %q", reactionOut)
 	}
@@ -1283,20 +1283,26 @@ func TestE2E_AgentPortableLoop(t *testing.T) {
 	assertStream(events, "source")
 
 	var inbox []struct {
-		ThreadID    int64  `json:"ThreadID"`
-		ChannelID   int64  `json:"channel_id"`
-		ChannelName string `json:"channel_name"`
-		Content     string `json:"Content"`
+		ID       int64  `json:"ID"`
+		ThreadID int64  `json:"ThreadID"`
+		Channel  string `json:"Channel"`
+		Thread   string `json:"Thread"`
+		Name     string `json:"Name"`
+		Content  string `json:"Content"`
+		Count    int    `json:"Count"`
 	}
 	if err := json.Unmarshal([]byte(runOK("", "inbox", "--json")), &inbox); err != nil {
 		t.Fatalf("inbox JSON: %v", err)
 	}
 	var foundRoot, foundReply bool
-	for _, message := range inbox {
-		if message.ThreadID == thread.ID && message.ChannelID == channel.ID && message.ChannelName == "portable" && message.Content == "portable root" {
+	for _, row := range inbox {
+		if row.ID <= 0 || row.ThreadID != thread.ID || row.Channel != "portable" || row.Thread != "port-loop" || row.Count != 1 {
+			t.Fatalf("inbox row = %+v, want a message row of the portable thread", row)
+		}
+		if row.Content == "portable root" && row.Name == "alice" {
 			foundRoot = true
 		}
-		if message.ThreadID == thread.ID && message.ChannelID == channel.ID && message.ChannelName == "portable" && message.Content == "portable reply" {
+		if row.Content == "portable reply" && row.Name == "port.agent" {
 			foundReply = true
 		}
 	}
@@ -1312,14 +1318,14 @@ func TestE2E_AgentPortableLoop(t *testing.T) {
 		t.Fatalf("write export: %v", err)
 	}
 
-	destinationChannelOut := runOK("", "channel", "create", "--name", "portable-import", "--repo", repoDir, "--json")
+	destinationChannelOut := runOK("", "channel", "create", "--name", "portable-imp", "--repo", repoDir, "--json")
 	var destinationChannel struct {
 		ID int64 `json:"id"`
 	}
 	if err := json.Unmarshal([]byte(destinationChannelOut), &destinationChannel); err != nil || destinationChannel.ID == 0 || destinationChannel.ID == channel.ID {
 		t.Fatalf("destination channel JSON: %v\n%s", err, destinationChannelOut)
 	}
-	destinationThreadOut := runOK("", "thread", "new", "--channel", "portable-import", "--repo", repoDir, "--title", "import destination", "--json")
+	destinationThreadOut := runOK("", "thread", "new", "--channel", "portable-imp", "--repo", repoDir, "--title", "import-dest", "--json")
 	var destinationThread struct {
 		ID int64 `json:"id"`
 	}
@@ -1348,7 +1354,7 @@ func TestE2E_AgentPortableLoop(t *testing.T) {
 	}
 	var destinationChannelListed bool
 	for _, item := range channels {
-		if item.Name == "portable-import" && item.ID == destinationChannel.ID {
+		if item.Name == "portable-imp" && item.ID == destinationChannel.ID {
 			destinationChannelListed = true
 		}
 	}
@@ -1361,14 +1367,14 @@ func TestE2E_AgentPortableLoop(t *testing.T) {
 		ChannelID int64  `json:"ChannelID"`
 		Title     string `json:"Title"`
 	}
-	if err := json.Unmarshal([]byte(runOK("", "thread", "list", "--channel", "portable-import", "--repo", repoDir, "--json")), &importedThreads); err != nil {
+	if err := json.Unmarshal([]byte(runOK("", "thread", "list", "--channel", "portable-imp", "--repo", repoDir, "--json")), &importedThreads); err != nil {
 		t.Fatalf("imported thread list JSON: %v", err)
 	}
 	var importedThreadFound bool
 	for _, item := range importedThreads {
 		if item.ID == importedID {
 			importedThreadFound = true
-			if item.ChannelID != destinationChannel.ID || item.Title != "import destination" {
+			if item.ChannelID != destinationChannel.ID || item.Title != "import-dest" {
 				t.Fatalf("imported thread identity = %+v, destination channel %d", item, destinationChannel.ID)
 			}
 		}
@@ -1386,9 +1392,9 @@ func TestE2E_AgentPortableLoop(t *testing.T) {
 		t.Fatalf("imported references retained source identity: source root=%d reply=%d imported=%+v", rootSeq, reply.Seq, imported)
 	}
 
-	appendInput := "{\"type\":\"message\",\"parent_seq\":" + strconv.FormatInt(reply.Seq, 10) + ",\"name\":\"portable-agent\",\"author_type\":\"agent\",\"role\":\"assistant\",\"content\":\"portable appended\"}\n" +
-		"{\"type\":\"reaction\",\"message_seq\":" + strconv.FormatInt(reply.Seq+1, 10) + ",\"name\":\"portable-agent\",\"author_type\":\"agent\",\"emoji\":\"👀\"}\n"
-	appendResult := runCLIResult(t, env, bin, appendInput, "agent", "append", "--thread", threadID, "--file", "-", "--agent-id", "portable-agent")
+	appendInput := "{\"type\":\"message\",\"parent_seq\":" + strconv.FormatInt(reply.Seq, 10) + ",\"name\":\"port.agent\",\"author_type\":\"agent\",\"role\":\"assistant\",\"content\":\"portable appended\"}\n" +
+		"{\"type\":\"reaction\",\"message_seq\":" + strconv.FormatInt(reply.Seq+1, 10) + ",\"name\":\"port.agent\",\"author_type\":\"agent\",\"emoji\":\"👀\"}\n"
+	appendResult := runCLIResult(t, env, bin, appendInput, "agent", "append", "--thread", threadID, "--file", "-", "--agent-id", "port.agent")
 	if appendResult.exitCode != 0 || appendResult.stdout != "" || appendResult.stderr != "" {
 		t.Fatalf("agent append: exit=%d stdout=%q stderr=%q", appendResult.exitCode, appendResult.stdout, appendResult.stderr)
 	}
@@ -1404,7 +1410,7 @@ func TestE2E_AgentPortableLoop(t *testing.T) {
 		t.Fatalf("appended reaction = %+v", appended[2])
 	}
 
-	failure := runCLIResult(t, env, bin, "", "message", "send", "--thread", threadID, "--reply-to-seq", "0", "--text", "-", "--agent-id", "portable-agent")
+	failure := runCLIResult(t, env, bin, "", "message", "send", "--thread", threadID, "--reply-to-seq", "0", "--text", "-", "--agent-id", "port.agent")
 	assertE2ECLIErrorResult(t, failure, "BAD_ARGS")
 
 	stop()
@@ -1438,7 +1444,7 @@ func TestE2E_AgentAppendAtomicFailure(t *testing.T) {
 	if err := json.Unmarshal([]byte(channelOut), &channel); err != nil || channel.ID == 0 {
 		t.Fatalf("channel JSON: %v\n%s", err, channelOut)
 	}
-	threadOut := runOK("thread", "new", "--channel", "atomic", "--repo", repoDir, "--title", "atomic batch", "--json")
+	threadOut := runOK("thread", "new", "--channel", "atomic", "--repo", repoDir, "--title", "atomic-batch", "--json")
 	var thread struct {
 		ID int64 `json:"id"`
 	}
@@ -1449,7 +1455,7 @@ func TestE2E_AgentAppendAtomicFailure(t *testing.T) {
 
 	validAndInvalid := "{\"type\":\"message\",\"name\":\"alice\",\"role\":\"user\",\"content\":\"must roll back\"}\n" +
 		"{\"type\":\"reaction\",\"message_seq\":999,\"name\":\"alice\",\"emoji\":\"+1\"}\n"
-	lateFailure := runCLIResult(t, env, bin, validAndInvalid, "agent", "append", "--thread", threadID, "--file", "-", "--agent-id", "atomic-agent")
+	lateFailure := runCLIResult(t, env, bin, validAndInvalid, "agent", "append", "--thread", threadID, "--file", "-", "--agent-id", "atomic.agent")
 	assertE2ECLIErrorResult(t, lateFailure, "THREAD_NOT_FOUND")
 	empty := runCLIResult(t, env, bin, "", "agent", "read", "--thread", threadID, "--json")
 	if empty.exitCode != 0 || empty.stderr != "" || empty.stdout != "" {
@@ -1457,7 +1463,7 @@ func TestE2E_AgentAppendAtomicFailure(t *testing.T) {
 	}
 
 	malformed := "{\"type\":\"message\",\"name\":\"alice\",\"role\":\"user\",\"content\":\"must not parse\"}\nnot-json\n"
-	parseFailure := runCLIResult(t, env, bin, malformed, "agent", "append", "--thread", threadID, "--file", "-", "--agent-id", "atomic-agent")
+	parseFailure := runCLIResult(t, env, bin, malformed, "agent", "append", "--thread", threadID, "--file", "-", "--agent-id", "atomic.agent")
 	assertE2ECLIErrorResult(t, parseFailure, "BAD_JSONL")
 	empty = runCLIResult(t, env, bin, "", "agent", "read", "--thread", threadID, "--json")
 	if empty.exitCode != 0 || empty.stderr != "" || empty.stdout != "" {
@@ -1488,14 +1494,14 @@ func TestE2E_ReactionAfterCursorSurvivesOnOlderMessage(t *testing.T) {
 		return result.stdout
 	}
 
-	channelOut := runOK("channel", "create", "--name", "cursor-reactions", "--repo", repoDir, "--json")
+	channelOut := runOK("channel", "create", "--name", "cursor-react", "--repo", repoDir, "--json")
 	var channel struct {
 		ID int64 `json:"id"`
 	}
 	if err := json.Unmarshal([]byte(channelOut), &channel); err != nil || channel.ID == 0 {
 		t.Fatalf("channel JSON: %v\n%s", err, channelOut)
 	}
-	threadOut := runOK("thread", "new", "--channel", "cursor-reactions", "--repo", repoDir, "--title", "late reactions", "--json")
+	threadOut := runOK("thread", "new", "--channel", "cursor-react", "--repo", repoDir, "--title", "late-react", "--json")
 	var thread struct {
 		ID int64 `json:"id"`
 	}
@@ -1533,7 +1539,7 @@ func TestE2E_ReactionAfterCursorSurvivesOnOlderMessage(t *testing.T) {
 		t.Fatalf("initial cursor read = %d messages %d reactions, want none", len(messages), len(reactions))
 	}
 
-	runOK("react", "add", "--thread", threadID, "--message-seq", "1", "--emoji", "👀", "--agent-id", "late-agent", "--as", "late-agent")
+	runOK("react", "add", "--thread", threadID, "--message-seq", "1", "--emoji", "👀", "--agent-id", "late.agent", "--as", "late.agent")
 
 	messages, reactions = readCursor()
 	if len(messages) != 0 {
@@ -1542,7 +1548,7 @@ func TestE2E_ReactionAfterCursorSurvivesOnOlderMessage(t *testing.T) {
 	if len(reactions) != 1 {
 		t.Fatalf("cursor read reactions = %+v, want the late reaction on sequence 1", reactions)
 	}
-	if reactions[0]["message_seq"] != float64(1) || reactions[0]["emoji"] != "👀" || reactions[0]["name"] != "late-agent" || reactions[0]["author_type"] != "agent" {
+	if reactions[0]["message_seq"] != float64(1) || reactions[0]["emoji"] != "👀" || reactions[0]["name"] != "late.agent" || reactions[0]["author_type"] != "agent" {
 		t.Fatalf("late reaction = %+v", reactions[0])
 	}
 
