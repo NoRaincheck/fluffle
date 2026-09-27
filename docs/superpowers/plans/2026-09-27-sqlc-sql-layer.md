@@ -1674,10 +1674,11 @@ func messageFromFields(id, threadID, seq int64, parentID sql.NullInt64, parentSe
 nullable — most likely `sql.NullInt64` as well. Confirm before writing:
 
 Run: `rg -n "type ListMessagesRow struct" -A 12 internal/db/messages.sql.go`
-Expected: `ParentID sql.NullInt64` and `ParentSeq sql.NullInt64`. If `ParentSeq` comes
-out as `sql.NullInt64`, pass it straight through; if it comes out as `int64`, wrap it
-with `sql.NullInt64{Int64: r.ParentSeq, Valid: true}` so the `json:"-"` field keeps
-its type.
+Expected, and verified: `ParentID sql.NullInt64` (the `messages.parent_id` override
+applies to row structs too) and `ParentSeq *int64` (`parent_seq` is not a column, so no
+override applies and `emit_pointers_for_null_types` makes the nullable LEFT JOIN column a
+pointer). Convert `ParentSeq` with the `nullInt64FromPtr` helper defined in step 4 so the
+wire type keeps its `sql.NullInt64` type and its `json:"-"` tag.
 
 - [ ] **Step 4: Rewrite the four AppendMessage variants onto one helper**
 
@@ -1792,18 +1793,37 @@ func (s *Store) AppendMessageByParentSeq(threadID, parentSeq int64, name, author
 
 Keep `AppendMessage`, `AppendMessageWithParent`, and `AppendMessageAt` delegating to these two, unchanged.
 
-Update `nullIfInt64` to return `*int64`:
+Update `nullIfInt64` to return `sql.NullInt64`:
 
 ```go
-func nullIfInt64(v int64) *int64 {
+func nullIfInt64(v int64) sql.NullInt64 {
 	if v == 0 {
-		return nil
+		return sql.NullInt64{}
 	}
-	return &v
+	return sql.NullInt64{Int64: v, Valid: true}
 }
 ```
 
-Its old `any`-returning form will not satisfy the generated `ParentID *int64` field.
+Its old `any`-returning form will not satisfy the generated field. Note the field is
+`sql.NullInt64`, **not** `*int64`: the `messages.parent_id` → `sql.NullInt64` override in
+`sqlc.yaml` applies to query parameters as well as to the model and the row structs, so
+`InsertMessageParams.ParentID` and `InsertMessageDefaultCreatedAtParams.ParentID` are
+both `sql.NullInt64`. This is deliberate — it is what makes `Message.ParentID` match
+`store.Message.ParentID` exactly.
+
+The read side differs, because `parent_seq` is not a column and has no override:
+`ListMessagesRow.ParentID` is `sql.NullInt64` but `ListMessagesRow.ParentSeq` is `*int64`
+(an `emit_pointers_for_null_types` nullable LEFT JOIN column). Convert it when building
+the wire type so `Message.ParentSeq` keeps its `sql.NullInt64` type and its `json:"-"` tag:
+
+```go
+func nullInt64FromPtr(v *int64) sql.NullInt64 {
+	if v == nil {
+		return sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: *v, Valid: true}
+}
+```
 
 - [ ] **Step 5: Rewrite MessageIDBySeq, dropping the duplicate**
 
