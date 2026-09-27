@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -43,21 +44,26 @@ func TestClassifyConstraintCodes(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
-		name  string
-		query string
-		want  error
+		name         string
+		query        string
+		want         error
+		wantContains string
 	}{
-		{"unique", `INSERT INTO channels(name, repo_abs_path, is_orphaned) VALUES('c', '/r', 0)`, ErrConflict},
-		{"check", `INSERT INTO channels(name, repo_abs_path, is_orphaned) VALUES('   ', '/r', 0)`, ErrInvalid},
-		{"notnull", `INSERT INTO channels(name, repo_abs_path, is_orphaned) VALUES('x', NULL, 0)`, ErrInvalid},
+		{"unique", `INSERT INTO channels(name, repo_abs_path, is_orphaned) VALUES('c', '/r', 0)`, ErrConflict, "UNIQUE constraint failed"},
+		{"check", `INSERT INTO channels(name, repo_abs_path, is_orphaned) VALUES('   ', '/r', 0)`, ErrInvalid, "CHECK constraint failed: length(trim(name)) > 0"},
+		{"notnull", `INSERT INTO channels(name, repo_abs_path, is_orphaned) VALUES('x', NULL, 0)`, ErrInvalid, "CHECK constraint failed: (is_orphaned = 1 AND repo_abs_path IS NULL)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := s.db.Exec(tc.query)
 			if err == nil {
 				t.Fatal("expected a constraint violation")
 			}
-			if got := classify(err); !errors.Is(got, tc.want) {
+			got := classify(err)
+			if !errors.Is(got, tc.want) {
 				t.Fatalf("classify(%v) = %v, want %v", err, got, tc.want)
+			}
+			if msg := got.Error(); !strings.Contains(msg, tc.wantContains) {
+				t.Fatalf("classify message = %q, want it to contain %q", msg, tc.wantContains)
 			}
 		})
 	}
