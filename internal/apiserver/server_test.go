@@ -1,6 +1,7 @@
 package apiserver
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -31,9 +32,9 @@ func TestExportImportRoundTrip(t *testing.T) {
 	s, _ := store.Open(":memory:")
 	defer s.Close()
 	h := NewHandler(s)
-	ch, _ := s.CreateChannel("c", "/r", "", "", "", false)
-	th, _ := s.CreateThread(ch, "t")
-	s.AppendMessage(th, "alice", "human", "user", "hello")
+	ch, _ := s.CreateChannel(context.Background(), "c", "/r", "", "", "", false)
+	th, _ := s.CreateThread(context.Background(), ch, "t")
+	s.AppendMessage(context.Background(), th, "alice", "human", "user", "hello")
 	req := httptest.NewRequest("GET", fmt.Sprintf("/v1/threads/%d/messages", th), nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -72,7 +73,7 @@ func TestListThreadsEmptyReturnsArray(t *testing.T) {
 	s, _ := store.Open(":memory:")
 	defer s.Close()
 	h := NewHandler(s)
-	ch, _ := s.CreateChannel("c", "/r", "", "", "", false)
+	ch, _ := s.CreateChannel(context.Background(), "c", "/r", "", "", "", false)
 	req := httptest.NewRequest("GET", fmt.Sprintf("/v1/channels/%d/threads", ch), nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -90,8 +91,8 @@ func TestListMessagesEmptyReturnsArray(t *testing.T) {
 	s, _ := store.Open(":memory:")
 	defer s.Close()
 	h := NewHandler(s)
-	ch, _ := s.CreateChannel("c", "/r", "", "", "", false)
-	th, _ := s.CreateThread(ch, "t")
+	ch, _ := s.CreateChannel(context.Background(), "c", "/r", "", "", "", false)
+	th, _ := s.CreateThread(context.Background(), ch, "t")
 	req := httptest.NewRequest("GET", fmt.Sprintf("/v1/threads/%d/messages", th), nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -108,7 +109,7 @@ func TestListMessagesEmptyReturnsArray(t *testing.T) {
 func TestListMessagesAfterSequenceReturnsStrictlyNewerMessages(t *testing.T) {
 	s, h, threadID := newTestHandlerWithThread(t)
 	for _, content := range []string{"first", "second", "third"} {
-		if _, err := s.AppendMessage(threadID, "alice", "human", "user", content); err != nil {
+		if _, err := s.AppendMessage(context.Background(), threadID, "alice", "human", "user", content); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -157,7 +158,7 @@ func TestListMessagesRejectsCursorWithLast(t *testing.T) {
 func TestListMessagesAfterZeroUsesExistingReadBehavior(t *testing.T) {
 	s, h, threadID := newTestHandlerWithThread(t)
 	for _, content := range []string{"first", "second", "third"} {
-		if _, err := s.AppendMessage(threadID, "alice", "human", "user", content); err != nil {
+		if _, err := s.AppendMessage(context.Background(), threadID, "alice", "human", "user", content); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -189,7 +190,7 @@ func TestListMessagesAfterZeroUsesExistingReadBehavior(t *testing.T) {
 
 func TestListMessagesAfterCursorAtEndReturnsArray(t *testing.T) {
 	s, h, threadID := newTestHandlerWithThread(t)
-	if _, err := s.AppendMessage(threadID, "alice", "human", "user", "only"); err != nil {
+	if _, err := s.AppendMessage(context.Background(), threadID, "alice", "human", "user", "only"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -205,15 +206,15 @@ func TestListMessagesAfterCursorAtEndReturnsArray(t *testing.T) {
 
 func TestListThreadReactionsReturnsMessageAndTimeOrder(t *testing.T) {
 	s, h, threadID := newTestHandlerWithThread(t)
-	firstSeq, err := s.AppendMessage(threadID, "alice", "human", "user", "first")
+	firstSeq, err := s.AppendMessage(context.Background(), threadID, "alice", "human", "user", "first")
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondSeq, err := s.AppendMessage(threadID, "reviewer", "agent", "assistant", "second")
+	secondSeq, err := s.AppendMessage(context.Background(), threadID, "reviewer", "agent", "assistant", "second")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.AppendBatch(threadID, []store.AppendEvent{
+	if _, err := s.AppendBatch(context.Background(), threadID, []store.AppendEvent{
 		{Type: "reaction", MessageSeq: secondSeq, Name: "carol", AuthorType: "human", Emoji: "second-late", CreatedAt: "2026-09-25T12:02:00Z"},
 		{Type: "reaction", MessageSeq: firstSeq, Name: "alice", AuthorType: "human", Emoji: "first-message", CreatedAt: "2026-09-25T12:03:00Z"},
 		{Type: "reaction", MessageSeq: secondSeq, Name: "bob", AuthorType: "human", Emoji: "second-early", CreatedAt: "2026-09-25T12:01:00Z"},
@@ -260,11 +261,11 @@ func TestListThreadReactionsEmptyReturnsArray(t *testing.T) {
 
 func TestMessagePostResolvesParentSequence(t *testing.T) {
 	s, h, threadID := newTestHandlerWithThread(t)
-	parentSeq, err := s.AppendMessage(threadID, "alice", "human", "user", "parent")
+	parentSeq, err := s.AppendMessage(context.Background(), threadID, "alice", "human", "user", "parent")
 	if err != nil {
 		t.Fatal(err)
 	}
-	parentID, err := s.MessageIDBySeq(threadID, parentSeq)
+	parentID, err := s.MessageIDBySeq(context.Background(), threadID, parentSeq)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +281,7 @@ func TestMessagePostResolvesParentSequence(t *testing.T) {
 	if result.Seq != 2 {
 		t.Fatalf("seq = %d, want 2", result.Seq)
 	}
-	messages, err := s.ListMessagesAfter(threadID, parentSeq)
+	messages, err := s.ListMessagesAfter(context.Background(), threadID, parentSeq)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,13 +293,13 @@ func TestMessagePostResolvesParentSequence(t *testing.T) {
 func TestMessagePostRejectsCrossThreadParentSequence(t *testing.T) {
 	s, h, threadID := newTestHandlerWithThread(t)
 	otherThreadID := newTestThread(t, s, "other")
-	if _, err := s.AppendMessage(otherThreadID, "alice", "human", "user", "other parent"); err != nil {
+	if _, err := s.AppendMessage(context.Background(), otherThreadID, "alice", "human", "user", "other parent"); err != nil {
 		t.Fatal(err)
 	}
 
 	rec := serveRequest(t, h, http.MethodPost, fmt.Sprintf("/v1/threads/%d/messages", threadID), `{"name":"reviewer","role":"assistant","content":"reply","parent_seq":1}`)
 	assertErrorEnvelope(t, rec, http.StatusNotFound, "THREAD_NOT_FOUND")
-	messages, err := s.ListMessages(threadID, 0)
+	messages, err := s.ListMessages(context.Background(), threadID, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +322,7 @@ func TestLiveMessageAuthorTypeComesOnlyFromHeader(t *testing.T) {
 		t.Fatalf("agent status = %d body %s", agentRec.Code, agentRec.Body.String())
 	}
 
-	messages, err := s.ListMessages(threadID, 0)
+	messages, err := s.ListMessages(context.Background(), threadID, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,16 +334,16 @@ func TestLiveMessageAuthorTypeComesOnlyFromHeader(t *testing.T) {
 func TestThreadScopedReactionUsesSequenceWithinThread(t *testing.T) {
 	s, h, threadID := newTestHandlerWithThread(t)
 	otherThreadID := newTestThread(t, s, "other")
-	if _, err := s.AppendMessage(otherThreadID, "alice", "human", "user", "other one"); err != nil {
+	if _, err := s.AppendMessage(context.Background(), otherThreadID, "alice", "human", "user", "other one"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.AppendMessage(otherThreadID, "alice", "human", "user", "other two"); err != nil {
+	if _, err := s.AppendMessage(context.Background(), otherThreadID, "alice", "human", "user", "other two"); err != nil {
 		t.Fatal(err)
 	}
 
 	crossThread := serveRequest(t, h, http.MethodPost, fmt.Sprintf("/v1/threads/%d/messages/2/reactions", threadID), `{"emoji":"👀","name":"reviewer"}`)
 	assertErrorEnvelope(t, crossThread, http.StatusNotFound, "THREAD_NOT_FOUND")
-	reactions, err := s.ListReactions(threadID)
+	reactions, err := s.ListReactions(context.Background(), threadID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,7 +351,7 @@ func TestThreadScopedReactionUsesSequenceWithinThread(t *testing.T) {
 		t.Fatalf("cross-thread target created reactions: %+v", reactions)
 	}
 
-	if _, err := s.AppendMessage(threadID, "alice", "human", "user", "target"); err != nil {
+	if _, err := s.AppendMessage(context.Background(), threadID, "alice", "human", "user", "target"); err != nil {
 		t.Fatal(err)
 	}
 	rec := serveRequest(t, h, http.MethodPost, fmt.Sprintf("/v1/threads/%d/messages/1/reactions", threadID), `{"emoji":"👀","name":"reviewer"}`)
@@ -368,15 +369,15 @@ func TestThreadScopedReactionUsesSequenceWithinThread(t *testing.T) {
 
 func TestLiveReactionAuthorTypeComesOnlyFromHeader(t *testing.T) {
 	s, h, threadID := newTestHandlerWithThread(t)
-	firstSeq, err := s.AppendMessage(threadID, "alice", "human", "user", "first")
+	firstSeq, err := s.AppendMessage(context.Background(), threadID, "alice", "human", "user", "first")
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondSeq, err := s.AppendMessage(threadID, "alice", "human", "user", "second")
+	secondSeq, err := s.AppendMessage(context.Background(), threadID, "alice", "human", "user", "second")
 	if err != nil {
 		t.Fatal(err)
 	}
-	firstID, err := s.MessageIDBySeq(threadID, firstSeq)
+	firstID, err := s.MessageIDBySeq(context.Background(), threadID, firstSeq)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,7 +394,7 @@ func TestLiveReactionAuthorTypeComesOnlyFromHeader(t *testing.T) {
 		t.Fatalf("agent status = %d body %s", agentRec.Code, agentRec.Body.String())
 	}
 
-	reactions, err := s.ListReactions(threadID)
+	reactions, err := s.ListReactions(context.Background(), threadID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -425,14 +426,14 @@ func TestBatchEventsReturnsMappedResultsAndPreservesHumanImportAttribution(t *te
 		t.Fatalf("reaction result = %+v", results[2])
 	}
 
-	messages, err := s.ListMessagesAfter(threadID, 0)
+	messages, err := s.ListMessagesAfter(context.Background(), threadID, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(messages) != 2 || messages[0].AuthorType != "human" || messages[1].AuthorType != "agent" || messages[1].ParentIDValue() != results[0].MessageID {
 		t.Fatalf("messages = %+v", messages)
 	}
-	reactions, err := s.ListReactions(threadID)
+	reactions, err := s.ListReactions(context.Background(), threadID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -456,7 +457,7 @@ func TestLiveBatchAuthorTypeComesOnlyFromHeader(t *testing.T) {
 		t.Fatalf("agent status = %d body %s", agentRec.Code, agentRec.Body.String())
 	}
 
-	messages, err := s.ListMessages(threadID, 0)
+	messages, err := s.ListMessages(context.Background(), threadID, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -470,11 +471,11 @@ func TestBatchEventsRollbackLateInvalidReference(t *testing.T) {
 	body := `{"events":[{"type":"message","seq":1,"name":"alice","author_type":"human","role":"user","content":"must roll back"},{"type":"reaction","seq":2,"message_seq":999,"name":"bob","author_type":"human","emoji":"+1"}],"import":true}`
 	rec := serveRequest(t, h, http.MethodPost, fmt.Sprintf("/v1/threads/%d/events", threadID), body)
 	assertErrorEnvelope(t, rec, http.StatusNotFound, "THREAD_NOT_FOUND")
-	messages, err := s.ListMessages(threadID, 0)
+	messages, err := s.ListMessages(context.Background(), threadID, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	reactions, err := s.ListReactions(threadID)
+	reactions, err := s.ListReactions(context.Background(), threadID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -501,7 +502,7 @@ func TestBatchEventsRejectEmptyAndUnknownEvents(t *testing.T) {
 			assertErrorEnvelope(t, rec, http.StatusBadRequest, "BAD_JSONL")
 		})
 	}
-	messages, err := s.ListMessages(threadID, 0)
+	messages, err := s.ListMessages(context.Background(), threadID, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -522,7 +523,7 @@ func TestBatchEventsRejectMoreThanOneThousandEvents(t *testing.T) {
 	}
 	rec := serveRequest(t, h, http.MethodPost, fmt.Sprintf("/v1/threads/%d/events", threadID), string(encoded))
 	assertErrorEnvelope(t, rec, http.StatusBadRequest, "BAD_JSONL")
-	messages, err := s.ListMessages(threadID, 0)
+	messages, err := s.ListMessages(context.Background(), threadID, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -536,11 +537,11 @@ func TestThreadRoutesReportStoreFailuresAsDaemonErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	channelID, err := s.CreateChannel("test", "/repo", "", "", "", false)
+	channelID, err := s.CreateChannel(context.Background(), "test", "/repo", "", "", "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	threadID, err := s.CreateThread(channelID, "thread")
+	threadID, err := s.CreateThread(context.Background(), channelID, "thread")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -599,11 +600,11 @@ func TestThreadRoutesRejectMalformedThreadIDs(t *testing.T) {
 
 func TestLiveBatchIgnoresSerializedSequencesAndUsesDestinationReferences(t *testing.T) {
 	s, h, threadID := newTestHandlerWithThread(t)
-	existingSeq, err := s.AppendMessage(threadID, "alice", "human", "user", "existing")
+	existingSeq, err := s.AppendMessage(context.Background(), threadID, "alice", "human", "user", "existing")
 	if err != nil {
 		t.Fatal(err)
 	}
-	existingID, err := s.MessageIDBySeq(threadID, existingSeq)
+	existingID, err := s.MessageIDBySeq(context.Background(), threadID, existingSeq)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -626,14 +627,14 @@ func TestLiveBatchIgnoresSerializedSequencesAndUsesDestinationReferences(t *test
 		t.Fatalf("results = %+v, want destination sequences 2 and 3 and existing message id %d", results, existingID)
 	}
 
-	messages, err := s.ListMessages(threadID, 0)
+	messages, err := s.ListMessages(context.Background(), threadID, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(messages) != 3 || messages[1].ParentID.Valid || messages[2].ParentIDValue() != existingID || !messages[2].ParentSeq.Valid || messages[2].ParentSeq.Int64 != existingSeq {
 		t.Fatalf("messages = %+v, want only the reply to reference existing sequence %d", messages, existingSeq)
 	}
-	reactions, err := s.ListReactions(threadID)
+	reactions, err := s.ListReactions(context.Background(), threadID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -647,7 +648,7 @@ func TestBatchEventsRejectBodyLargerThanOneMebibyte(t *testing.T) {
 	body := `{"events":[{"type":"message","name":"alice","author_type":"human","role":"user","content":"` + strings.Repeat("x", (1<<20)+1) + `"}]}`
 	rec := serveRequest(t, h, http.MethodPost, fmt.Sprintf("/v1/threads/%d/events", threadID), body)
 	assertErrorEnvelope(t, rec, http.StatusBadRequest, "BAD_JSONL")
-	messages, err := s.ListMessages(threadID, 0)
+	messages, err := s.ListMessages(context.Background(), threadID, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -661,7 +662,7 @@ func TestBatchEventsRejectTrailingJSON(t *testing.T) {
 	body := `{"events":[{"type":"message","name":"alice","author_type":"human","role":"user","content":"hello"}]} {"extra":true}`
 	rec := serveRequest(t, h, http.MethodPost, fmt.Sprintf("/v1/threads/%d/events", threadID), body)
 	assertErrorEnvelope(t, rec, http.StatusBadRequest, "BAD_JSONL")
-	messages, err := s.ListMessages(threadID, 0)
+	messages, err := s.ListMessages(context.Background(), threadID, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -675,18 +676,18 @@ func TestLegacyReactionStoreFailureUsesDaemonError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	channelID, err := s.CreateChannel("test", "/repo", "", "", "", false)
+	channelID, err := s.CreateChannel(context.Background(), "test", "/repo", "", "", "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	threadID, err := s.CreateThread(channelID, "thread")
+	threadID, err := s.CreateThread(context.Background(), channelID, "thread")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.AppendMessage(threadID, "alice", "human", "user", "target"); err != nil {
+	if _, err := s.AppendMessage(context.Background(), threadID, "alice", "human", "user", "target"); err != nil {
 		t.Fatal(err)
 	}
-	messages, err := s.ListMessages(threadID, 0)
+	messages, err := s.ListMessages(context.Background(), threadID, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -701,11 +702,11 @@ func TestLegacyReactionStoreFailureUsesDaemonError(t *testing.T) {
 
 func TestLegacyReactionValidationAndConflictRemainClientErrors(t *testing.T) {
 	s, h, threadID := newTestHandlerWithThread(t)
-	seq, err := s.AppendMessage(threadID, "alice", "human", "user", "target")
+	seq, err := s.AppendMessage(context.Background(), threadID, "alice", "human", "user", "target")
 	if err != nil {
 		t.Fatal(err)
 	}
-	messageID, err := s.MessageIDBySeq(threadID, seq)
+	messageID, err := s.MessageIDBySeq(context.Background(), threadID, seq)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -726,7 +727,7 @@ func TestChannelAndThreadCreationStoreFailuresAreDaemonErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	channelID, err := s.CreateChannel("test", "/repo", "", "", "", false)
+	channelID, err := s.CreateChannel(context.Background(), "test", "/repo", "", "", "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -767,18 +768,18 @@ func TestChannelAndThreadCreationValidationAndConflictsStayClientErrors(t *testi
 func TestMessagePostRejectsParentFromAnotherThreadAsClientError(t *testing.T) {
 	s, h, threadID := newTestHandlerWithThread(t)
 	otherThreadID := newTestThread(t, s, "other")
-	otherSeq, err := s.AppendMessage(otherThreadID, "alice", "human", "user", "elsewhere")
+	otherSeq, err := s.AppendMessage(context.Background(), otherThreadID, "alice", "human", "user", "elsewhere")
 	if err != nil {
 		t.Fatal(err)
 	}
-	otherID, err := s.MessageIDBySeq(otherThreadID, otherSeq)
+	otherID, err := s.MessageIDBySeq(context.Background(), otherThreadID, otherSeq)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	rec := serveRequest(t, h, http.MethodPost, fmt.Sprintf("/v1/threads/%d/messages", threadID), fmt.Sprintf(`{"name":"alice","role":"user","content":"reply","parent_id":%d}`, otherID))
 	assertErrorEnvelope(t, rec, http.StatusBadRequest, "BAD_JSONL")
-	messages, err := s.ListMessages(threadID, 0)
+	messages, err := s.ListMessages(context.Background(), threadID, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -795,7 +796,7 @@ func TestBatchEventsUseJSONLCodecNormalization(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d body %s", rec.Code, rec.Body.String())
 	}
-	messages, err := s.ListMessages(threadID, 0)
+	messages, err := s.ListMessages(context.Background(), threadID, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -829,7 +830,7 @@ func TestBatchEventsRejectLinesTheCodecRejects(t *testing.T) {
 			assertErrorEnvelope(t, rec, http.StatusBadRequest, "BAD_JSONL")
 		})
 	}
-	messages, err := s.ListMessages(threadID, 0)
+	messages, err := s.ListMessages(context.Background(), threadID, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -861,7 +862,7 @@ func TestShutdownRejectsAgentRequests(t *testing.T) {
 
 func TestLegacyReactionRejectsMissingMessageTarget(t *testing.T) {
 	s, h, threadID := newTestHandlerWithThread(t)
-	if _, err := s.AppendMessage(threadID, "alice", "human", "user", "target"); err != nil {
+	if _, err := s.AppendMessage(context.Background(), threadID, "alice", "human", "user", "target"); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{"/v1/messages/9999/reactions"} {
@@ -870,7 +871,7 @@ func TestLegacyReactionRejectsMissingMessageTarget(t *testing.T) {
 			assertErrorEnvelope(t, rec, http.StatusNotFound, "MESSAGE_NOT_FOUND")
 		})
 	}
-	reactions, err := s.ListReactions(threadID)
+	reactions, err := s.ListReactions(context.Background(), threadID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -890,7 +891,7 @@ func newTestHandlerWithThread(t *testing.T) (*store.Store, http.Handler, int64) 
 			t.Errorf("close store: %v", err)
 		}
 	})
-	if _, err := s.CreateChannel("test", "/repo", "", "", "", false); err != nil {
+	if _, err := s.CreateChannel(context.Background(), "test", "/repo", "", "", "", false); err != nil {
 		t.Fatal(err)
 	}
 	threadID := newTestThread(t, s, "thread")
@@ -899,14 +900,14 @@ func newTestHandlerWithThread(t *testing.T) (*store.Store, http.Handler, int64) 
 
 func newTestThread(t *testing.T, s *store.Store, title string) int64 {
 	t.Helper()
-	channels, err := s.ListChannels("", false)
+	channels, err := s.ListChannels(context.Background(), "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(channels) != 1 {
 		t.Fatalf("channels = %+v", channels)
 	}
-	threadID, err := s.CreateThread(channels[0].ID, title)
+	threadID, err := s.CreateThread(context.Background(), channels[0].ID, title)
 	if err != nil {
 		t.Fatal(err)
 	}

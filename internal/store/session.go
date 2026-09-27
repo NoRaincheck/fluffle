@@ -1,9 +1,12 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"strings"
+
+	"github.com/NoRaincheck/fluffle/internal/db"
 )
 
 const (
@@ -56,21 +59,7 @@ type ThreadContext struct {
 	RepoAbsPath *string
 }
 
-const sessionColumns = `id, thread_id, trigger_message_id, agent_name, status, reply_mode, command,
-	cwd, exit_code, error, reply_message_id, started_at, finished_at, created_at`
-
-type scanner interface {
-	Scan(dest ...any) error
-}
-
-func scanSession(row scanner) (Session, error) {
-	var s Session
-	err := row.Scan(&s.ID, &s.ThreadID, &s.TriggerMessageID, &s.AgentName, &s.Status, &s.ReplyMode, &s.Command,
-		&s.Cwd, &s.ExitCode, &s.Error, &s.ReplyMessageID, &s.StartedAt, &s.FinishedAt, &s.CreatedAt)
-	return s, err
-}
-
-func (s *Store) CreateSession(threadID, triggerMessageID int64, agentName, status, replyMode, command string, cwd *string) (int64, error) {
+func (s *Store) CreateSession(ctx context.Context, threadID, triggerMessageID int64, agentName, status, replyMode, command string, cwd *string) (int64, error) {
 	if strings.TrimSpace(agentName) == "" || strings.TrimSpace(command) == "" {
 		return 0, invalid("agent_name and command required")
 	}
@@ -84,8 +73,8 @@ func (s *Store) CreateSession(threadID, triggerMessageID int64, agentName, statu
 	default:
 		return 0, invalid("bad reply mode %q", replyMode)
 	}
-	var msgThread int64
-	if err := s.db.QueryRow(`SELECT thread_id FROM messages WHERE id = ?`, triggerMessageID).Scan(&msgThread); err != nil {
+	msgThread, err := s.q.GetMessageThreadIDByID(ctx, db.GetMessageThreadIDByIDParams{ID: triggerMessageID})
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return 0, ErrNotFound
 		}
@@ -94,73 +83,77 @@ func (s *Store) CreateSession(threadID, triggerMessageID int64, agentName, statu
 	if msgThread != threadID {
 		return 0, invalid("trigger message not in this thread")
 	}
-	res, err := s.db.Exec(`INSERT INTO agent_sessions(thread_id, trigger_message_id, agent_name, status, reply_mode, command, cwd) VALUES(?,?,?,?,?,?,?)`,
-		threadID, triggerMessageID, agentName, status, replyMode, command, nullIfEmptyPtr(cwd))
+	id, err := s.q.CreateSession(ctx, db.CreateSessionParams{
+		ThreadID:         threadID,
+		TriggerMessageID: triggerMessageID,
+		AgentName:        agentName,
+		Status:           status,
+		ReplyMode:        replyMode,
+		Command:          command,
+		Cwd:              nullIfEmptyPtr(cwd),
+	})
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE") {
-			return 0, ErrConflict
-		}
-		return 0, err
+		return 0, classify(err)
 	}
-	return res.LastInsertId()
+	return id, nil
 }
 
-func nullIfEmptyPtr(v *string) any {
+func nullIfEmptyPtr(v *string) *string {
 	if v == nil || *v == "" {
 		return nil
 	}
-	return *v
+	return v
 }
 
-func (s *Store) ListSessions(threadID int64) ([]Session, error) {
-	rows, err := s.db.Query(`SELECT `+sessionColumns+` FROM agent_sessions WHERE thread_id = ? ORDER BY id ASC`, threadID)
+func (s *Store) ListSessions(ctx context.Context, threadID int64) ([]Session, error) {
+	rows, err := s.q.ListSessions(ctx, db.ListSessionsParams{ThreadID: threadID})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	out := []Session{}
-	for rows.Next() {
-		sess, err := scanSession(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, sess)
+	for _, r := range rows {
+		out = append(out, sessionFromRow(r))
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
-func (s *Store) GetSession(id int64) (Session, error) {
-	sess, err := scanSession(s.db.QueryRow(`SELECT `+sessionColumns+` FROM agent_sessions WHERE id = ?`, id))
+func (s *Store) GetSession(ctx context.Context, id int64) (Session, error) {
+	r, err := s.q.GetSession(ctx, db.GetSessionParams{ID: id})
 	if errors.Is(err, sql.ErrNoRows) {
 		return Session{}, ErrNotFound
 	}
-	return sess, err
-}
-
-func (s *Store) MarkSessionRunning(id int64, startedAt string) error {
-	return s.execSessionUpdate(`UPDATE agent_sessions SET status = ?, started_at = ? WHERE id = ? AND status = ?`, SessionRunning, startedAt, id, SessionQueued)
-}
-
-func (s *Store) SetSessionReply(id int64, replyMessageID int64) error {
-	return s.execSessionUpdate(`UPDATE agent_sessions SET reply_message_id = ? WHERE id = ?`, replyMessageID, id)
-}
-
-func (s *Store) FinishSession(id int64, status string, exitCode *int64, errMsg *string, finishedAt string) error {
-	switch status {
-	case SessionSucceeded, SessionFailed, SessionCanceled:
-	default:
-		return invalid("bad terminal session status %q", status)
-	}
-	return s.execSessionUpdate(`UPDATE agent_sessions SET status = ?, exit_code = ?, error = ?, finished_at = ? WHERE id = ?`,
-		status, exitCode, nullIfEmptyPtr(errMsg), finishedAt, id)
-}
-
-func (s *Store) execSessionUpdate(query string, args ...any) error {
-	res, err := s.db.Exec(query, args...)
 	if err != nil {
-		return err
+		return Session{}, err
 	}
-	n, err := res.RowsAffected()
+	return sessionFromRow(r), nil
+}
+
+func sessionFromRow(r db.AgentSession) Session {
+	return Session{
+		ID:               r.ID,
+		ThreadID:         r.ThreadID,
+		TriggerMessageID: r.TriggerMessageID,
+		AgentName:        r.AgentName,
+		Status:           r.Status,
+		ReplyMode:        r.ReplyMode,
+		Command:          r.Command,
+		Cwd:              r.Cwd,
+		ExitCode:         r.ExitCode,
+		Error:            r.Error,
+		ReplyMessageID:   r.ReplyMessageID,
+		StartedAt:        r.StartedAt,
+		FinishedAt:       r.FinishedAt,
+		CreatedAt:        r.CreatedAt,
+	}
+}
+
+func (s *Store) MarkSessionRunning(ctx context.Context, id int64, startedAt string) error {
+	n, err := s.q.MarkSessionRunning(ctx, db.MarkSessionRunningParams{
+		Status:    SessionRunning,
+		StartedAt: &startedAt,
+		ID:        id,
+		Status_2:  SessionQueued,
+	})
 	if err != nil {
 		return err
 	}
@@ -170,39 +163,65 @@ func (s *Store) execSessionUpdate(query string, args ...any) error {
 	return nil
 }
 
-func (s *Store) AppendSessionEvent(sessionID int64, eventType, content string) (int64, int64, error) {
+func (s *Store) SetSessionReply(ctx context.Context, id int64, replyMessageID int64) error {
+	n, err := s.q.SetSessionReply(ctx, db.SetSessionReplyParams{
+		ReplyMessageID: &replyMessageID,
+		ID:             id,
+	})
+	if err != nil {
+		return classify(err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) FinishSession(ctx context.Context, id int64, status string, exitCode *int64, errMsg *string, finishedAt string) error {
+	switch status {
+	case SessionSucceeded, SessionFailed, SessionCanceled:
+	default:
+		return invalid("bad terminal session status %q", status)
+	}
+	n, err := s.q.FinishSession(ctx, db.FinishSessionParams{
+		Status:     status,
+		ExitCode:   exitCode,
+		Error:      nullIfEmptyPtr(errMsg),
+		FinishedAt: &finishedAt,
+		ID:         id,
+	})
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) AppendSessionEvent(ctx context.Context, sessionID int64, eventType, content string) (int64, int64, error) {
 	switch eventType {
 	case SessionEventPrompt, SessionEventStdout, SessionEventStderr, SessionEventExit, SessionEventError:
 	default:
 		return 0, 0, invalid("bad session event type %q", eventType)
 	}
-	tx, err := s.db.Begin()
+	tx, q, err := s.tx(ctx)
 	if err != nil {
 		return 0, 0, err
 	}
 	defer tx.Rollback()
-	var exists int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM agent_sessions WHERE id = ?`, sessionID).Scan(&exists); err != nil {
-		return 0, 0, err
-	}
-	if exists == 0 {
-		return 0, 0, ErrNotFound
-	}
-	var maxSeq sql.NullInt64
-	if err := tx.QueryRow(`SELECT MAX(seq) FROM agent_session_events WHERE session_id = ?`, sessionID).Scan(&maxSeq); err != nil {
-		return 0, 0, err
-	}
-	seq := int64(1)
-	if maxSeq.Valid {
-		seq = maxSeq.Int64 + 1
-	}
-	res, err := tx.Exec(`INSERT INTO agent_session_events(session_id, seq, type, content) VALUES(?,?,?,?)`, sessionID, seq, eventType, content)
+	seq, err := nextSessionEventSeq(ctx, q, sessionID)
 	if err != nil {
 		return 0, 0, err
 	}
-	id, err := res.LastInsertId()
+	id, err := q.InsertSessionEvent(ctx, db.InsertSessionEventParams{
+		SessionID: sessionID,
+		Seq:       seq,
+		Type:      eventType,
+		Content:   content,
+	})
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, classify(err)
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, 0, err
@@ -210,62 +229,79 @@ func (s *Store) AppendSessionEvent(sessionID int64, eventType, content string) (
 	return seq, id, nil
 }
 
-func (s *Store) ListSessionEvents(sessionID int64) ([]SessionEvent, error) {
-	rows, err := s.db.Query(`SELECT id, session_id, seq, type, content, COALESCE(created_at,'') FROM agent_session_events WHERE session_id = ? ORDER BY seq ASC`, sessionID)
+func nextSessionEventSeq(ctx context.Context, q *db.Queries, sessionID int64) (int64, error) {
+	last, err := q.GetLastSessionEventSeq(ctx, db.GetLastSessionEventSeqParams{SessionID: sessionID})
+	if errors.Is(err, sql.ErrNoRows) {
+		return 1, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return last + 1, nil
+}
+
+func (s *Store) ListSessionEvents(ctx context.Context, sessionID int64) ([]SessionEvent, error) {
+	rows, err := s.q.ListSessionEvents(ctx, db.ListSessionEventsParams{SessionID: sessionID})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	out := []SessionEvent{}
-	for rows.Next() {
-		var e SessionEvent
-		if err := rows.Scan(&e.ID, &e.SessionID, &e.Seq, &e.Type, &e.Content, &e.CreatedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, e)
+	for _, r := range rows {
+		out = append(out, SessionEvent{
+			ID:        r.ID,
+			SessionID: r.SessionID,
+			Seq:       r.Seq,
+			Type:      r.Type,
+			Content:   r.Content,
+			CreatedAt: r.CreatedAt,
+		})
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
-func (s *Store) CountAgentMessagesAfter(threadID int64, name string, afterSeq int64) (int, error) {
-	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE thread_id = ? AND name = ? AND author_type = 'agent' AND seq > ?`, threadID, name, afterSeq).Scan(&n)
-	return n, err
+func (s *Store) CountAgentMessagesAfter(ctx context.Context, threadID int64, name string, afterSeq int64) (int, error) {
+	n, err := s.q.CountAgentMessagesAfter(ctx, db.CountAgentMessagesAfterParams{
+		ThreadID: threadID,
+		Name:     name,
+		Seq:      afterSeq,
+	})
+	return int(n), err
 }
 
-func (s *Store) ThreadContext(threadID int64) (ThreadContext, error) {
-	var tc ThreadContext
-	err := s.db.QueryRow(`SELECT t.id, t.title, c.id, c.name, c.repo_abs_path
-		FROM threads t JOIN channels c ON c.id = t.channel_id
-		WHERE t.id = ?`, threadID).
-		Scan(&tc.ThreadID, &tc.ThreadTitle, &tc.ChannelID, &tc.ChannelName, &tc.RepoAbsPath)
+func (s *Store) ThreadContext(ctx context.Context, threadID int64) (ThreadContext, error) {
+	r, err := s.q.GetThreadContext(ctx, db.GetThreadContextParams{ID: threadID})
 	if errors.Is(err, sql.ErrNoRows) {
 		return ThreadContext{}, ErrNotFound
 	}
 	if err != nil {
 		return ThreadContext{}, err
 	}
-	return tc, nil
+	return ThreadContext{
+		ThreadID:    r.ThreadID,
+		ThreadTitle: r.ThreadTitle,
+		ChannelID:   r.ChannelID,
+		ChannelName: r.ChannelName,
+		RepoAbsPath: r.RepoAbsPath,
+	}, nil
 }
 
-func (s *Store) MessageByID(id int64) (Message, error) {
-	row := s.db.QueryRow(`SELECT m.id, m.thread_id, m.seq, m.parent_id, p.seq, m.name, m.author_type, m.role, m.content, COALESCE(m.created_at,'')
-		FROM messages m LEFT JOIN messages p ON p.id = m.parent_id WHERE m.id = ?`, id)
-	var m Message
-	err := row.Scan(&m.ID, &m.ThreadID, &m.Seq, &m.ParentID, &m.ParentSeq, &m.Name, &m.AuthorType, &m.Role, &m.Content, &m.CreatedAt)
+func (s *Store) MessageByID(ctx context.Context, id int64) (Message, error) {
+	r, err := s.q.GetMessageByIDWithParent(ctx, db.GetMessageByIDWithParentParams{ID: id})
 	if errors.Is(err, sql.ErrNoRows) {
 		return Message{}, ErrNotFound
 	}
-	return m, err
+	if err != nil {
+		return Message{}, err
+	}
+	return messageFromDetailRow(r), nil
 }
 
-func (s *Store) ReconcileSessions(finishedAt string) (int, error) {
-	res, err := s.db.Exec(`UPDATE agent_sessions
-		SET status = ?, finished_at = ?, error = 'daemon restarted while ' || status
-		WHERE status IN (?, ?)`, SessionCanceled, finishedAt, SessionQueued, SessionRunning)
-	if err != nil {
-		return 0, err
-	}
-	n, err := res.RowsAffected()
+func (s *Store) ReconcileSessions(ctx context.Context, finishedAt string) (int, error) {
+	n, err := s.q.ReconcileSessions(ctx, db.ReconcileSessionsParams{
+		Status:     SessionCanceled,
+		FinishedAt: &finishedAt,
+		Status_2:   SessionQueued,
+		Status_3:   SessionRunning,
+	})
 	return int(n), err
 }

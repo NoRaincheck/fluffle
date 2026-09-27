@@ -226,7 +226,7 @@ In that state no tick is in flight, so the tick handler cannot run; no response 
 
 ```
 View()
-  ├─ compose active? ──yes──▶ render list (full width) + center(compose view)
+  ├─ compose active? ──yes──▶ render list (full width) + placeOverlay(compose view)
   │
   └─ no ──▶ preview? ──yes──▶ render list (left half) + render preview (right half)
   │                            └── lipgloss.JoinHorizontal(Top, left, right)
@@ -273,10 +273,6 @@ Renders the agent session belonging to the cursor's inbox row's thread. It re-re
 ### `helpView()`
 
 Context-sensitive help bar at bottom of list. Shows available key bindings for current view. The inbox hint row carries a session hint that reflects the pane's current mode — `s session` normally, `s thread` while the session pane is showing — so the key always advertises where it will take you back to.
-
-### `center(s string, width int)`
-
-Centers a multi-line string horizontally within `width` columns. Used for compose modal overlay.
 
 ## Error Handling
 

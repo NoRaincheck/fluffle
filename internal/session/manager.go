@@ -66,7 +66,7 @@ func auditCommand(entry agentcfg.Entry) string {
 }
 
 func (m *Manager) Start(threadID, triggerMessageID int64, names []string) {
-	tc, err := m.store.ThreadContext(threadID)
+	tc, err := m.store.ThreadContext(context.Background(), threadID)
 	if err != nil {
 		return
 	}
@@ -78,7 +78,7 @@ func (m *Manager) Start(threadID, triggerMessageID int64, names []string) {
 	if err != nil {
 		return
 	}
-	trigger, err := m.store.MessageByID(triggerMessageID)
+	trigger, err := m.store.MessageByID(context.Background(), triggerMessageID)
 	if err != nil {
 		return
 	}
@@ -92,14 +92,14 @@ func (m *Manager) Start(threadID, triggerMessageID int64, names []string) {
 		if !ok {
 			continue
 		}
-		id, err := m.store.CreateSession(threadID, triggerMessageID, name, store.SessionQueued, entry.Reply, auditCommand(entry), tc.RepoAbsPath)
+		id, err := m.store.CreateSession(context.Background(), threadID, triggerMessageID, name, store.SessionQueued, entry.Reply, auditCommand(entry), tc.RepoAbsPath)
 		if err != nil {
 			continue
 		}
 		m.mu.Lock()
 		if m.closed {
 			m.mu.Unlock()
-			m.store.FinishSession(id, store.SessionCanceled, nil, stringPtr("daemon shut down before start"), nowRFC3339())
+			m.store.FinishSession(context.Background(), id, store.SessionCanceled, nil, stringPtr("daemon shut down before start"), nowRFC3339())
 			continue
 		}
 		m.queued[id] = true
@@ -115,7 +115,7 @@ func (m *Manager) dispatch(id int64, entry agentcfg.Entry, tc store.ThreadContex
 	case m.sem <- struct{}{}:
 	case <-m.ctx.Done():
 		m.dropQueued(id)
-		m.store.FinishSession(id, store.SessionCanceled, nil, stringPtr("daemon shut down before start"), nowRFC3339())
+		m.store.FinishSession(context.Background(), id, store.SessionCanceled, nil, stringPtr("daemon shut down before start"), nowRFC3339())
 		return
 	}
 	defer func() { <-m.sem }()
@@ -126,7 +126,7 @@ func (m *Manager) dispatch(id int64, entry agentcfg.Entry, tc store.ThreadContex
 		m.mu.Unlock()
 		cancel()
 		m.dropQueued(id)
-		m.store.FinishSession(id, store.SessionCanceled, nil, stringPtr("daemon shut down before start"), nowRFC3339())
+		m.store.FinishSession(context.Background(), id, store.SessionCanceled, nil, stringPtr("daemon shut down before start"), nowRFC3339())
 		return
 	}
 	delete(m.queued, id)
@@ -149,7 +149,7 @@ func (m *Manager) dropQueued(id int64) {
 }
 
 func (m *Manager) run(ctx context.Context, id int64, entry agentcfg.Entry, tc store.ThreadContext, trigger store.Message) {
-	if err := m.store.MarkSessionRunning(id, nowRFC3339()); err != nil {
+	if err := m.store.MarkSessionRunning(context.Background(), id, nowRFC3339()); err != nil {
 		m.failIfStillQueued(id, err)
 		return
 	}
@@ -164,9 +164,9 @@ func (m *Manager) run(ctx context.Context, id int64, entry agentcfg.Entry, tc st
 		m.failSession(id, err)
 		return
 	}
-	m.store.AppendSessionEvent(id, store.SessionEventPrompt, prompt)
+	m.store.AppendSessionEvent(context.Background(), id, store.SessionEventPrompt, prompt)
 
-	writer := newStreamWriter(m.store, id)
+	writer := newStreamWriter(context.Background(), m.store, id)
 	req := runner.Request{
 		Command: entry.Command,
 		Env:     envSlice(entry.Env),
@@ -182,37 +182,37 @@ func (m *Manager) run(ctx context.Context, id int64, entry agentcfg.Entry, tc st
 	writer.closeAll()
 
 	if runErr != nil {
-		m.store.AppendSessionEvent(id, store.SessionEventError, runErr.Error())
+		m.store.AppendSessionEvent(context.Background(), id, store.SessionEventError, runErr.Error())
 		if errors.Is(ctx.Err(), context.Canceled) {
-			m.store.FinishSession(id, store.SessionCanceled, nil, stringPtr(runErr.Error()), nowRFC3339())
+			m.store.FinishSession(context.Background(), id, store.SessionCanceled, nil, stringPtr(runErr.Error()), nowRFC3339())
 			return
 		}
-		m.store.FinishSession(id, store.SessionFailed, nil, stringPtr(runErr.Error()), nowRFC3339())
+		m.store.FinishSession(context.Background(), id, store.SessionFailed, nil, stringPtr(runErr.Error()), nowRFC3339())
 		return
 	}
 
-	m.store.AppendSessionEvent(id, store.SessionEventExit, fmt.Sprintf("%d", result.ExitCode))
+	m.store.AppendSessionEvent(context.Background(), id, store.SessionEventExit, fmt.Sprintf("%d", result.ExitCode))
 	m.resolveReply(ctx, id, entry, tc, trigger, result)
 }
 
 func (m *Manager) failSession(id int64, err error) {
-	m.store.AppendSessionEvent(id, store.SessionEventError, err.Error())
-	m.store.FinishSession(id, store.SessionFailed, nil, stringPtr(err.Error()), nowRFC3339())
+	m.store.AppendSessionEvent(context.Background(), id, store.SessionEventError, err.Error())
+	m.store.FinishSession(context.Background(), id, store.SessionFailed, nil, stringPtr(err.Error()), nowRFC3339())
 }
 
 func (m *Manager) failIfStillQueued(id int64, err error) {
-	if sess, getErr := m.store.GetSession(id); getErr == nil && sess.Status != store.SessionQueued {
+	if sess, getErr := m.store.GetSession(context.Background(), id); getErr == nil && sess.Status != store.SessionQueued {
 		return
 	}
 	m.failSession(id, err)
 }
 
 func (m *Manager) historyFor(threadID int64) []jsonl.Line {
-	messages, err := m.store.ListMessages(threadID, 0)
+	messages, err := m.store.ListMessages(context.Background(), threadID, 0)
 	if err != nil {
 		return nil
 	}
-	reactions, err := m.store.ListReactions(threadID)
+	reactions, err := m.store.ListReactions(context.Background(), threadID)
 	if err != nil {
 		reactions = nil
 	}
@@ -243,7 +243,7 @@ func (m *Manager) historyFor(threadID int64) []jsonl.Line {
 }
 
 func (m *Manager) Reconcile() error {
-	_, err := m.store.ReconcileSessions(nowRFC3339())
+	_, err := m.store.ReconcileSessions(context.Background(), nowRFC3339())
 	return err
 }
 
@@ -263,7 +263,7 @@ func (m *Manager) Shutdown() {
 
 		m.cancel()
 		for _, id := range queued {
-			m.store.FinishSession(id, store.SessionCanceled, nil, stringPtr("daemon shut down before start"), nowRFC3339())
+			m.store.FinishSession(context.Background(), id, store.SessionCanceled, nil, stringPtr("daemon shut down before start"), nowRFC3339())
 		}
 	})
 }
@@ -277,7 +277,7 @@ func (m *Manager) ShutdownAndWait() {
 }
 
 func (m *Manager) Cancel(id int64) error {
-	sess, err := m.store.GetSession(id)
+	sess, err := m.store.GetSession(context.Background(), id)
 	if err != nil {
 		return err
 	}
@@ -292,7 +292,7 @@ func (m *Manager) Cancel(id int64) error {
 		cancel()
 		return nil
 	}
-	m.store.FinishSession(id, store.SessionCanceled, nil, stringPtr("canceled"), nowRFC3339())
+	m.store.FinishSession(context.Background(), id, store.SessionCanceled, nil, stringPtr("canceled"), nowRFC3339())
 	return nil
 }
 
@@ -313,29 +313,29 @@ func (m *Manager) resolveReply(ctx context.Context, id int64, entry agentcfg.Ent
 	}
 	if countErr != nil {
 		msg := "could not count agent messages: " + countErr.Error()
-		m.store.AppendSessionEvent(id, store.SessionEventError, msg)
-		m.store.FinishSession(id, store.SessionFailed, exit, stringPtr(msg), nowRFC3339())
+		m.store.AppendSessionEvent(context.Background(), id, store.SessionEventError, msg)
+		m.store.FinishSession(context.Background(), id, store.SessionFailed, exit, stringPtr(msg), nowRFC3339())
 		return
 	}
 	if posted {
-		m.store.FinishSession(id, store.SessionSucceeded, exit, nil, nowRFC3339())
+		m.store.FinishSession(context.Background(), id, store.SessionSucceeded, exit, nil, nowRFC3339())
 		return
 	}
 	if entry.Reply == "cli" {
 		const msg = "agent did not reply (reply=cli)"
-		m.store.AppendSessionEvent(id, store.SessionEventError, msg)
-		m.store.FinishSession(id, store.SessionFailed, exit, stringPtr(msg), nowRFC3339())
+		m.store.AppendSessionEvent(context.Background(), id, store.SessionEventError, msg)
+		m.store.FinishSession(context.Background(), id, store.SessionFailed, exit, stringPtr(msg), nowRFC3339())
 		return
 	}
 	m.postReply(ctx, id, entry, tc, trigger, m.collectStdout(id), exit)
 }
 
 func (m *Manager) finishCanceled(id int64, exit *int64) {
-	m.store.FinishSession(id, store.SessionCanceled, exit, stringPtr("canceled"), nowRFC3339())
+	m.store.FinishSession(context.Background(), id, store.SessionCanceled, exit, stringPtr("canceled"), nowRFC3339())
 }
 
 func (m *Manager) collectStdout(sessionID int64) string {
-	events, err := m.store.ListSessionEvents(sessionID)
+	events, err := m.store.ListSessionEvents(context.Background(), sessionID)
 	if err != nil {
 		return ""
 	}
@@ -352,7 +352,7 @@ func (m *Manager) agentPosted(ctx context.Context, threadID int64, name string, 
 	deadline := time.Now().Add(ReplyGracePeriod)
 	var last error
 	for {
-		n, err := m.store.CountAgentMessagesAfter(threadID, name, afterSeq)
+		n, err := m.store.CountAgentMessagesAfter(context.Background(), threadID, name, afterSeq)
 		if err == nil {
 			last = nil
 			if n > 0 {
@@ -374,19 +374,22 @@ func (m *Manager) postReply(ctx context.Context, id int64, entry agentcfg.Entry,
 		return
 	}
 	if strings.TrimSpace(content) == "" {
-		m.store.FinishSession(id, store.SessionSucceeded, exit, nil, nowRFC3339())
+		m.store.FinishSession(context.Background(), id, store.SessionSucceeded, exit, nil, nowRFC3339())
 		return
 	}
-	seq, err := m.store.AppendMessageWithParent(tc.ThreadID, entry.Name, "agent", "assistant", content, trigger.ID)
+	seq, err := m.store.AppendMessageWithParent(context.Background(), tc.ThreadID, entry.Name, "agent", "assistant", content, trigger.ID)
 	if err != nil {
-		m.store.FinishSession(id, store.SessionFailed, exit, stringPtr(err.Error()), nowRFC3339())
+		m.store.FinishSession(context.Background(), id, store.SessionFailed, exit, stringPtr(err.Error()), nowRFC3339())
 		return
 	}
-	replyID, err := m.store.MessageIDBySeq(tc.ThreadID, seq)
+	replyID, err := m.store.MessageIDBySeq(context.Background(), tc.ThreadID, seq)
 	if err != nil {
-		m.store.FinishSession(id, store.SessionFailed, exit, stringPtr(err.Error()), nowRFC3339())
+		m.store.FinishSession(context.Background(), id, store.SessionFailed, exit, stringPtr(err.Error()), nowRFC3339())
 		return
 	}
-	m.store.SetSessionReply(id, replyID)
-	m.store.FinishSession(id, store.SessionSucceeded, exit, nil, nowRFC3339())
+	if err := m.store.SetSessionReply(context.Background(), id, replyID); err != nil {
+		m.store.FinishSession(context.Background(), id, store.SessionFailed, exit, stringPtr(err.Error()), nowRFC3339())
+		return
+	}
+	m.store.FinishSession(context.Background(), id, store.SessionSucceeded, exit, nil, nowRFC3339())
 }

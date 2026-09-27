@@ -1,6 +1,7 @@
 package apiserver
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -69,8 +70,8 @@ func newSessionHandler(t *testing.T, cfg string) (*store.Store, http.Handler, *r
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
-	chID, _ := s.CreateChannel("c", "/repo", "", "", "", false)
-	thID, _ := s.CreateThread(chID, "t")
+	chID, _ := s.CreateChannel(context.Background(), "c", "/repo", "", "", "", false)
+	thID, _ := s.CreateThread(context.Background(), chID, "t")
 	starter := &recordingStarter{}
 	canceler := &stubCanceler{}
 	h := NewHandlerWithDeps(s, Deps{Starter: starter, Agents: newTestLoader(t, cfg), Canceler: canceler})
@@ -184,7 +185,7 @@ func TestImportedBatchNeverTriggers(t *testing.T) {
 	if calls := starter.snapshot(); len(calls) != 0 {
 		t.Fatalf("import started %d agent session(s) %v, want 0: import must be a data operation", len(calls), calls)
 	}
-	msgs, err := s.ListMessages(thID, 0)
+	msgs, err := s.ListMessages(context.Background(), thID, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,8 +204,8 @@ func TestAgentBatchNeverTriggers(t *testing.T) {
 
 func TestZeroDepsHandlerIsSafeOnMention(t *testing.T) {
 	s, h, _ := newTestHandlerWithThread(t)
-	chans, _ := s.ListChannels("", false)
-	thID, _ := s.CreateThread(chans[0].ID, "t")
+	chans, _ := s.ListChannels(context.Background(), "", false)
+	thID, _ := s.CreateThread(context.Background(), chans[0].ID, "t")
 	rec := postThread(t, h, thID, "messages", `{"name":"alice","role":"user","content":"@reviewer go"}`, "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d body %s", rec.Code, rec.Body.String())
@@ -213,11 +214,11 @@ func TestZeroDepsHandlerIsSafeOnMention(t *testing.T) {
 
 func TestTriggerUsesDatabaseIDNotThreadSeq(t *testing.T) {
 	s, h, starter, _, fillerThreadID := newSessionHandler(t, oneAgentCfg)
-	chans, err := s.ListChannels("", false)
+	chans, err := s.ListChannels(context.Background(), "", false)
 	if err != nil || len(chans) == 0 {
 		t.Fatalf("list channels: %v", err)
 	}
-	mentionThreadID, err := s.CreateThread(chans[0].ID, "second")
+	mentionThreadID, err := s.CreateThread(context.Background(), chans[0].ID, "second")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,9 +252,9 @@ func TestListThreadSessionsReturnsArray(t *testing.T) {
 
 func TestListThreadSessionsReturnsRows(t *testing.T) {
 	s, h, _, _, thID := newSessionHandler(t, "")
-	seq, _ := s.AppendMessage(thID, "alice", "human", "user", "go")
-	msgID, _ := s.MessageIDBySeq(thID, seq)
-	if _, err := s.CreateSession(thID, msgID, "probe", store.SessionSucceeded, "stdout", "c", nil); err != nil {
+	seq, _ := s.AppendMessage(context.Background(), thID, "alice", "human", "user", "go")
+	msgID, _ := s.MessageIDBySeq(context.Background(), thID, seq)
+	if _, err := s.CreateSession(context.Background(), thID, msgID, "probe", store.SessionSucceeded, "stdout", "c", nil); err != nil {
 		t.Fatal(err)
 	}
 	rec := serveRequest(t, h, http.MethodGet, fmt.Sprintf("/v1/threads/%d/sessions", thID), "")
@@ -276,10 +277,10 @@ func TestListThreadSessionsMissingThreadIsNotFound(t *testing.T) {
 
 func TestGetSessionIncludesEvents(t *testing.T) {
 	s, h, _, _, thID := newSessionHandler(t, "")
-	seq, _ := s.AppendMessage(thID, "alice", "human", "user", "go")
-	msgID, _ := s.MessageIDBySeq(thID, seq)
-	id, _ := s.CreateSession(thID, msgID, "probe", store.SessionSucceeded, "stdout", "c", nil)
-	if _, _, err := s.AppendSessionEvent(id, store.SessionEventStdout, "hello"); err != nil {
+	seq, _ := s.AppendMessage(context.Background(), thID, "alice", "human", "user", "go")
+	msgID, _ := s.MessageIDBySeq(context.Background(), thID, seq)
+	id, _ := s.CreateSession(context.Background(), thID, msgID, "probe", store.SessionSucceeded, "stdout", "c", nil)
+	if _, _, err := s.AppendSessionEvent(context.Background(), id, store.SessionEventStdout, "hello"); err != nil {
 		t.Fatal(err)
 	}
 	rec := serveRequest(t, h, http.MethodGet, fmt.Sprintf("/v1/sessions/%d", id), "")
@@ -300,9 +301,9 @@ func TestGetSessionIncludesEvents(t *testing.T) {
 
 func TestGetSessionEmptyEventsIsArray(t *testing.T) {
 	s, h, _, _, thID := newSessionHandler(t, "")
-	seq, _ := s.AppendMessage(thID, "alice", "human", "user", "go")
-	msgID, _ := s.MessageIDBySeq(thID, seq)
-	id, _ := s.CreateSession(thID, msgID, "probe", store.SessionSucceeded, "stdout", "c", nil)
+	seq, _ := s.AppendMessage(context.Background(), thID, "alice", "human", "user", "go")
+	msgID, _ := s.MessageIDBySeq(context.Background(), thID, seq)
+	id, _ := s.CreateSession(context.Background(), thID, msgID, "probe", store.SessionSucceeded, "stdout", "c", nil)
 	rec := serveRequest(t, h, http.MethodGet, fmt.Sprintf("/v1/sessions/%d", id), "")
 	if !strings.Contains(rec.Body.String(), `"events":[]`) {
 		t.Fatalf("empty events must serialize as [], got %s", rec.Body.String())
@@ -501,15 +502,15 @@ func TestZeroDepsAgentListIsEmptyArray(t *testing.T) {
 func TestZeroDepsCancelIsUnavailable(t *testing.T) {
 	s, _, threadID := newTestHandlerWithThread(t)
 	h := NewHandlerWithDeps(s, Deps{})
-	seq, err := s.AppendMessage(threadID, "alice", "human", "user", "go")
+	seq, err := s.AppendMessage(context.Background(), threadID, "alice", "human", "user", "go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	msgID, err := s.MessageIDBySeq(threadID, seq)
+	msgID, err := s.MessageIDBySeq(context.Background(), threadID, seq)
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := s.CreateSession(threadID, msgID, "probe", store.SessionRunning, "stdout", "c", nil)
+	id, err := s.CreateSession(context.Background(), threadID, msgID, "probe", store.SessionRunning, "stdout", "c", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -537,9 +538,9 @@ func TestListAgentsRejectsPost(t *testing.T) {
 
 func TestCancelSucceedsForHumans(t *testing.T) {
 	s, h, _, canceler, thID := newSessionHandler(t, "")
-	seq, _ := s.AppendMessage(thID, "alice", "human", "user", "go")
-	msgID, _ := s.MessageIDBySeq(thID, seq)
-	id, _ := s.CreateSession(thID, msgID, "probe", store.SessionRunning, "stdout", "c", nil)
+	seq, _ := s.AppendMessage(context.Background(), thID, "alice", "human", "user", "go")
+	msgID, _ := s.MessageIDBySeq(context.Background(), thID, seq)
+	id, _ := s.CreateSession(context.Background(), thID, msgID, "probe", store.SessionRunning, "stdout", "c", nil)
 	rec := serveRequest(t, h, http.MethodPost, fmt.Sprintf("/v1/sessions/%d/cancel", id), "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d body %s", rec.Code, rec.Body.String())
@@ -551,18 +552,18 @@ func TestCancelSucceedsForHumans(t *testing.T) {
 
 func TestCancelRejectsAgents(t *testing.T) {
 	s, h, _, _, thID := newSessionHandler(t, "")
-	seq, _ := s.AppendMessage(thID, "alice", "human", "user", "go")
-	msgID, _ := s.MessageIDBySeq(thID, seq)
-	id, _ := s.CreateSession(thID, msgID, "probe", store.SessionRunning, "stdout", "c", nil)
+	seq, _ := s.AppendMessage(context.Background(), thID, "alice", "human", "user", "go")
+	msgID, _ := s.MessageIDBySeq(context.Background(), thID, seq)
+	id, _ := s.CreateSession(context.Background(), thID, msgID, "probe", store.SessionRunning, "stdout", "c", nil)
 	rec := postSession(t, h, id, "probe")
 	assertErrorEnvelope(t, rec, http.StatusForbidden, "AGENT_FORBIDDEN")
 }
 
 func TestCancelFinishedSessionIsConflict(t *testing.T) {
 	s, h, _, canceler, thID := newSessionHandler(t, "")
-	seq, _ := s.AppendMessage(thID, "alice", "human", "user", "go")
-	msgID, _ := s.MessageIDBySeq(thID, seq)
-	id, _ := s.CreateSession(thID, msgID, "probe", store.SessionSucceeded, "stdout", "c", nil)
+	seq, _ := s.AppendMessage(context.Background(), thID, "alice", "human", "user", "go")
+	msgID, _ := s.MessageIDBySeq(context.Background(), thID, seq)
+	id, _ := s.CreateSession(context.Background(), thID, msgID, "probe", store.SessionSucceeded, "stdout", "c", nil)
 	canceler.returnErr = session.ErrTerminal
 	rec := serveRequest(t, h, http.MethodPost, fmt.Sprintf("/v1/sessions/%d/cancel", id), "")
 	assertErrorEnvelope(t, rec, http.StatusConflict, "SESSION_FINISHED")

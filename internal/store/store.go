@@ -1,11 +1,14 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/NoRaincheck/fluffle/internal/db"
 
 	_ "modernc.org/sqlite"
 )
@@ -18,83 +21,18 @@ func invalid(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", ErrInvalid, fmt.Sprintf(format, args...))
 }
 
-const schema = `
-CREATE TABLE IF NOT EXISTS channels(
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL CHECK(length(trim(name)) > 0),
-  repo_abs_path TEXT,
-  repo_remote TEXT,
-  repo_head_sha TEXT,
-  repo_head_branch TEXT,
-  is_orphaned INTEGER NOT NULL DEFAULT 0 CHECK(is_orphaned IN (0,1)),
-  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-  CHECK ((is_orphaned = 1 AND repo_abs_path IS NULL)
-      OR (is_orphaned = 0 AND repo_abs_path IS NOT NULL)),
-  UNIQUE(name, repo_abs_path)
-);
-CREATE UNIQUE INDEX IF NOT EXISTS uniq_orphan_channel_name ON channels(name) WHERE is_orphaned = 1;
-CREATE TABLE IF NOT EXISTS threads(
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  channel_id INTEGER NOT NULL REFERENCES channels(id),
-  title TEXT NOT NULL CHECK(length(trim(title)) > 0),
-  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-);
-CREATE INDEX IF NOT EXISTS idx_threads_channel ON threads(channel_id, id);
-CREATE TABLE IF NOT EXISTS messages(
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  thread_id INTEGER NOT NULL REFERENCES threads(id),
-  seq INTEGER NOT NULL,
-  parent_id INTEGER REFERENCES messages(id),
-  name TEXT NOT NULL CHECK(length(trim(name)) > 0),
-  author_type TEXT NOT NULL CHECK(author_type IN ('human','agent')),
-  role TEXT NOT NULL CHECK(role IN ('user','assistant','system')),
-  content TEXT NOT NULL CHECK(length(trim(content)) > 0),
-  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-  UNIQUE(thread_id, seq)
-);
-CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(parent_id);
-CREATE INDEX IF NOT EXISTS idx_messages_thread_seq ON messages(thread_id, seq);
-CREATE TABLE IF NOT EXISTS reactions(
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  message_id INTEGER NOT NULL REFERENCES messages(id),
-  emoji TEXT NOT NULL CHECK(length(trim(emoji)) > 0),
-  name TEXT NOT NULL CHECK(length(trim(name)) > 0),
-  author_type TEXT NOT NULL CHECK(author_type IN ('human','agent')),
-  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-  UNIQUE(message_id, emoji, name)
-);
-CREATE TABLE IF NOT EXISTS agent_sessions(
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  thread_id INTEGER NOT NULL REFERENCES threads(id),
-  trigger_message_id INTEGER NOT NULL REFERENCES messages(id),
-  agent_name TEXT NOT NULL CHECK(length(trim(agent_name)) > 0),
-  status TEXT NOT NULL CHECK(status IN ('queued','running','succeeded','failed','canceled')),
-  reply_mode TEXT NOT NULL CHECK(reply_mode IN ('stdout','cli','auto')),
-  command TEXT NOT NULL CHECK(length(trim(command)) > 0),
-  cwd TEXT,
-  exit_code INTEGER,
-  error TEXT,
-  reply_message_id INTEGER REFERENCES messages(id),
-  started_at TEXT,
-  finished_at TEXT,
-  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-);
-CREATE UNIQUE INDEX IF NOT EXISTS uniq_session_trigger ON agent_sessions(trigger_message_id, agent_name);
-CREATE INDEX IF NOT EXISTS idx_sessions_thread ON agent_sessions(thread_id, id);
-CREATE INDEX IF NOT EXISTS idx_sessions_status ON agent_sessions(status);
-CREATE TABLE IF NOT EXISTS agent_session_events(
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_id INTEGER NOT NULL REFERENCES agent_sessions(id),
-  seq INTEGER NOT NULL,
-  type TEXT NOT NULL CHECK(type IN ('prompt','stdout','stderr','exit','error')),
-  content TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-  UNIQUE(session_id, seq)
-);
-CREATE INDEX IF NOT EXISTS idx_session_events ON agent_session_events(session_id, seq);
-`
+type Store struct {
+	db *sql.DB
+	q  *db.Queries
+}
 
-type Store struct{ db *sql.DB }
+func (s *Store) tx(ctx context.Context) (*sql.Tx, *db.Queries, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	return tx, s.q.WithTx(tx), nil
+}
 
 type Channel struct {
 	ID                                                                    int64
@@ -103,160 +41,159 @@ type Channel struct {
 }
 
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	conn, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1)
-	if err := migrate(db, schema); err != nil {
-		db.Close()
+	conn.SetMaxOpenConns(1)
+	if err := prepare(conn); err != nil {
+		conn.Close()
 		return nil, err
 	}
-	return &Store{db: db}, nil
+	return &Store{db: conn, q: db.New(conn)}, nil
 }
 
-func hasColumn(db *sql.DB, table, column string) (bool, error) {
-	rows, err := db.Query("PRAGMA table_info(" + table + ")")
-	if err != nil {
-		return false, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var cid int
-		var name, typ string
-		var notNull, pk int
-		var dfltValue sql.NullString
-		if err := rows.Scan(&cid, &name, &typ, &notNull, &dfltValue, &pk); err != nil {
-			return false, err
-		}
-		if name == column {
-			return true, nil
-		}
-	}
-	return false, rows.Err()
-}
-
-func dropArchivedAtColumns(db *sql.DB) error {
-	for _, table := range []string{"channels", "threads"} {
-		present, err := hasColumn(db, table, "archived_at")
-		if err != nil {
-			return err
-		}
-		if !present {
-			continue
-		}
-		if _, err := db.Exec("ALTER TABLE " + table + " DROP COLUMN archived_at"); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func applySchema(db *sql.DB, schema string) error {
-	if _, err := db.Exec(schema); err != nil {
+func prepare(conn *sql.DB) error {
+	if err := enableForeignKeys(conn); err != nil {
 		return err
 	}
-	return dropArchivedAtColumns(db)
-}
-
-func migrate(db *sql.DB, schema string) error {
-	rows, err := db.Query(`PRAGMA table_info(messages)`)
+	legacy, err := legacyRebuildRequired(conn)
 	if err != nil {
-		return applySchema(db, schema)
+		return err
 	}
-	found := false
-	for rows.Next() {
-		var cid int
-		var name, typ string
-		var notNull, pk int
-		var dfltValue sql.NullString
-		if err := rows.Scan(&cid, &name, &typ, &notNull, &dfltValue, &pk); err != nil {
-			rows.Close()
+	if legacy {
+		if err := dropLegacyTables(conn); err != nil {
 			return err
 		}
-		if name == "parent_id" {
-			found = true
-			break
-		}
 	}
-	rows.Close()
-	if found {
-		return applySchema(db, schema)
+	if err := migrateUp(conn, migrationFS); err != nil {
+		return err
 	}
-	for _, tbl := range []string{"reactions", "messages", "threads", "channels"} {
-		db.Exec("DROP TABLE IF EXISTS " + tbl)
-	}
-	return applySchema(db, schema)
+	return dropArchivedAtColumns(conn)
 }
 
 func (s *Store) Close() error { return s.db.Close() }
 
-func (s *Store) CreateChannel(name, repoAbsPath, repoRemote, repoHeadSHA, repoHeadBranch string, orphaned bool) (int64, error) {
+func (s *Store) CreateChannel(ctx context.Context, name, repoAbsPath, repoRemote, repoHeadSHA, repoHeadBranch string, orphaned bool) (int64, error) {
 	if strings.TrimSpace(name) == "" {
 		return 0, invalid("channel name required")
 	}
-	var abs any
-	var isOrphan int
+	var abs *string
+	var isOrphan int64
 	if orphaned {
 		if repoAbsPath != "" {
 			return 0, invalid("orphaned channel must not have repo path")
 		}
-		abs = nil
 		isOrphan = 1
 	} else {
 		if strings.TrimSpace(repoAbsPath) == "" {
 			return 0, invalid("repo path required")
 		}
-		abs = repoAbsPath
+		abs = &repoAbsPath
 	}
-	res, err := s.db.Exec(`INSERT INTO channels(name, repo_abs_path, repo_remote, repo_head_sha, repo_head_branch, is_orphaned) VALUES(?,?,?,?,?,?)`, name, abs, nullIfEmpty(repoRemote), nullIfEmpty(repoHeadSHA), nullIfEmpty(repoHeadBranch), isOrphan)
+	id, err := s.q.CreateChannel(ctx, db.CreateChannelParams{
+		Name:           name,
+		RepoAbsPath:    abs,
+		RepoRemote:     nullIfEmpty(repoRemote),
+		RepoHeadSHA:    nullIfEmpty(repoHeadSHA),
+		RepoHeadBranch: nullIfEmpty(repoHeadBranch),
+		IsOrphaned:     isOrphan,
+	})
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE") {
-			return 0, ErrConflict
-		}
-		return 0, err
+		return 0, classify(err)
 	}
-	return res.LastInsertId()
+	return id, nil
 }
 
-func (s *Store) ListChannels(repoAbsPath string, includeOrphaned bool) ([]Channel, error) {
-	q := `SELECT id, name, COALESCE(repo_abs_path,''), COALESCE(repo_remote,''), COALESCE(repo_head_sha,''), COALESCE(repo_head_branch,''), is_orphaned, COALESCE(created_at,'') FROM channels`
-	var conds []string
-	var args []any
-	if repoAbsPath != "" {
-		conds = append(conds, `repo_abs_path = ?`)
-		args = append(args, repoAbsPath)
-	}
-	if !includeOrphaned {
-		conds = append(conds, `is_orphaned = 0`)
-	}
-	if len(conds) > 0 {
-		q += ` WHERE ` + strings.Join(conds, ` AND `)
-	}
-	q += ` ORDER BY id`
-	rows, err := s.db.Query(q, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []Channel
-	for rows.Next() {
-		var c Channel
-		var isOrphan int
-		if err := rows.Scan(&c.ID, &c.Name, &c.RepoAbsPath, &c.RepoRemote, &c.RepoHeadSHA, &c.RepoHeadBranch, &isOrphan, &c.CreatedAt); err != nil {
+func (s *Store) ListChannels(ctx context.Context, repoAbsPath string, includeOrphaned bool) ([]Channel, error) {
+	switch {
+	case repoAbsPath != "" && !includeOrphaned:
+		rows, err := s.q.ListChannelsByRepoNonOrphaned(ctx, db.ListChannelsByRepoNonOrphanedParams{RepoAbsPath: &repoAbsPath})
+		if err != nil {
 			return nil, err
 		}
-		c.IsOrphaned = isOrphan == 1
-		out = append(out, c)
+		return channelsFromRows(rows, func(r db.ListChannelsByRepoNonOrphanedRow) Channel {
+			return channelFromFields(r.ID, r.Name, r.RepoAbsPath, r.RepoRemote, r.RepoHeadSHA, r.RepoHeadBranch, r.IsOrphaned, r.CreatedAt)
+		}), nil
+	case repoAbsPath != "":
+		rows, err := s.q.ListChannelsByRepo(ctx, db.ListChannelsByRepoParams{RepoAbsPath: &repoAbsPath})
+		if err != nil {
+			return nil, err
+		}
+		return channelsFromRows(rows, func(r db.ListChannelsByRepoRow) Channel {
+			return channelFromFields(r.ID, r.Name, r.RepoAbsPath, r.RepoRemote, r.RepoHeadSHA, r.RepoHeadBranch, r.IsOrphaned, r.CreatedAt)
+		}), nil
+	case !includeOrphaned:
+		rows, err := s.q.ListChannelsNonOrphaned(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return channelsFromRows(rows, func(r db.ListChannelsNonOrphanedRow) Channel {
+			return channelFromFields(r.ID, r.Name, r.RepoAbsPath, r.RepoRemote, r.RepoHeadSHA, r.RepoHeadBranch, r.IsOrphaned, r.CreatedAt)
+		}), nil
+	default:
+		rows, err := s.q.ListChannelsAll(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return channelsFromRows(rows, func(r db.ListChannelsAllRow) Channel {
+			return channelFromFields(r.ID, r.Name, r.RepoAbsPath, r.RepoRemote, r.RepoHeadSHA, r.RepoHeadBranch, r.IsOrphaned, r.CreatedAt)
+		}), nil
 	}
-	return out, rows.Err()
 }
 
-func nullIfEmpty(v string) any {
+func channelFromFields(id int64, name, repoAbsPath, repoRemote, repoHeadSHA, repoHeadBranch string, isOrphaned int64, createdAt string) Channel {
+	return Channel{
+		ID:             id,
+		Name:           name,
+		RepoAbsPath:    repoAbsPath,
+		RepoRemote:     repoRemote,
+		RepoHeadSHA:    repoHeadSHA,
+		RepoHeadBranch: repoHeadBranch,
+		IsOrphaned:     isOrphaned == 1,
+		CreatedAt:      createdAt,
+	}
+}
+
+func channelsFromRows[T any](rows []T, f func(T) Channel) []Channel {
+	var out []Channel
+	for _, r := range rows {
+		out = append(out, f(r))
+	}
+	return out
+}
+
+func threadFromFields(id, channelID int64, title, createdAt string) Thread {
+	return Thread{ID: id, ChannelID: channelID, Title: title, CreatedAt: createdAt}
+}
+
+func messageFromFields(id, threadID, seq int64, parentID sql.NullInt64, parentSeq *int64, name, authorType, role, content, createdAt string) Message {
+	return Message{
+		ID:         id,
+		ThreadID:   threadID,
+		Seq:        seq,
+		ParentID:   parentID,
+		ParentSeq:  nullInt64FromPtr(parentSeq),
+		Name:       name,
+		AuthorType: authorType,
+		Role:       role,
+		Content:    content,
+		CreatedAt:  createdAt,
+	}
+}
+
+func nullInt64FromPtr(v *int64) sql.NullInt64 {
+	if v == nil {
+		return sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: *v, Valid: true}
+}
+
+func nullIfEmpty(v string) *string {
 	if v == "" {
 		return nil
 	}
-	return v
+	return &v
 }
 
 type Thread struct {
@@ -308,60 +245,48 @@ type InboxMessage struct {
 	ThreadTitle string `json:"thread_title"`
 }
 
-func (s *Store) CreateThread(channelID int64, title string) (int64, error) {
+func (s *Store) CreateThread(ctx context.Context, channelID int64, title string) (int64, error) {
 	if strings.TrimSpace(title) == "" {
 		return 0, invalid("title required")
 	}
-	var n int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM channels WHERE id = ?`, channelID).Scan(&n); err != nil {
-		return 0, err
-	}
-	if n == 0 {
-		return 0, ErrNotFound
-	}
-	res, err := s.db.Exec(`INSERT INTO threads(channel_id, title) VALUES(?,?)`, channelID, title)
+	id, err := s.q.CreateThread(ctx, db.CreateThreadParams{ChannelID: channelID, Title: title})
 	if err != nil {
-		return 0, err
+		return 0, classify(err)
 	}
-	return res.LastInsertId()
+	return id, nil
 }
 
-func (s *Store) ListThreads(channelID int64) ([]Thread, error) {
-	rows, err := s.db.Query(`SELECT id, channel_id, title, COALESCE(created_at,'') FROM threads WHERE channel_id = ? ORDER BY id`, channelID)
+func (s *Store) ListThreads(ctx context.Context, channelID int64) ([]Thread, error) {
+	rows, err := s.q.ListThreads(ctx, db.ListThreadsParams{ChannelID: channelID})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var out []Thread
-	for rows.Next() {
-		var th Thread
-		if err := rows.Scan(&th.ID, &th.ChannelID, &th.Title, &th.CreatedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, th)
+	for _, r := range rows {
+		out = append(out, threadFromFields(r.ID, r.ChannelID, r.Title, r.CreatedAt))
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
-func (s *Store) AppendMessage(threadID int64, name, authorType, role, content string) (int64, error) {
-	return s.AppendMessageWithParent(threadID, name, authorType, role, content, 0)
+func (s *Store) AppendMessage(ctx context.Context, threadID int64, name, authorType, role, content string) (int64, error) {
+	return s.AppendMessageWithParent(ctx, threadID, name, authorType, role, content, 0)
 }
 
-func (s *Store) AppendMessageWithParent(threadID int64, name, authorType, role, content string, parentID int64) (int64, error) {
-	return s.AppendMessageAtWithParent(threadID, name, authorType, role, content, "", parentID)
+func (s *Store) AppendMessageWithParent(ctx context.Context, threadID int64, name, authorType, role, content string, parentID int64) (int64, error) {
+	return s.AppendMessageAtWithParent(ctx, threadID, name, authorType, role, content, "", parentID)
 }
 
-func (s *Store) AppendMessageAt(threadID int64, name, authorType, role, content, createdAt string) (int64, error) {
-	return s.AppendMessageAtWithParent(threadID, name, authorType, role, content, createdAt, 0)
+func (s *Store) AppendMessageAt(ctx context.Context, threadID int64, name, authorType, role, content, createdAt string) (int64, error) {
+	return s.AppendMessageAtWithParent(ctx, threadID, name, authorType, role, content, createdAt, 0)
 }
 
-func (s *Store) AppendMessageAtWithParent(threadID int64, name, authorType, role, content, createdAt string, parentID int64) (int64, error) {
-	tx, err := s.db.Begin()
+func (s *Store) AppendMessageAtWithParent(ctx context.Context, threadID int64, name, authorType, role, content, createdAt string, parentID int64) (int64, error) {
+	tx, q, err := s.tx(ctx)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()
-	seq, _, err := appendMessageTx(tx, threadID, name, authorType, role, content, createdAt, parentID)
+	seq, _, err := s.appendMessage(ctx, q, threadID, name, authorType, role, content, createdAt, parentID)
 	if err != nil {
 		return 0, err
 	}
@@ -371,13 +296,13 @@ func (s *Store) AppendMessageAtWithParent(threadID int64, name, authorType, role
 	return seq, nil
 }
 
-func (s *Store) AppendMessageByParentSeq(threadID, parentSeq int64, name, authorType, role, content, createdAt string) (int64, int64, error) {
-	tx, err := s.db.Begin()
+func (s *Store) AppendMessageByParentSeq(ctx context.Context, threadID, parentSeq int64, name, authorType, role, content, createdAt string) (int64, int64, error) {
+	tx, q, err := s.tx(ctx)
 	if err != nil {
 		return 0, 0, err
 	}
 	defer tx.Rollback()
-	seq, id, err := appendMessageByParentSeqTx(tx, threadID, parentSeq, name, authorType, role, content, createdAt)
+	seq, id, err := s.appendMessageByParentSeq(ctx, q, threadID, parentSeq, name, authorType, role, content, createdAt)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -387,155 +312,109 @@ func (s *Store) AppendMessageByParentSeq(threadID, parentSeq int64, name, author
 	return seq, id, nil
 }
 
-func appendMessageByParentSeqTx(tx *sql.Tx, threadID, parentSeq int64, name, authorType, role, content, createdAt string) (int64, int64, error) {
-	if parentSeq < 0 {
-		return 0, 0, invalid("parent_seq must be non-negative")
-	}
-	var parentID int64
-	if parentSeq > 0 {
-		var err error
-		parentID, err = messageIDBySeqTx(tx, threadID, parentSeq)
-		if err != nil {
-			return 0, 0, err
-		}
-	}
-	return appendMessageTx(tx, threadID, name, authorType, role, content, createdAt, parentID)
-}
-
-func appendMessageTx(tx *sql.Tx, threadID int64, name, authorType, role, content, createdAt string, parentID int64) (int64, int64, error) {
-	if err := validateMessage(name, authorType, role, content); err != nil {
+func (s *Store) appendMessage(ctx context.Context, q *db.Queries, threadID int64, name, authorType, role, content, createdAt string, parentID int64) (int64, int64, error) {
+	seq, err := nextMessageSeq(ctx, q, threadID)
+	if err != nil {
 		return 0, 0, err
-	}
-	var n int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM threads WHERE id = ?`, threadID).Scan(&n); err != nil {
-		return 0, 0, err
-	}
-	if n == 0 {
-		return 0, 0, ErrNotFound
-	}
-	var maxSeq sql.NullInt64
-	if err := tx.QueryRow(`SELECT MAX(seq) FROM messages WHERE thread_id = ?`, threadID).Scan(&maxSeq); err != nil {
-		return 0, 0, err
-	}
-	seq := int64(1)
-	if maxSeq.Valid {
-		seq = maxSeq.Int64 + 1
 	}
 	if parentID > 0 {
-		var parentThreadID int64
-		if err := tx.QueryRow(`SELECT thread_id FROM messages WHERE id = ?`, parentID).Scan(&parentThreadID); err != nil {
-			return 0, 0, ErrNotFound
+		parentThreadID, err := q.GetMessageThreadIDByID(ctx, db.GetMessageThreadIDByIDParams{ID: parentID})
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return 0, 0, ErrNotFound
+			}
+			return 0, 0, err
 		}
 		if parentThreadID != threadID {
 			return 0, 0, invalid("parent message not in this thread")
 		}
 	}
-	var res sql.Result
-	var err error
+	var id int64
 	if createdAt != "" {
 		if _, err := time.Parse(time.RFC3339, createdAt); err != nil {
 			return 0, 0, invalid("created_at %q is not RFC3339: %v", createdAt, err)
 		}
-		res, err = tx.Exec(`INSERT INTO messages(thread_id, seq, parent_id, name, author_type, role, content, created_at) VALUES(?,?,?,?,?,?,?,?)`, threadID, seq, nullIfInt64(parentID), name, authorType, role, content, createdAt)
-		if err != nil {
-			return 0, 0, err
-		}
+		id, err = q.InsertMessage(ctx, db.InsertMessageParams{
+			ThreadID:   threadID,
+			Seq:        seq,
+			ParentID:   nullIfInt64(parentID),
+			Name:       name,
+			AuthorType: authorType,
+			Role:       role,
+			Content:    content,
+			CreatedAt:  createdAt,
+		})
 	} else {
-		res, err = tx.Exec(`INSERT INTO messages(thread_id, seq, parent_id, name, author_type, role, content) VALUES(?,?,?,?,?,?,?)`, threadID, seq, nullIfInt64(parentID), name, authorType, role, content)
-		if err != nil {
-			return 0, 0, err
-		}
+		id, err = q.InsertMessageDefaultCreatedAt(ctx, db.InsertMessageDefaultCreatedAtParams{
+			ThreadID:   threadID,
+			Seq:        seq,
+			ParentID:   nullIfInt64(parentID),
+			Name:       name,
+			AuthorType: authorType,
+			Role:       role,
+			Content:    content,
+		})
 	}
-	id, err := res.LastInsertId()
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, classify(err)
 	}
 	return seq, id, nil
 }
 
-func validateMessage(name, authorType, role, content string) error {
-	if strings.TrimSpace(name) == "" || strings.TrimSpace(content) == "" {
-		return invalid("name and content required")
-	}
-	if authorType != "human" && authorType != "agent" {
-		return invalid("bad author_type %q", authorType)
-	}
-	if role != "user" && role != "assistant" && role != "system" {
-		return invalid("bad role %q", role)
-	}
-	return nil
-}
-
-func nullIfInt64(v int64) any {
+func nullIfInt64(v int64) sql.NullInt64 {
 	if v == 0 {
-		return nil
+		return sql.NullInt64{}
 	}
-	return v
+	return sql.NullInt64{Int64: v, Valid: true}
 }
 
-func (s *Store) MessageIDBySeq(threadID, seq int64) (int64, error) {
-	var id int64
-	err := s.db.QueryRow(`SELECT id FROM messages WHERE thread_id = ? AND seq = ?`, threadID, seq).Scan(&id)
+func (s *Store) MessageIDBySeq(ctx context.Context, threadID, seq int64) (int64, error) {
+	id, err := s.q.GetMessageIDByThreadSeq(ctx, db.GetMessageIDByThreadSeqParams{
+		ThreadID: threadID,
+		Seq:      seq,
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, ErrNotFound
 	}
-	if err != nil {
-		return 0, err
-	}
-	return id, nil
+	return id, err
 }
 
-func messageIDBySeqTx(tx *sql.Tx, threadID, seq int64) (int64, error) {
-	var id int64
-	err := tx.QueryRow(`SELECT id FROM messages WHERE thread_id = ? AND seq = ?`, threadID, seq).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, ErrNotFound
-	}
-	if err != nil {
-		return 0, err
-	}
-	return id, nil
-}
-
-func (s *Store) ListMessages(threadID int64, lastN int) ([]Message, error) {
-	q := `SELECT m.id, m.thread_id, m.seq, m.parent_id, p.seq, m.name, m.author_type, m.role, m.content, COALESCE(m.created_at,'') FROM messages m LEFT JOIN messages p ON p.id = m.parent_id WHERE m.thread_id = ? ORDER BY m.seq ASC`
+func (s *Store) ListMessages(ctx context.Context, threadID int64, lastN int) ([]Message, error) {
 	if lastN > 0 {
-		q = `SELECT * FROM (` + q + `) ORDER BY seq DESC LIMIT ?`
-		q = `SELECT * FROM (` + q + `) ORDER BY seq ASC`
-		rows, err := s.db.Query(q, threadID, lastN)
+		rows, err := s.q.ListMessagesLastN(ctx, db.ListMessagesLastNParams{ThreadID: threadID, Limit: int64(lastN)})
 		if err != nil {
 			return nil, err
 		}
-		defer rows.Close()
-		return scanMessages(rows)
-	}
-	rows, err := s.db.Query(q, threadID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanMessages(rows)
-}
-
-func (s *Store) ListMessagesAfter(threadID, afterSeq int64) ([]Message, error) {
-	rows, err := s.db.Query(`SELECT m.id, m.thread_id, m.seq, m.parent_id, p.seq, m.name, m.author_type, m.role, m.content, COALESCE(m.created_at,'') FROM messages m LEFT JOIN messages p ON p.id = m.parent_id WHERE m.thread_id = ? AND m.seq > ? ORDER BY m.seq ASC`, threadID, afterSeq)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanMessages(rows)
-}
-
-func scanMessages(rows *sql.Rows) ([]Message, error) {
-	var out []Message
-	for rows.Next() {
-		var m Message
-		if err := rows.Scan(&m.ID, &m.ThreadID, &m.Seq, &m.ParentID, &m.ParentSeq, &m.Name, &m.AuthorType, &m.Role, &m.Content, &m.CreatedAt); err != nil {
-			return nil, err
+		var out []Message
+		for _, r := range rows {
+			out = append(out, messageFromFields(r.ID, r.ThreadID, r.Seq, r.ParentID, r.ParentSeq, r.Name, r.AuthorType, r.Role, r.Content, r.CreatedAt))
 		}
-		out = append(out, m)
+		return out, nil
 	}
-	return out, rows.Err()
+	rows, err := s.q.ListMessages(ctx, db.ListMessagesParams{ThreadID: threadID})
+	if err != nil {
+		return nil, err
+	}
+	var out []Message
+	for _, r := range rows {
+		out = append(out, messageFromFields(r.ID, r.ThreadID, r.Seq, r.ParentID, r.ParentSeq, r.Name, r.AuthorType, r.Role, r.Content, r.CreatedAt))
+	}
+	return out, nil
+}
+
+func (s *Store) ListMessagesAfter(ctx context.Context, threadID, afterSeq int64) ([]Message, error) {
+	rows, err := s.q.ListMessagesAfter(ctx, db.ListMessagesAfterParams{
+		ThreadID: threadID,
+		Seq:      afterSeq,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var out []Message
+	for _, r := range rows {
+		out = append(out, messageFromFields(r.ID, r.ThreadID, r.Seq, r.ParentID, r.ParentSeq, r.Name, r.AuthorType, r.Role, r.Content, r.CreatedAt))
+	}
+	return out, nil
 }
 
 func (m Message) ParentIDValue() int64 {
@@ -545,158 +424,137 @@ func (m Message) ParentIDValue() int64 {
 	return 0
 }
 
-func (s *Store) ListInbox(limit int) ([]InboxMessage, error) {
+func messageFromDetailRow(r db.GetMessageByIDWithParentRow) Message {
+	return messageFromFields(r.ID, r.ThreadID, r.Seq, r.ParentID, r.ParentSeq, r.Name, r.AuthorType, r.Role, r.Content, r.CreatedAt)
+}
+
+func reactionFromRow(r db.ListReactionsRow) Reaction {
+	return Reaction{
+		ID:         r.ID,
+		MessageID:  r.MessageID,
+		MessageSeq: r.MessageSeq,
+		Emoji:      r.Emoji,
+		Name:       r.Name,
+		AuthorType: r.AuthorType,
+		CreatedAt:  r.CreatedAt,
+	}
+}
+
+func inboxFromRow(r db.ListInboxRow) InboxMessage {
+	return InboxMessage{
+		Message: Message{
+			ID:         r.ID,
+			ThreadID:   r.ThreadID,
+			Seq:        r.Seq,
+			ParentID:   r.ParentID,
+			Name:       r.Name,
+			AuthorType: r.AuthorType,
+			Role:       r.Role,
+			Content:    r.Content,
+			CreatedAt:  r.CreatedAt,
+		},
+		ChannelName: r.ChannelName,
+		ChannelID:   r.ChannelID,
+		ThreadTitle: r.ThreadTitle,
+	}
+}
+
+func (s *Store) ListInbox(ctx context.Context, limit int) ([]InboxMessage, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	if limit > 200 {
 		limit = 200
 	}
-	q := `SELECT m.id, m.thread_id, m.seq, m.parent_id, m.name, m.author_type, m.role, m.content, COALESCE(m.created_at,''),
-                 c.name, c.id, t.title
-          FROM messages m
-          JOIN threads t ON t.id = m.thread_id
-          JOIN channels c ON c.id = t.channel_id
-          ORDER BY m.created_at DESC, m.id DESC LIMIT ?`
-	rows, err := s.db.Query(q, limit)
+	rows, err := s.q.ListInbox(ctx, db.ListInboxParams{Limit: int64(limit)})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []InboxMessage
-	for rows.Next() {
-		var im InboxMessage
-		if err := rows.Scan(&im.ID, &im.ThreadID, &im.Seq, &im.ParentID, &im.Name, &im.AuthorType, &im.Role, &im.Content, &im.CreatedAt, &im.ChannelName, &im.ChannelID, &im.ThreadTitle); err != nil {
-			return nil, err
-		}
-		out = append(out, im)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+	out := []InboxMessage{}
+	for _, r := range rows {
+		out = append(out, inboxFromRow(r))
 	}
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
 		out[i], out[j] = out[j], out[i]
 	}
-	if out == nil {
-		out = []InboxMessage{}
+	return out, nil
+}
+
+func (s *Store) AddReaction(ctx context.Context, messageID int64, emoji, name, authorType string) error {
+	_, _, err := s.addReaction(ctx, s.q, messageID, emoji, name, authorType, "")
+	return err
+}
+
+func (s *Store) ListReactions(ctx context.Context, threadID int64) ([]Reaction, error) {
+	rows, err := s.q.ListReactions(ctx, db.ListReactionsParams{ThreadID: threadID})
+	if err != nil {
+		return nil, err
+	}
+	var out []Reaction
+	for _, r := range rows {
+		out = append(out, reactionFromRow(r))
 	}
 	return out, nil
 }
 
-func (s *Store) AddReaction(messageID int64, emoji, name, authorType string) error {
-	if err := validateReaction(emoji, name, authorType); err != nil {
-		return err
-	}
-	tx, err := s.db.Begin()
+func (s *Store) AddReactionBySeq(ctx context.Context, threadID, messageSeq int64, emoji, name, authorType string) error {
+	tx, q, err := s.tx(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := messageThreadIDTx(tx, messageID); err != nil {
-		return err
-	}
-	if _, _, err := addReactionTx(tx, messageID, emoji, name, authorType, ""); err != nil {
+	if _, _, err := s.addReactionBySeq(ctx, q, threadID, messageSeq, emoji, name, authorType, ""); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-func messageThreadIDTx(tx *sql.Tx, messageID int64) (int64, error) {
-	if messageID <= 0 {
-		return 0, ErrNotFound
-	}
-	var threadID int64
-	err := tx.QueryRow(`SELECT thread_id FROM messages WHERE id = ?`, messageID).Scan(&threadID)
+func (s *Store) addReactionBySeq(ctx context.Context, q *db.Queries, threadID, messageSeq int64, emoji, name, authorType, createdAt string) (int64, int64, error) {
+	messageID, err := q.GetMessageIDByThreadSeq(ctx, db.GetMessageIDByThreadSeqParams{
+		ThreadID: threadID,
+		Seq:      messageSeq,
+	})
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, ErrNotFound
+		return 0, 0, ErrNotFound
 	}
-	if err != nil {
-		return 0, err
-	}
-	return threadID, nil
-}
-
-func validateReaction(emoji, name, authorType string) error {
-	if strings.TrimSpace(emoji) == "" || strings.TrimSpace(name) == "" {
-		return invalid("emoji and name required")
-	}
-	if authorType != "human" && authorType != "agent" {
-		return invalid("bad author_type %q", authorType)
-	}
-	return nil
-}
-
-func (s *Store) ListReactions(threadID int64) ([]Reaction, error) {
-	rows, err := s.db.Query(`SELECT r.id, r.message_id, m.seq, r.emoji, r.name, r.author_type, COALESCE(r.created_at,'') FROM reactions r JOIN messages m ON m.id = r.message_id WHERE m.thread_id = ? ORDER BY m.seq ASC, r.created_at ASC, r.id ASC`, threadID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []Reaction
-	for rows.Next() {
-		var reaction Reaction
-		if err := rows.Scan(&reaction.ID, &reaction.MessageID, &reaction.MessageSeq, &reaction.Emoji, &reaction.Name, &reaction.AuthorType, &reaction.CreatedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, reaction)
-	}
-	return out, rows.Err()
-}
-
-func (s *Store) AddReactionBySeq(threadID, messageSeq int64, emoji, name, authorType string) error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if _, _, err := addReactionBySeqTx(tx, threadID, messageSeq, emoji, name, authorType, ""); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
-func addReactionBySeqTx(tx *sql.Tx, threadID, messageSeq int64, emoji, name, authorType, createdAt string) (int64, int64, error) {
-	if err := validateReaction(emoji, name, authorType); err != nil {
-		return 0, 0, err
-	}
-	messageID, err := messageIDBySeqTx(tx, threadID, messageSeq)
 	if err != nil {
 		return 0, 0, err
 	}
-	return addReactionTx(tx, messageID, emoji, name, authorType, createdAt)
+	return s.addReaction(ctx, q, messageID, emoji, name, authorType, createdAt)
 }
 
-func addReactionTx(tx *sql.Tx, messageID int64, emoji, name, authorType, createdAt string) (int64, int64, error) {
-	if err := validateReaction(emoji, name, authorType); err != nil {
-		return 0, 0, err
-	}
+func (s *Store) addReaction(ctx context.Context, q *db.Queries, messageID int64, emoji, name, authorType, createdAt string) (int64, int64, error) {
 	var (
-		res sql.Result
-		err error
+		reactionID int64
+		err        error
 	)
 	if createdAt != "" {
 		if _, err := time.Parse(time.RFC3339, createdAt); err != nil {
 			return 0, 0, invalid("created_at %q is not RFC3339: %v", createdAt, err)
 		}
-		res, err = tx.Exec(`INSERT INTO reactions(message_id, emoji, name, author_type, created_at) VALUES(?,?,?,?,?)`, messageID, emoji, name, authorType, createdAt)
+		reactionID, err = q.InsertReaction(ctx, db.InsertReactionParams{
+			MessageID:  messageID,
+			Emoji:      emoji,
+			Name:       name,
+			AuthorType: authorType,
+			CreatedAt:  createdAt,
+		})
 	} else {
-		res, err = tx.Exec(`INSERT INTO reactions(message_id, emoji, name, author_type) VALUES(?,?,?,?)`, messageID, emoji, name, authorType)
+		reactionID, err = q.InsertReactionDefaultCreatedAt(ctx, db.InsertReactionDefaultCreatedAtParams{
+			MessageID:  messageID,
+			Emoji:      emoji,
+			Name:       name,
+			AuthorType: authorType,
+		})
 	}
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE") {
-			return 0, 0, ErrConflict
-		}
-		return 0, 0, err
-	}
-	reactionID, err := res.LastInsertId()
-	if err != nil {
-		return 0, 0, err
+		return 0, 0, classify(err)
 	}
 	return messageID, reactionID, nil
 }
 
-func (s *Store) AppendBatch(threadID int64, events []AppendEvent) ([]AppendResult, error) {
-	tx, err := s.db.Begin()
+func (s *Store) AppendBatch(ctx context.Context, threadID int64, events []AppendEvent) ([]AppendResult, error) {
+	tx, q, err := s.tx(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -706,7 +564,7 @@ func (s *Store) AppendBatch(threadID int64, events []AppendEvent) ([]AppendResul
 			return nil, err
 		}
 	}
-	nextSeq, err := nextThreadSeqTx(tx, threadID)
+	nextSeq, err := nextMessageSeq(ctx, q, threadID)
 	if err != nil {
 		return nil, err
 	}
@@ -722,7 +580,7 @@ func (s *Store) AppendBatch(threadID int64, events []AppendEvent) ([]AppendResul
 			if mapped, ok := sourceSeqs[parentSeq]; ok {
 				parentSeq = mapped
 			}
-			seq, messageID, err := appendMessageByParentSeqTx(tx, threadID, parentSeq, event.Name, event.AuthorType, event.Role, event.Content, event.CreatedAt)
+			seq, messageID, err := s.appendMessageByParentSeq(ctx, q, threadID, parentSeq, event.Name, event.AuthorType, event.Role, event.Content, event.CreatedAt)
 			if err != nil {
 				return nil, err
 			}
@@ -732,7 +590,7 @@ func (s *Store) AppendBatch(threadID int64, events []AppendEvent) ([]AppendResul
 			if mapped, ok := sourceSeqs[messageSeq]; ok {
 				messageSeq = mapped
 			}
-			messageID, reactionID, err := addReactionBySeqTx(tx, threadID, messageSeq, event.Emoji, event.Name, event.AuthorType, event.CreatedAt)
+			messageID, reactionID, err := s.addReactionBySeq(ctx, q, threadID, messageSeq, event.Emoji, event.Name, event.AuthorType, event.CreatedAt)
 			if err != nil {
 				return nil, err
 			}
@@ -754,15 +612,9 @@ func validateAppendEvent(event AppendEvent) error {
 		if event.ParentSeq < 0 {
 			return invalid("parent_seq must be non-negative")
 		}
-		if err := validateMessage(event.Name, event.AuthorType, event.Role, event.Content); err != nil {
-			return err
-		}
 	case "reaction":
 		if event.MessageSeq <= 0 {
 			return invalid("message_seq must be positive")
-		}
-		if err := validateReaction(event.Emoji, event.Name, event.AuthorType); err != nil {
-			return err
 		}
 	default:
 		return invalid("unknown event type %q", event.Type)
@@ -775,22 +627,36 @@ func validateAppendEvent(event AppendEvent) error {
 	return nil
 }
 
-func nextThreadSeqTx(tx *sql.Tx, threadID int64) (int64, error) {
-	var n int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM threads WHERE id = ?`, threadID).Scan(&n); err != nil {
+func (s *Store) appendMessageByParentSeq(ctx context.Context, q *db.Queries, threadID, parentSeq int64, name, authorType, role, content, createdAt string) (int64, int64, error) {
+	if parentSeq < 0 {
+		return 0, 0, invalid("parent_seq must be non-negative")
+	}
+	var parentID int64
+	if parentSeq > 0 {
+		var err error
+		parentID, err = q.GetMessageIDByThreadSeq(ctx, db.GetMessageIDByThreadSeqParams{
+			ThreadID: threadID,
+			Seq:      parentSeq,
+		})
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return 0, 0, ErrNotFound
+			}
+			return 0, 0, err
+		}
+	}
+	return s.appendMessage(ctx, q, threadID, name, authorType, role, content, createdAt, parentID)
+}
+
+func nextMessageSeq(ctx context.Context, q *db.Queries, threadID int64) (int64, error) {
+	last, err := q.GetLastMessageSeq(ctx, db.GetLastMessageSeqParams{ThreadID: threadID})
+	if errors.Is(err, sql.ErrNoRows) {
+		return 1, nil
+	}
+	if err != nil {
 		return 0, err
 	}
-	if n == 0 {
-		return 0, ErrNotFound
-	}
-	var maxSeq sql.NullInt64
-	if err := tx.QueryRow(`SELECT MAX(seq) FROM messages WHERE thread_id = ?`, threadID).Scan(&maxSeq); err != nil {
-		return 0, err
-	}
-	if maxSeq.Valid {
-		return maxSeq.Int64 + 1, nil
-	}
-	return 1, nil
+	return last + 1, nil
 }
 
 func buildSourceSequenceMap(events []AppendEvent, nextSeq int64) (map[int64]int64, error) {

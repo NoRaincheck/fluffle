@@ -1,6 +1,7 @@
 package apiserver
 
 import (
+	"context"
 	"encoding/json"
 	"net/http/httptest"
 	"testing"
@@ -11,9 +12,9 @@ import (
 func TestInboxHandler(t *testing.T) {
 	s, _ := store.Open(":memory:")
 	defer s.Close()
-	ch, _ := s.CreateChannel("general", "", "", "", "", true)
-	th, _ := s.CreateThread(ch, "hello")
-	_, _ = s.AppendMessage(th, "alice", "human", "user", "hi")
+	ch, _ := s.CreateChannel(context.Background(), "general", "", "", "", "", true)
+	th, _ := s.CreateThread(context.Background(), ch, "hello")
+	_, _ = s.AppendMessage(context.Background(), th, "alice", "human", "user", "hi")
 	h := NewHandler(s)
 	req := httptest.NewRequest("GET", "/v1/inbox?limit=10", nil)
 	rec := httptest.NewRecorder()

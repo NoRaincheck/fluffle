@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"strings"
 	"sync"
 	"testing"
@@ -25,13 +26,13 @@ func newGatedAppender(inner *store.Store) *gatedAppender {
 	return &gatedAppender{inner: inner, first: make(chan struct{}), gate: make(chan struct{})}
 }
 
-func (g *gatedAppender) AppendSessionEvent(sessionID int64, eventType, content string) (int64, int64, error) {
+func (g *gatedAppender) AppendSessionEvent(ctx context.Context, sessionID int64, eventType, content string) (int64, int64, error) {
 	g.mu.Lock()
 	g.calls = append(g.calls, content)
 	g.mu.Unlock()
 	g.firstOne.Do(func() { close(g.first) })
 	<-g.gate
-	return g.inner.AppendSessionEvent(sessionID, eventType, content)
+	return g.inner.AppendSessionEvent(ctx, sessionID, eventType, content)
 }
 
 func (g *gatedAppender) callCount() int {
@@ -49,23 +50,23 @@ func newStreamFixture(t *testing.T) (*store.Store, int64) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
-	chID, err := s.CreateChannel("c", "/repo", "", "", "", false)
+	chID, err := s.CreateChannel(context.Background(), "c", "/repo", "", "", "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	thID, err := s.CreateThread(chID, "t")
+	thID, err := s.CreateThread(context.Background(), chID, "t")
 	if err != nil {
 		t.Fatal(err)
 	}
-	seq, err := s.AppendMessage(thID, "alice", "human", "user", "@probe hi")
+	seq, err := s.AppendMessage(context.Background(), thID, "alice", "human", "user", "@probe hi")
 	if err != nil {
 		t.Fatal(err)
 	}
-	msgID, err := s.MessageIDBySeq(thID, seq)
+	msgID, err := s.MessageIDBySeq(context.Background(), thID, seq)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sessID, err := s.CreateSession(thID, msgID, "probe", store.SessionQueued, "stdout", "c", nil)
+	sessID, err := s.CreateSession(context.Background(), thID, msgID, "probe", store.SessionQueued, "stdout", "c", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +76,7 @@ func newStreamFixture(t *testing.T) (*store.Store, int64) {
 func TestStreamWriterSerializesSameStreamFlushes(t *testing.T) {
 	s, sessID := newStreamFixture(t)
 	g := newGatedAppender(s)
-	w := newStreamWriter(g, sessID)
+	w := newStreamWriter(context.Background(), g, sessID)
 	t.Cleanup(w.closeAll)
 	t.Cleanup(g.release)
 
@@ -103,7 +104,7 @@ func TestStreamWriterSerializesSameStreamFlushes(t *testing.T) {
 	<-secondDone
 	w.closeAll()
 
-	events, err := s.ListSessionEvents(sessID)
+	events, err := s.ListSessionEvents(context.Background(), sessID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +124,7 @@ func TestStreamWriterSerializesSameStreamFlushes(t *testing.T) {
 
 func TestStreamWriterCloseAllIsIdempotent(t *testing.T) {
 	s, sessID := newStreamFixture(t)
-	w := newStreamWriter(s, sessID)
+	w := newStreamWriter(context.Background(), s, sessID)
 	w.write("stdout", []byte("tail"))
 	var wg sync.WaitGroup
 	for i := 0; i < 4; i++ {
@@ -134,7 +135,7 @@ func TestStreamWriterCloseAllIsIdempotent(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	events, err := s.ListSessionEvents(sessID)
+	events, err := s.ListSessionEvents(context.Background(), sessID)
 	if err != nil {
 		t.Fatal(err)
 	}

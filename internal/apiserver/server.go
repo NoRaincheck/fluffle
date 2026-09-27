@@ -152,10 +152,10 @@ func listThreadMessages(s *store.Store, threadID int64, w http.ResponseWriter, r
 			writeErr(w, http.StatusBadRequest, "BAD_JSONL", "after_seq must be a non-negative integer")
 			return
 		}
-		messages, err = s.ListMessagesAfter(threadID, afterSeq)
+		messages, err = s.ListMessagesAfter(r.Context(), threadID, afterSeq)
 	} else {
 		last, _ := strconv.Atoi(query.Get("last"))
-		messages, err = s.ListMessages(threadID, last)
+		messages, err = s.ListMessages(r.Context(), threadID, last)
 	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "DAEMON_ERROR", err.Error())
@@ -217,20 +217,20 @@ func appendThreadMessage(s *store.Store, deps Deps, threadID int64, w http.Respo
 	)
 	switch {
 	case body.ParentSeq != 0:
-		seq, _, err = s.AppendMessageByParentSeq(threadID, body.ParentSeq, name, authorType, body.Role, body.Content, body.CreatedAt)
+		seq, _, err = s.AppendMessageByParentSeq(r.Context(), threadID, body.ParentSeq, name, authorType, body.Role, body.Content, body.CreatedAt)
 	case body.CreatedAt != "":
-		seq, err = s.AppendMessageAtWithParent(threadID, name, authorType, body.Role, body.Content, body.CreatedAt, body.ParentID)
+		seq, err = s.AppendMessageAtWithParent(r.Context(), threadID, name, authorType, body.Role, body.Content, body.CreatedAt, body.ParentID)
 	case body.ParentID != 0:
-		seq, err = s.AppendMessageWithParent(threadID, name, authorType, body.Role, body.Content, body.ParentID)
+		seq, err = s.AppendMessageWithParent(r.Context(), threadID, name, authorType, body.Role, body.Content, body.ParentID)
 	default:
-		seq, err = s.AppendMessage(threadID, name, authorType, body.Role, body.Content)
+		seq, err = s.AppendMessage(r.Context(), threadID, name, authorType, body.Role, body.Content)
 	}
 	if err != nil {
 		writeThreadMutationError(w, err)
 		return
 	}
 	if !isAgent(r) && deps.Starter != nil {
-		if triggerMessageID, idErr := s.MessageIDBySeq(threadID, seq); idErr == nil {
+		if triggerMessageID, idErr := s.MessageIDBySeq(r.Context(), threadID, seq); idErr == nil {
 			deps.startSessionForMessage(threadID, triggerMessageID, body.Content)
 		}
 	}
@@ -242,7 +242,7 @@ func listThreadReactions(s *store.Store, threadID int64, w http.ResponseWriter, 
 		writeErr(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
 		return
 	}
-	reactions, err := s.ListReactions(threadID)
+	reactions, err := s.ListReactions(r.Context(), threadID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "DAEMON_ERROR", err.Error())
 		return
@@ -276,7 +276,7 @@ func appendThreadReaction(s *store.Store, threadID, messageSeq int64, w http.Res
 	if name == "" {
 		name = "unknown"
 	}
-	if err := s.AddReactionBySeq(threadID, messageSeq, body.Emoji, name, liveAuthorType(r)); err != nil {
+	if err := s.AddReactionBySeq(r.Context(), threadID, messageSeq, body.Emoji, name, liveAuthorType(r)); err != nil {
 		writeThreadMutationError(w, err)
 		return
 	}
@@ -347,13 +347,13 @@ func appendThreadEvents(s *store.Store, deps Deps, threadID int64, w http.Respon
 			CreatedAt:  line.Timestamp,
 		}
 	}
-	results, err := s.AppendBatch(threadID, events)
+	results, err := s.AppendBatch(r.Context(), threadID, events)
 	if err != nil {
 		writeThreadMutationError(w, err)
 		return
 	}
 	if !agentRequest && !body.Import {
-		deps.startSessionsForBatch(s, threadID, events, results)
+		deps.startSessionsForBatch(r.Context(), s, threadID, events, results)
 	}
 	writeJSON(w, http.StatusOK, results)
 }
@@ -391,7 +391,7 @@ func NewHandlerWithDeps(s *store.Store, d Deps) http.Handler {
 				limit = n
 			}
 		}
-		msgs, err := s.ListInbox(limit)
+		msgs, err := s.ListInbox(r.Context(), limit)
 		if err != nil {
 			writeErr(w, 500, "DAEMON_ERROR", err.Error())
 			return
@@ -403,7 +403,7 @@ func NewHandlerWithDeps(s *store.Store, d Deps) http.Handler {
 		case "GET":
 			repo := r.URL.Query().Get("repo")
 			inc := r.URL.Query().Get("include-orphaned") == "1"
-			list, err := s.ListChannels(repo, inc)
+			list, err := s.ListChannels(r.Context(), repo, inc)
 			if err != nil {
 				writeErr(w, 500, "DAEMON_ERROR", err.Error())
 				return
@@ -425,7 +425,7 @@ func NewHandlerWithDeps(s *store.Store, d Deps) http.Handler {
 				writeErr(w, 400, "BAD_JSONL", err.Error())
 				return
 			}
-			id, err := s.CreateChannel(body.Name, body.RepoAbsPath, body.RepoRemote, body.RepoHeadSHA, body.RepoHeadBranch, body.Orphaned)
+			id, err := s.CreateChannel(r.Context(), body.Name, body.RepoAbsPath, body.RepoRemote, body.RepoHeadSHA, body.RepoHeadBranch, body.Orphaned)
 			switch {
 			case err == nil:
 			case errors.Is(err, store.ErrConflict):
@@ -453,7 +453,7 @@ func NewHandlerWithDeps(s *store.Store, d Deps) http.Handler {
 		id, _ := strconv.ParseInt(parts[0], 10, 64)
 		switch r.Method {
 		case "GET":
-			list, err := s.ListThreads(id)
+			list, err := s.ListThreads(r.Context(), id)
 			if err != nil {
 				writeErr(w, 500, "DAEMON_ERROR", err.Error())
 				return
@@ -474,7 +474,7 @@ func NewHandlerWithDeps(s *store.Store, d Deps) http.Handler {
 				writeErr(w, 400, "BAD_JSONL", err.Error())
 				return
 			}
-			tid, err := s.CreateThread(id, body.Title)
+			tid, err := s.CreateThread(r.Context(), id, body.Title)
 			switch {
 			case err == nil:
 			case errors.Is(err, store.ErrNotFound):
@@ -529,11 +529,11 @@ func NewHandlerWithDeps(s *store.Store, d Deps) http.Handler {
 				writeErr(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
 				return
 			}
-			if _, err := s.ThreadContext(threadID); err != nil {
+			if _, err := s.ThreadContext(r.Context(), threadID); err != nil {
 				writeThreadMutationError(w, err)
 				return
 			}
-			list, err := s.ListSessions(threadID)
+			list, err := s.ListSessions(r.Context(), threadID)
 			if err != nil {
 				writeSessionError(w, err)
 				return
@@ -585,7 +585,7 @@ func NewHandlerWithDeps(s *store.Store, d Deps) http.Handler {
 			writeErr(w, http.StatusBadRequest, "BAD_JSONL", "emoji and name required")
 			return
 		}
-		if err := s.AddReaction(id, body.Emoji, name, authorType); err != nil {
+		if err := s.AddReaction(r.Context(), id, body.Emoji, name, authorType); err != nil {
 			switch {
 			case errors.Is(err, store.ErrNotFound):
 				writeErr(w, http.StatusNotFound, "MESSAGE_NOT_FOUND", "no such message")

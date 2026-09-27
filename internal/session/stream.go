@@ -1,16 +1,18 @@
 package session
 
 import (
+	"context"
 	"strings"
 	"sync"
 	"time"
 )
 
 type eventAppender interface {
-	AppendSessionEvent(sessionID int64, eventType, content string) (int64, int64, error)
+	AppendSessionEvent(ctx context.Context, sessionID int64, eventType, content string) (int64, int64, error)
 }
 
 type streamWriter struct {
+	ctx     context.Context
 	store   eventAppender
 	session int64
 
@@ -24,8 +26,9 @@ type streamWriter struct {
 	once sync.Once
 }
 
-func newStreamWriter(s eventAppender, sessionID int64) *streamWriter {
+func newStreamWriter(ctx context.Context, s eventAppender, sessionID int64) *streamWriter {
 	w := &streamWriter{
+		ctx:     ctx,
 		store:   s,
 		session: sessionID,
 		bufs:    map[string]*strings.Builder{"stdout": {}, "stderr": {}},
@@ -82,7 +85,7 @@ func (w *streamWriter) flush(stream string) {
 	payload := buf.String()
 	buf.Reset()
 	w.mu.Unlock()
-	w.store.AppendSessionEvent(w.session, stream, payload)
+	w.store.AppendSessionEvent(w.ctx, w.session, stream, payload)
 }
 
 func (w *streamWriter) flushAll() {

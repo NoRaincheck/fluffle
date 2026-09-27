@@ -1,6 +1,7 @@
 package devseed
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -29,9 +30,10 @@ type SessionSpec struct {
 }
 
 func Stage(s *store.Store, specs []SessionSpec) ([]int64, error) {
+	ctx := context.Background()
 	ids := make([]int64, 0, len(specs))
 	for _, spec := range specs {
-		id, err := stage(s, spec)
+		id, err := stage(ctx, s, spec)
 		if err != nil {
 			return nil, err
 		}
@@ -40,17 +42,17 @@ func Stage(s *store.Store, specs []SessionSpec) ([]int64, error) {
 	return ids, nil
 }
 
-func stage(s *store.Store, spec SessionSpec) (int64, error) {
+func stage(ctx context.Context, s *store.Store, spec SessionSpec) (int64, error) {
 	if spec.Status != store.SessionQueued &&
 		spec.Status != store.SessionRunning &&
 		!terminal(spec.Status) {
 		return 0, fmt.Errorf("bad session status %q", spec.Status)
 	}
-	thread, err := resolveThread(s, spec)
+	thread, err := resolveThread(ctx, s, spec)
 	if err != nil {
 		return 0, err
 	}
-	messages, err := s.ListMessages(thread.ID, 0)
+	messages, err := s.ListMessages(ctx, thread.ID, 0)
 	if err != nil {
 		return 0, err
 	}
@@ -64,18 +66,18 @@ func stage(s *store.Store, spec SessionSpec) (int64, error) {
 	}
 	startedAt := started.Add(time.Second)
 
-	id, err := s.CreateSession(thread.ID, trigger.ID, spec.Agent, store.SessionQueued, spec.ReplyMode, spec.Command, nil)
+	id, err := s.CreateSession(ctx, thread.ID, trigger.ID, spec.Agent, store.SessionQueued, spec.ReplyMode, spec.Command, nil)
 	if err != nil {
 		return 0, fmt.Errorf("thread %q: %w", spec.Thread, err)
 	}
 	if spec.Status != store.SessionQueued {
-		if err := s.MarkSessionRunning(id, startedAt.Format(time.RFC3339)); err != nil {
+		if err := s.MarkSessionRunning(ctx, id, startedAt.Format(time.RFC3339)); err != nil {
 			return 0, err
 		}
 	}
 	if terminal(spec.Status) {
 		finishedAt := startedAt.Add(spec.Duration)
-		if err := s.FinishSession(id, spec.Status, exitPtr(spec), errorPtr(spec), finishedAt.Format(time.RFC3339)); err != nil {
+		if err := s.FinishSession(ctx, id, spec.Status, exitPtr(spec), errorPtr(spec), finishedAt.Format(time.RFC3339)); err != nil {
 			return 0, err
 		}
 	}
@@ -84,12 +86,12 @@ func stage(s *store.Store, spec SessionSpec) (int64, error) {
 		if err != nil {
 			return 0, fmt.Errorf("thread %q: %w", spec.Thread, err)
 		}
-		if err := s.SetSessionReply(id, reply.ID); err != nil {
+		if err := s.SetSessionReply(ctx, id, reply.ID); err != nil {
 			return 0, err
 		}
 	}
 	for _, event := range spec.Events {
-		if _, _, err := s.AppendSessionEvent(id, event.Type, event.Content); err != nil {
+		if _, _, err := s.AppendSessionEvent(ctx, id, event.Type, event.Content); err != nil {
 			return 0, fmt.Errorf("session %d: %w", id, err)
 		}
 	}
@@ -120,8 +122,8 @@ func errorPtr(spec SessionSpec) *string {
 	return &msg
 }
 
-func resolveThread(s *store.Store, spec SessionSpec) (store.Thread, error) {
-	channels, err := s.ListChannels("", spec.Orphaned)
+func resolveThread(ctx context.Context, s *store.Store, spec SessionSpec) (store.Thread, error) {
+	channels, err := s.ListChannels(ctx, "", spec.Orphaned)
 	if err != nil {
 		return store.Thread{}, err
 	}
@@ -129,7 +131,7 @@ func resolveThread(s *store.Store, spec SessionSpec) (store.Thread, error) {
 		if channel.Name != spec.Channel {
 			continue
 		}
-		threads, err := s.ListThreads(channel.ID)
+		threads, err := s.ListThreads(ctx, channel.ID)
 		if err != nil {
 			return store.Thread{}, err
 		}

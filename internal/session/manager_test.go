@@ -128,10 +128,10 @@ func harness(t *testing.T, cfg string, r runner.Runner) (*store.Store, *Manager,
 	if err := os.WriteFile(global, []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	chID, _ := s.CreateChannel("c", "/repo", "", "", "", false)
-	thID, _ := s.CreateThread(chID, "t")
-	seq, _ := s.AppendMessage(thID, "alice", "human", "user", "@probe do xyz")
-	msgID, _ := s.MessageIDBySeq(thID, seq)
+	chID, _ := s.CreateChannel(context.Background(), "c", "/repo", "", "", "", false)
+	thID, _ := s.CreateThread(context.Background(), chID, "t")
+	seq, _ := s.AppendMessage(context.Background(), thID, "alice", "human", "user", "@probe do xyz")
+	msgID, _ := s.MessageIDBySeq(context.Background(), thID, seq)
 	m := NewManager(s, agentcfg.NewLoader(global), r)
 	t.Cleanup(m.ShutdownAndWait)
 	return s, m, thID, msgID
@@ -141,7 +141,7 @@ func waitSession(t *testing.T, s *store.Store, id int64, timeout time.Duration) 
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		got, err := s.GetSession(id)
+		got, err := s.GetSession(context.Background(), id)
 		if err == nil {
 			switch got.Status {
 			case store.SessionSucceeded, store.SessionFailed, store.SessionCanceled:
@@ -156,7 +156,7 @@ func waitSession(t *testing.T, s *store.Store, id int64, timeout time.Duration) 
 
 func onlySession(t *testing.T, s *store.Store, thID int64) store.Session {
 	t.Helper()
-	list, err := s.ListSessions(thID)
+	list, err := s.ListSessions(context.Background(), thID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,7 @@ func onlySession(t *testing.T, s *store.Store, thID int64) store.Session {
 }
 
 func eventTypes(s *store.Store, id int64) []string {
-	events, err := s.ListSessionEvents(id)
+	events, err := s.ListSessionEvents(context.Background(), id)
 	if err != nil {
 		return nil
 	}
@@ -188,7 +188,7 @@ func hasEvent(s *store.Store, id int64, typ string) bool {
 }
 
 func eventsContain(s *store.Store, id int64, typ, needle string) bool {
-	events, err := s.ListSessionEvents(id)
+	events, err := s.ListSessionEvents(context.Background(), id)
 	if err != nil {
 		return false
 	}
@@ -241,7 +241,7 @@ func TestUnresolvableNameCreatesNoSession(t *testing.T) {
 	s, m, thID, msgID := harness(t, probeCfg, fr)
 	m.Start(thID, msgID, []string{"nosuchagent"})
 	time.Sleep(200 * time.Millisecond)
-	list, _ := s.ListSessions(thID)
+	list, _ := s.ListSessions(context.Background(), thID)
 	if len(list) != 0 {
 		t.Fatalf("sessions = %+v", list)
 	}
@@ -255,7 +255,7 @@ func TestBrokenConfigStartsNoSession(t *testing.T) {
 	s, m, thID, msgID := harness(t, "[[agents]]\nname=\"BAD\"\ncommand=\"x\"\n", fr)
 	m.Start(thID, msgID, []string{"BAD"})
 	time.Sleep(200 * time.Millisecond)
-	list, _ := s.ListSessions(thID)
+	list, _ := s.ListSessions(context.Background(), thID)
 	if len(list) != 0 {
 		t.Fatalf("sessions = %+v", list)
 	}
@@ -327,10 +327,10 @@ func TestOrphanChannelSessionHasNullCwd(t *testing.T) {
 	if err := os.WriteFile(global, []byte(probeCfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	chID, _ := s.CreateChannel("orphan", "", "", "", "", true)
-	thID, _ := s.CreateThread(chID, "t")
-	seq, _ := s.AppendMessage(thID, "alice", "human", "user", "@probe hi")
-	msgID, _ := s.MessageIDBySeq(thID, seq)
+	chID, _ := s.CreateChannel(context.Background(), "orphan", "", "", "", "", true)
+	thID, _ := s.CreateThread(context.Background(), chID, "t")
+	seq, _ := s.AppendMessage(context.Background(), thID, "alice", "human", "user", "@probe hi")
+	msgID, _ := s.MessageIDBySeq(context.Background(), thID, seq)
 	m := NewManager(s, agentcfg.NewLoader(global), &fakeRunner{stdout: "x"})
 	t.Cleanup(m.ShutdownAndWait)
 	m.Start(thID, msgID, []string{"probe"})
@@ -385,7 +385,7 @@ func TestOutputIsCoalesced(t *testing.T) {
 	m.Start(thID, msgID, []string{"probe"})
 	got := waitSession(t, s, onlySession(t, s, thID).ID, 10*time.Second)
 	stdoutEvents := 0
-	events, _ := s.ListSessionEvents(got.ID)
+	events, _ := s.ListSessionEvents(context.Background(), got.ID)
 	for _, e := range events {
 		if e.Type == store.SessionEventStdout {
 			stdoutEvents++
@@ -405,7 +405,7 @@ func TestCoalescedOutputLosesNothing(t *testing.T) {
 	s, m, thID, msgID := harness(t, probeCfg, fr)
 	m.Start(thID, msgID, []string{"probe"})
 	got := waitSession(t, s, onlySession(t, s, thID).ID, 10*time.Second)
-	events, _ := s.ListSessionEvents(got.ID)
+	events, _ := s.ListSessionEvents(context.Background(), got.ID)
 	var b strings.Builder
 	for _, e := range events {
 		if e.Type == store.SessionEventStdout {
@@ -419,7 +419,7 @@ func TestCoalescedOutputLosesNothing(t *testing.T) {
 
 func stdoutEventContents(t *testing.T, s *store.Store, id int64) []string {
 	t.Helper()
-	events, err := s.ListSessionEvents(id)
+	events, err := s.ListSessionEvents(context.Background(), id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -472,9 +472,9 @@ func TestStreamWriterFlushesOnTimer(t *testing.T) {
 func TestHistoryForOrdersMessagesThenReactions(t *testing.T) {
 	fr := &fakeRunner{stdout: "x"}
 	s, m, thID, firstMsgID := harness(t, probeCfg, fr)
-	second, _ := s.AppendMessage(thID, "bob", "human", "user", "beta")
-	third, _ := s.AppendMessage(thID, "probe", "agent", "assistant", "gamma")
-	if err := s.AddReaction(firstMsgID, "👀", "carol", "human"); err != nil {
+	second, _ := s.AppendMessage(context.Background(), thID, "bob", "human", "user", "beta")
+	third, _ := s.AppendMessage(context.Background(), thID, "probe", "agent", "assistant", "gamma")
+	if err := s.AddReaction(context.Background(), firstMsgID, "👀", "carol", "human"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -501,16 +501,16 @@ func TestHistoryForOrdersMessagesThenReactions(t *testing.T) {
 func TestPromptCarriesHistoryInOrder(t *testing.T) {
 	fr := &fakeRunner{stdout: "x"}
 	s, m, thID, firstMsgID := harness(t, probeCfg, fr)
-	s.AppendMessage(thID, "bob", "human", "user", "beta")
-	s.AppendMessage(thID, "probe", "agent", "assistant", "gamma")
-	if err := s.AddReaction(firstMsgID, "👀", "carol", "human"); err != nil {
+	s.AppendMessage(context.Background(), thID, "bob", "human", "user", "beta")
+	s.AppendMessage(context.Background(), thID, "probe", "agent", "assistant", "gamma")
+	if err := s.AddReaction(context.Background(), firstMsgID, "👀", "carol", "human"); err != nil {
 		t.Fatal(err)
 	}
 	m.Start(thID, firstMsgID, []string{"probe"})
 	got := waitSession(t, s, onlySession(t, s, thID).ID, 10*time.Second)
 
 	var prompt string
-	events, err := s.ListSessionEvents(got.ID)
+	events, err := s.ListSessionEvents(context.Background(), got.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -539,16 +539,16 @@ func TestReconcileTerminatesStaleRows(t *testing.T) {
 	s, m, thID, msgID := harness(t, probeCfg, fr)
 	m.Start(thID, msgID, []string{"probe"})
 	waitSession(t, s, onlySession(t, s, thID).ID, 10*time.Second)
-	staleSeq, _ := s.AppendMessage(thID, "alice", "human", "user", "@probe stale")
-	staleMsgID, _ := s.MessageIDBySeq(thID, staleSeq)
-	stale, err := s.CreateSession(thID, staleMsgID, "probe", store.SessionQueued, "stdout", "c", nil)
+	staleSeq, _ := s.AppendMessage(context.Background(), thID, "alice", "human", "user", "@probe stale")
+	staleMsgID, _ := s.MessageIDBySeq(context.Background(), thID, staleSeq)
+	stale, err := s.CreateSession(context.Background(), thID, staleMsgID, "probe", store.SessionQueued, "stdout", "c", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := m.Reconcile(); err != nil {
 		t.Fatal(err)
 	}
-	got, _ := s.GetSession(stale)
+	got, _ := s.GetSession(context.Background(), stale)
 	if got.Status != store.SessionCanceled {
 		t.Fatalf("status = %q", got.Status)
 	}
@@ -560,8 +560,8 @@ func TestShutdownCancelsRunningAndQueuedSessions(t *testing.T) {
 	fr := &fakeRunner{delay: 30 * time.Second, onStart: func() { once.Do(func() { close(started) }) }}
 	s, m, thID, _ := harness(t, probeCfg, fr)
 	for i := 0; i < MaxConcurrentSessions+2; i++ {
-		seq, _ := s.AppendMessage(thID, "alice", "human", "user", "@probe hi")
-		id, _ := s.MessageIDBySeq(thID, seq)
+		seq, _ := s.AppendMessage(context.Background(), thID, "alice", "human", "user", "@probe hi")
+		id, _ := s.MessageIDBySeq(context.Background(), thID, seq)
 		m.Start(thID, id, []string{"probe"})
 	}
 	select {
@@ -571,7 +571,7 @@ func TestShutdownCancelsRunningAndQueuedSessions(t *testing.T) {
 	}
 	m.ShutdownAndWait()
 	m.ShutdownAndWait()
-	list, _ := s.ListSessions(thID)
+	list, _ := s.ListSessions(context.Background(), thID)
 	if len(list) != MaxConcurrentSessions+2 {
 		t.Fatalf("sessions = %d, want %d", len(list), MaxConcurrentSessions+2)
 	}
@@ -590,7 +590,7 @@ func waitForStatus(t *testing.T, s *store.Store, id int64, want string, timeout 
 	deadline := time.Now().Add(timeout)
 	var last store.Session
 	for time.Now().Before(deadline) {
-		got, err := s.GetSession(id)
+		got, err := s.GetSession(context.Background(), id)
 		if err == nil {
 			last = got
 			if got.Status == want {
@@ -607,7 +607,7 @@ func splitRunningAndQueued(t *testing.T, s *store.Store, thID int64) (running, q
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		list, err := s.ListSessions(thID)
+		list, err := s.ListSessions(context.Background(), thID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -645,8 +645,8 @@ func TestCancelQueuedSessionNeverRunsIt(t *testing.T) {
 	fr := &fakeRunner{delay: 30 * time.Second}
 	s, m, thID, _ := harness(t, probeCfg, fr)
 	for i := 0; i < MaxConcurrentSessions+1; i++ {
-		seq, _ := s.AppendMessage(thID, "alice", "human", "user", "@probe hi")
-		id, _ := s.MessageIDBySeq(thID, seq)
+		seq, _ := s.AppendMessage(context.Background(), thID, "alice", "human", "user", "@probe hi")
+		id, _ := s.MessageIDBySeq(context.Background(), thID, seq)
 		m.Start(thID, id, []string{"probe"})
 	}
 	running, queued := splitRunningAndQueued(t, s, thID)
@@ -656,7 +656,7 @@ func TestCancelQueuedSessionNeverRunsIt(t *testing.T) {
 	if err := m.Cancel(queued[0]); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := s.GetSession(queued[0]); got.Status != store.SessionCanceled {
+	if got, _ := s.GetSession(context.Background(), queued[0]); got.Status != store.SessionCanceled {
 		t.Fatalf("status = %q, want canceled", got.Status)
 	}
 	if err := m.Cancel(running[0]); err != nil {
@@ -668,7 +668,7 @@ func TestCancelQueuedSessionNeverRunsIt(t *testing.T) {
 	if got := fr.callCount(); got != callsBefore {
 		t.Fatalf("runner calls = %d, want %d: a canceled queued session must not spawn an agent", got, callsBefore)
 	}
-	got, _ := s.GetSession(queued[0])
+	got, _ := s.GetSession(context.Background(), queued[0])
 	if got.Status != store.SessionCanceled {
 		t.Fatalf("session %d status = %q, want canceled", got.ID, got.Status)
 	}
@@ -688,8 +688,8 @@ func TestConcurrentShutdownAndWaitIsABarrierForEveryCaller(t *testing.T) {
 	s, m, thID, _ := harness(t, probeCfg, fr)
 	const sessions = 3
 	for i := 0; i < sessions; i++ {
-		seq, _ := s.AppendMessage(thID, "alice", "human", "user", "@probe hi")
-		id, _ := s.MessageIDBySeq(thID, seq)
+		seq, _ := s.AppendMessage(context.Background(), thID, "alice", "human", "user", "@probe hi")
+		id, _ := s.MessageIDBySeq(context.Background(), thID, seq)
 		m.Start(thID, id, []string{"probe"})
 	}
 	<-started
@@ -704,7 +704,7 @@ func TestConcurrentShutdownAndWaitIsABarrierForEveryCaller(t *testing.T) {
 			defer wg.Done()
 			m.ShutdownAndWait()
 			var nonTerminal []store.Session
-			list, _ := s.ListSessions(thID)
+			list, _ := s.ListSessions(context.Background(), thID)
 			for _, sess := range list {
 				if sess.Status != store.SessionCanceled {
 					nonTerminal = append(nonTerminal, sess)
@@ -727,7 +727,7 @@ func waitForRunning(t *testing.T, s *store.Store, thID int64, want int) {
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		running := 0
-		list, _ := s.ListSessions(thID)
+		list, _ := s.ListSessions(context.Background(), thID)
 		for _, sess := range list {
 			if sess.Status == store.SessionRunning {
 				running++
@@ -773,8 +773,8 @@ func TestShutdownAndWaitAfterShutdownStillBarriers(t *testing.T) {
 		onStart:     func() { startedOnce.Do(func() { close(started) }) },
 	}
 	s, m, thID, _ := harness(t, probeCfg, fr)
-	seq, _ := s.AppendMessage(thID, "alice", "human", "user", "@probe hi")
-	msgID, _ := s.MessageIDBySeq(thID, seq)
+	seq, _ := s.AppendMessage(context.Background(), thID, "alice", "human", "user", "@probe hi")
+	msgID, _ := s.MessageIDBySeq(context.Background(), thID, seq)
 	m.Start(thID, msgID, []string{"probe"})
 	<-started
 	waitForRunning(t, s, thID, 1)
@@ -789,7 +789,7 @@ func TestShutdownAndWaitAfterShutdownStillBarriers(t *testing.T) {
 
 func assertAllCanceled(t *testing.T, s *store.Store, thID int64) {
 	t.Helper()
-	list, _ := s.ListSessions(thID)
+	list, _ := s.ListSessions(context.Background(), thID)
 	if len(list) == 0 {
 		t.Fatal("no sessions")
 	}
@@ -844,7 +844,7 @@ func TestStartAfterShutdownDoesNotRun(t *testing.T) {
 	m.Start(thID, msgID, []string{"probe"})
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		list, _ := s.ListSessions(thID)
+		list, _ := s.ListSessions(context.Background(), thID)
 		if len(list) > 0 {
 			for _, sess := range list {
 				if sess.Status != store.SessionCanceled {
@@ -866,8 +866,8 @@ func TestConcurrencyIsCapped(t *testing.T) {
 	s, m, thID, _ := harness(t, probeCfg, fr)
 	total := MaxConcurrentSessions + 3
 	for i := 0; i < total; i++ {
-		seq, _ := s.AppendMessage(thID, "alice", "human", "user", "@probe hi")
-		id, _ := s.MessageIDBySeq(thID, seq)
+		seq, _ := s.AppendMessage(context.Background(), thID, "alice", "human", "user", "@probe hi")
+		id, _ := s.MessageIDBySeq(context.Background(), thID, seq)
 		m.Start(thID, id, []string{"probe"})
 	}
 	deadline := time.Now().Add(20 * time.Second)
@@ -877,7 +877,7 @@ func TestConcurrencyIsCapped(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	list, _ := s.ListSessions(thID)
+	list, _ := s.ListSessions(context.Background(), thID)
 	if len(list) != total {
 		t.Fatalf("sessions = %d, want %d", len(list), total)
 	}
