@@ -14,11 +14,13 @@ diff:
 vet:
     go tool sqlc vet
 
-# The gate: go vet, gofmt, tests.
+# The gate: go vet, gofmt, tests. The `e2e` tag is not optional: cmd/flf/e2e_test.go
+# carries it, so a plain `go test ./...` skips the daemon end-to-end suite.
 test:
     go vet ./...
     @test -z "$(gofmt -l .)" || { echo "gofmt -l reported unformatted files:"; gofmt -l .; exit 1; }
     go test ./...
+    go test -tags e2e ./...
 
 # Bare `just` runs the gate.
 default: test
