@@ -6,8 +6,8 @@ VALUES(?, ?, ?, ?, ?, ?, ?, ?);
 INSERT INTO messages(thread_id, seq, parent_id, name, author_type, role, content)
 VALUES(?, ?, ?, ?, ?, ?, ?);
 
--- name: GetMessageMaxSeq :one
-SELECT MAX(seq) FROM messages WHERE thread_id = ?;
+-- name: GetLastMessageSeq :one
+SELECT seq FROM messages WHERE thread_id = ? ORDER BY seq DESC LIMIT 1;
 
 -- name: GetMessageThreadIDByID :one
 SELECT thread_id FROM messages WHERE id = ?;

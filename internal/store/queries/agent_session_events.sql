@@ -1,5 +1,5 @@
--- name: GetSessionEventMaxSeq :one
-SELECT MAX(seq) FROM agent_session_events WHERE session_id = ?;
+-- name: GetLastSessionEventSeq :one
+SELECT seq FROM agent_session_events WHERE session_id = ? ORDER BY seq DESC LIMIT 1;
 
 -- name: InsertSessionEvent :execlastid
 INSERT INTO agent_session_events(session_id, seq, type, content)

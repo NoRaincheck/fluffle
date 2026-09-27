@@ -9,19 +9,19 @@ import (
 	"context"
 )
 
-const getSessionEventMaxSeq = `-- name: GetSessionEventMaxSeq :one
-SELECT MAX(seq) FROM agent_session_events WHERE session_id = ?
+const getLastSessionEventSeq = `-- name: GetLastSessionEventSeq :one
+SELECT seq FROM agent_session_events WHERE session_id = ? ORDER BY seq DESC LIMIT 1
 `
 
-type GetSessionEventMaxSeqParams struct {
+type GetLastSessionEventSeqParams struct {
 	SessionID int64
 }
 
-func (q *Queries) GetSessionEventMaxSeq(ctx context.Context, arg GetSessionEventMaxSeqParams) (interface{}, error) {
-	row := q.db.QueryRowContext(ctx, getSessionEventMaxSeq, arg.SessionID)
-	var max interface{}
-	err := row.Scan(&max)
-	return max, err
+func (q *Queries) GetLastSessionEventSeq(ctx context.Context, arg GetLastSessionEventSeqParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, getLastSessionEventSeq, arg.SessionID)
+	var seq int64
+	err := row.Scan(&seq)
+	return seq, err
 }
 
 const insertSessionEvent = `-- name: InsertSessionEvent :execlastid

@@ -28,6 +28,21 @@ func (q *Queries) CountAgentMessagesAfter(ctx context.Context, arg CountAgentMes
 	return count, err
 }
 
+const getLastMessageSeq = `-- name: GetLastMessageSeq :one
+SELECT seq FROM messages WHERE thread_id = ? ORDER BY seq DESC LIMIT 1
+`
+
+type GetLastMessageSeqParams struct {
+	ThreadID int64
+}
+
+func (q *Queries) GetLastMessageSeq(ctx context.Context, arg GetLastMessageSeqParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, getLastMessageSeq, arg.ThreadID)
+	var seq int64
+	err := row.Scan(&seq)
+	return seq, err
+}
+
 const getMessageByIDWithParent = `-- name: GetMessageByIDWithParent :one
 SELECT m.id, m.thread_id, m.seq, m.parent_id, p.seq AS parent_seq, m.name, m.author_type, m.role, m.content,
        COALESCE(m.created_at, '') AS created_at
@@ -85,21 +100,6 @@ func (q *Queries) GetMessageIDByThreadSeq(ctx context.Context, arg GetMessageIDB
 	var id int64
 	err := row.Scan(&id)
 	return id, err
-}
-
-const getMessageMaxSeq = `-- name: GetMessageMaxSeq :one
-SELECT MAX(seq) FROM messages WHERE thread_id = ?
-`
-
-type GetMessageMaxSeqParams struct {
-	ThreadID int64
-}
-
-func (q *Queries) GetMessageMaxSeq(ctx context.Context, arg GetMessageMaxSeqParams) (interface{}, error) {
-	row := q.db.QueryRowContext(ctx, getMessageMaxSeq, arg.ThreadID)
-	var max interface{}
-	err := row.Scan(&max)
-	return max, err
 }
 
 const getMessageThreadIDByID = `-- name: GetMessageThreadIDByID :one
