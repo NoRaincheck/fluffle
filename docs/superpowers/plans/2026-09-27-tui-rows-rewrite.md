@@ -605,7 +605,7 @@ Expected: FAIL — every one of those calls currently succeeds.
 
 - [ ] **Step 7: Wire the rules into the store**
 
-Add `"github.com/NoRaincheck/fluffle/internal/names"` to `internal/store/store.go`'s imports, then make four edits.
+Add `"github.com/NoRaincheck/fluffle/internal/names"` to `internal/store/store.go`'s imports, then make four edits here. A fifth site lives in `internal/store/session.go` and was added by Task 3b: `CreateSession` validates `agent_name`, so `agent_sessions.agent_name` is covered too.
 
 `CreateChannel` — replace the blank check:
 
@@ -639,6 +639,17 @@ Add `"github.com/NoRaincheck/fluffle/internal/names"` to `internal/store/store.g
 	}
 ```
 
+`CreateSession` in `internal/store/session.go` — replace the combined blank check. The name and the command have different rules, so they are reported separately:
+
+```go
+	if err := names.Name(agentName); err != nil {
+		return 0, invalid("%v", err)
+	}
+	if strings.TrimSpace(command) == "" {
+		return 0, invalid("command required")
+	}
+```
+
 - [ ] **Step 8: Point `agentcfg` at the shared rule**
 
 In `internal/agentcfg/agentcfg.go`, `regexp` is used only by `nameRe`, so delete the `nameRe` declaration and the `"regexp"` import, add `"github.com/NoRaincheck/fluffle/internal/names"`, and replace the check in `validate`:
@@ -652,7 +663,7 @@ In `internal/agentcfg/agentcfg.go`, `regexp` is used only by `nameRe`, so delete
 - [ ] **Step 9: Run the gate and fix the fallout**
 
 Run: `go test ./... 2>&1 | grep -v '^ok' | head -40`
-Expected: failures wherever a test used a name or slug the new rules reject. Fix the *inputs*, never the rules: agent `ci-bot` becomes `ci.bot`, the spaced thread title `Schema migration` becomes `db-migration`, and a title of `test` stays. A dash-joined slug can still overflow the bound — `something-broke` is 15 bytes and `auth-refactor` is 13, so count the replacement rather than assuming it fits. Where a test asserted that a spaced title was accepted, that assertion is a behavior change and is updated deliberately here.
+Expected: failures wherever a test used a name or slug the new rules reject. Fix the *inputs*, never the rules: agent `ci-bot` becomes `ci.bot`, the spaced thread title `Schema migration` becomes `db-migration`, and a title of `test` stays. A dash-joined slug can still overflow the bound — `something-broke` is 15 bytes and `auth-refactor` is 13, so count the replacement rather than assuming it fits. Where a test asserted that a spaced title was accepted, that assertion is a behavior change and is updated deliberately here. The session agent name is in the same scope: the devseed fixture at `internal/devseed/devseed_test.go` builds `"agent-" + status`, which is a dash and up to 15 bytes, and `internal/store/session_test.go` names two agents `a1` and `a2`, which carry a digit. A name holds no digits or dashes, so a name derived from a status word needs a letter-only prefix short enough to fit: `a.` + `succeeded` is 11 bytes.
 
 - [ ] **Step 10: Commit**
 

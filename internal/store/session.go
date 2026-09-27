@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/NoRaincheck/fluffle/internal/db"
+	"github.com/NoRaincheck/fluffle/internal/names"
 )
 
 const (
@@ -60,8 +61,11 @@ type ThreadContext struct {
 }
 
 func (s *Store) CreateSession(ctx context.Context, threadID, triggerMessageID int64, agentName, status, replyMode, command string, cwd *string) (int64, error) {
-	if strings.TrimSpace(agentName) == "" || strings.TrimSpace(command) == "" {
-		return 0, invalid("agent_name and command required")
+	if err := names.Name(agentName); err != nil {
+		return 0, invalid("%v", err)
+	}
+	if strings.TrimSpace(command) == "" {
+		return 0, invalid("command required")
 	}
 	switch status {
 	case SessionQueued, SessionRunning, SessionSucceeded, SessionFailed, SessionCanceled:

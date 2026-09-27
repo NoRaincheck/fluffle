@@ -313,8 +313,8 @@ func TestListSessionsIsScopedToItsThread(t *testing.T) {
 		}
 		return ids
 	}
-	wantOwn := create(thID, "a1", "a2")
-	wantOther := create(other, "a1", "a2")
+	wantOwn := create(thID, "aa", "ab")
+	wantOther := create(other, "aa", "ab")
 
 	assertScoped := func(threadID int64, want []int64) {
 		t.Helper()
@@ -583,5 +583,20 @@ func TestReconcileSessionsEmptyFinishedAtStoresEmptyString(t *testing.T) {
 	}
 	if *got.FinishedAt != "" {
 		t.Fatalf("finished_at = %q, want %q", *got.FinishedAt, "")
+	}
+}
+
+func TestCreateSessionRejectsBadAgentName(t *testing.T) {
+	s, thID := newSessionFixture(t)
+	msgID := triggerMessage(t, s, thID, "@ci.bot hi")
+	for _, name := range []string{"", "-lead", "1lead", ".lead", "alice.", "ci-bot", "ci_bot", "ci2", "thirteencharsabc"} {
+		if _, err := s.CreateSession(context.Background(), thID, msgID, name, SessionQueued, "auto", "c", nil); !errors.Is(err, ErrInvalid) {
+			t.Errorf("CreateSession(agent_name=%q) = %v, want ErrInvalid", name, err)
+		}
+	}
+	for _, name := range []string{"ci.bot", "alice", "X"} {
+		if _, err := s.CreateSession(context.Background(), thID, msgID, name, SessionQueued, "auto", "c", nil); err != nil {
+			t.Errorf("CreateSession(agent_name=%q) = %v, want no error", name, err)
+		}
 	}
 }
