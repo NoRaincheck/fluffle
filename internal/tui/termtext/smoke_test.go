@@ -15,7 +15,11 @@ func TestSmokeTruncateKeepsTailWithinWidth(t *testing.T) {
 }
 
 func TestSmokeWrapNeverExceedsWidth(t *testing.T) {
-	for _, line := range Wrap("the quick brown fox jumps", 10) {
+	lines := Wrap("the quick brown fox jumps", 10)
+	if len(lines) == 0 {
+		t.Fatal("Wrap returned no lines")
+	}
+	for _, line := range lines {
 		if DisplayWidth(line) > 10 {
 			t.Fatalf("line %q is wider than 10", line)
 		}
