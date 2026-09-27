@@ -690,8 +690,8 @@ Grouping, representative selection, and reply counts move into SQL, where they a
 
 **Files:**
 - Create: `internal/store/queries/rows.sql`
-- Modify: `internal/store/queries/messages.sql` (delete the `ListInbox` query)
-- Modify: `internal/store/store.go:241-246` (delete `InboxMessage`), `:443-480` (replace `inboxFromRow` and `ListInbox`)
+- Read only: `internal/store/queries/messages.sql` (the `ListInbox` query stays)
+- Modify: `internal/store/store.go` (add `Row` and `ListRows` beside the existing `InboxMessage` path; delete nothing)
 - Regenerate: `internal/db/*.go`
 
 **Interfaces:**
@@ -758,9 +758,9 @@ ORDER BY created_at DESC, c.id DESC
 LIMIT ?;
 ```
 
-- [ ] **Step 2: Delete the `ListInbox` query**
+- [ ] **Step 2: Leave the `ListInbox` query alone**
 
-Remove the `-- name: ListInbox :many` block from `internal/store/queries/messages.sql`, from its comment through its trailing `LIMIT ?;`.
+This task is **additive**. `ListInbox` stays: `internal/apiserver`, `cmd/flf`, and `internal/tui` all still call it, and Tasks 5, 6, and 7 migrate those callers one at a time. Deleting it here would leave the tree not building. It is removed in Task 7, once the last consumer is gone.
 
 - [ ] **Step 3: Generate and confirm the field types**
 
@@ -915,7 +915,7 @@ Expected: FAIL — `ListRows` and `GranularityMessage` are undefined.
 
 - [ ] **Step 6: Implement**
 
-In `internal/store/store.go`, delete the `InboxMessage` type, `inboxFromRow`, and `ListInbox`. Add:
+In `internal/store/store.go`, add this beside the existing `InboxMessage` path. `InboxMessage`, `inboxFromRow`, and `ListInbox` all stay — see Step 2:
 
 ```go
 // Granularity selects what one row of a ListRows result is.
@@ -1029,8 +1029,7 @@ author as its name. A thread or channel with no messages still appears,
 ordered by its own creation time, with an empty name and content.
 
 The CAST wrapper on the correlated subqueries is load-bearing: sqlc infers
-interface{} for a bare COALESCE over one. Replaces InboxMessage and
-ListInbox."
+interface{} for a bare COALESCE over one."
 ```
 
 ---

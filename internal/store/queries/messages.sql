@@ -43,6 +43,16 @@ LEFT JOIN messages p ON p.id = m.parent_id
 WHERE m.thread_id = ? AND m.seq > ?
 ORDER BY m.seq ASC;
 
+-- name: ListInbox :many
+SELECT m.id, m.thread_id, m.seq, m.parent_id, m.name, m.author_type, m.role, m.content,
+       COALESCE(m.created_at, '') AS created_at,
+       c.name AS channel_name, c.id AS channel_id, t.title AS thread_title
+FROM messages m
+JOIN threads t ON t.id = m.thread_id
+JOIN channels c ON c.id = t.channel_id
+ORDER BY m.created_at DESC, m.id DESC
+LIMIT ?;
+
 -- name: CountAgentMessagesAfter :one
 SELECT COUNT(*) FROM messages
 WHERE thread_id = ? AND name = ? AND author_type = 'agent' AND seq > ?;
