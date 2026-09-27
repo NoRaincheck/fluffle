@@ -229,6 +229,8 @@ A name may not end with a dot, even though mention parsing trims trailing dots o
 
 ## What the TUI cannot do
 
+The shape above is the result of a rewrite that deleted code rather than adding it, and the deletions are load-bearing. The TUI it replaced had five view kinds of which three were unreachable behind a dead `viewInbox` switch, three ways to present one view with a mutual-exclusion invariant between them, a six-field poll state machine whose release function could not fire in the state the app was actually in, five inbox widths with a ladder that shed one column at a time, and three independent definitions of a legal name. Each of those was a set of interacting states a reader had to hold to know what a key did, and each is why the rules below are single rules with no exceptions: no view stack, no layout field, no poll, no drop ladder, one `names` package.
+
 Stated plainly, because each of these was a key once:
 
 - **Create channels or threads.** `flf channel create`, `flf thread new`.

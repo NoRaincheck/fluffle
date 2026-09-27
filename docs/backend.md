@@ -137,6 +137,8 @@ Nullable columns keep their `COALESCE(col, '')` wrappers in the read queries, wh
 
 `ParentSeq` is not a column. It is a projection — `LEFT JOIN messages p ON p.id = m.parent_id` selecting `p.seq` — so it stays an explicit column in the query and a hand-written field on `store.Message`.
 
+**A correlated subquery in a read query needs `CAST(... AS TEXT)`.** sqlc's SQLite parser infers `interface{}` for a bare `COALESCE` over a correlated subquery, so `rows.sql` wraps the `name` and `content` columns of the thread and channel feeds in `CAST(COALESCE((SELECT …), '') AS TEXT)`. Without the cast those fields generate as `any` and the store's mapper has to type-assert. The wrapper is load-bearing, not decoration, and the symptom is a type error at the mapper rather than at generation — check for the cast first when a row field comes out `any`.
+
 ### Nil versus empty slices
 
 The convention is per method and deliberately not symmetric:
@@ -398,6 +400,8 @@ Returns `{"ok":true}` with status 200.
 
 This replaces the flat inbox route, which no longer exists, and the message-joined row type it returned: a row is no longer a message record, so it carries no thread-local `seq`. `flf message send --reply-to-seq` is unaffected — `seq` still comes from `GET /v1/threads/:id/messages`.
 
+**A group with no messages still appears.** A thread or channel with an empty history gets a row, ordered by its own `created_at`, with `Count` 0 and `Name` and `Content` empty strings. The feed is a list of what exists, not a list of what has been written to — a channel created seconds ago is a real channel and hiding it until its first message would make the feed's membership a function of its contents. The `COALESCE` fallbacks in `rows.sql` are what produce the row; a query that filtered on the subquery instead would drop it.
+
 ### Messages
 
 **`GET /v1/threads/:id/messages?last=N`** — List messages in a thread. `last=N` returns the last N messages in ascending sequence order. An absent `last` returns all messages.
@@ -494,7 +498,7 @@ Fetches the thread's messages and reactions through the daemon, projects them to
 
 ### `thread import`
 
-Reads and parses the complete JSONL file before starting daemon work. With `--channel` (and `--repo` or `--orphaned`), it resolves or creates that channel and creates a new thread titled `import <basename>`. With `--thread ID`, it appends the batch to that explicit existing thread without creating a channel or thread. In both modes it sends one `import=true` event batch. Source message sequences are remapped to the destination thread; `parent_seq` and `message_seq` are resolved through that map. The event batch is atomic.
+Reads and parses the complete JSONL file before starting daemon work. With `--channel` (and `--repo` or `--orphaned`), it resolves or creates that channel and creates a new thread titled `imp-` plus the first eight hex digits of the SHA-256 of the file path. That is always exactly 12 bytes and always a legal slug, so it is never truncated or rejected — the obvious alternative, the file's base name, is not a slug at all, since a title holds no dots, spaces, or underscores and is bounded at 12 bytes. Hashing the whole path rather than the base name keeps two files of the same name in different directories from colliding on one title. With `--thread ID`, it appends the batch to that explicit existing thread without creating a channel or thread. In both modes it sends one `import=true` event batch. Source message sequences are remapped to the destination thread; `parent_seq` and `message_seq` are resolved through that map. The event batch is atomic.
 
 Import is a **data operation only**: an `import=true` batch never starts an agent session, even when a human-authored line in the file opens with `@name`. The mention trigger is live-message behavior, so a shared `.jsonl` file cannot cause a subprocess to launch on the importing machine. To run an agent against an imported thread, post the request as a live message afterwards.
 
@@ -674,6 +678,8 @@ rm -rf /tmp/fluffle-verify && mkdir -p /tmp/fluffle-verify
 go build -o /tmp/fluffle-verify/flf ./cmd/flf
 /tmp/fluffle-verify/flf daemon --help
 ```
+
+**`go test ./...` on its own is not the gate.** `cmd/flf/e2e_test.go` carries the `e2e` build tag, so a bare `go test ./...` skips the whole daemon end-to-end suite and reports green. That gap hid six broken e2e tests across six commits while the gate stayed green. `justfile` therefore runs `go test -tags e2e ./...` as a fourth line, and the tag is not optional. `go tool sqlc diff` is deliberately *not* in the gate: it is a separate recipe, and folding it in would make every gate run depend on a code generator. If an e2e run is flaky, re-run it once and report both results rather than hiding the flake.
 
 Then spot-check the wire contract, since Go field names are the API and a regression here is invisible to the unit tests unless a test happens to assert it. Against a daemon running on a scratch database file:
 
