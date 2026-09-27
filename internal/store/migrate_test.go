@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -142,6 +143,33 @@ func TestMigrateUpAdoptsCurrentShapeWithoutDataLoss(t *testing.T) {
 	}
 	if len(channels) != 1 || channels[0].Name != "keepme" {
 		t.Fatalf("adoption lost data: %+v", channels)
+	}
+}
+
+func TestOpenEnablesForeignKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fk.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var fk int
+	if err := s.db.QueryRow(`PRAGMA foreign_keys`).Scan(&fk); err != nil {
+		t.Fatal(err)
+	}
+	if fk != 1 {
+		t.Fatalf("PRAGMA foreign_keys = %d, want 1", fk)
+	}
+}
+
+func TestForeignKeyViolationMapsToNotFound(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "fk2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.CreateThread(99999, "t"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("got %v, want ErrNotFound", err)
 	}
 }
 

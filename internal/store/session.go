@@ -212,13 +212,6 @@ func (s *Store) AppendSessionEvent(sessionID int64, eventType, content string) (
 	}
 	defer tx.Rollback()
 	ctx := context.Background()
-	exists, err := q.CountSessionsByID(ctx, db.CountSessionsByIDParams{ID: sessionID})
-	if err != nil {
-		return 0, 0, err
-	}
-	if exists == 0 {
-		return 0, 0, ErrNotFound
-	}
 	seq, err := nextSessionEventSeq(ctx, q, sessionID)
 	if err != nil {
 		return 0, 0, err
@@ -230,7 +223,7 @@ func (s *Store) AppendSessionEvent(sessionID int64, eventType, content string) (
 		Content:   content,
 	})
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, classify(err)
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, 0, err

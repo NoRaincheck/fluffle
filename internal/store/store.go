@@ -54,6 +54,12 @@ func Open(path string) (*Store, error) {
 }
 
 func prepare(conn *sql.DB) error {
+	if _, err := conn.Exec(`PRAGMA foreign_keys=ON`); err != nil {
+		return err
+	}
+	if err := assertForeignKeys(conn); err != nil {
+		return err
+	}
 	legacy, err := legacyRebuildRequired(conn)
 	if err != nil {
 		return err
@@ -247,14 +253,11 @@ func (s *Store) CreateThread(channelID int64, title string) (int64, error) {
 	if strings.TrimSpace(title) == "" {
 		return 0, invalid("title required")
 	}
-	n, err := s.q.CountChannelsByID(context.Background(), db.CountChannelsByIDParams{ID: channelID})
+	id, err := s.q.CreateThread(context.Background(), db.CreateThreadParams{ChannelID: channelID, Title: title})
 	if err != nil {
-		return 0, err
+		return 0, classify(err)
 	}
-	if n == 0 {
-		return 0, ErrNotFound
-	}
-	return s.q.CreateThread(context.Background(), db.CreateThreadParams{ChannelID: channelID, Title: title})
+	return id, nil
 }
 
 func (s *Store) ListThreads(channelID int64) ([]Thread, error) {
@@ -315,13 +318,6 @@ func (s *Store) AppendMessageByParentSeq(threadID, parentSeq int64, name, author
 
 func (s *Store) appendMessage(q *db.Queries, threadID int64, name, authorType, role, content, createdAt string, parentID int64) (int64, int64, error) {
 	ctx := context.Background()
-	n, err := q.CountThreadsByID(ctx, db.CountThreadsByIDParams{ID: threadID})
-	if err != nil {
-		return 0, 0, err
-	}
-	if n == 0 {
-		return 0, 0, ErrNotFound
-	}
 	seq, err := nextMessageSeq(ctx, q, threadID)
 	if err != nil {
 		return 0, 0, err
@@ -684,15 +680,7 @@ func (s *Store) appendMessageByParentSeq(q *db.Queries, threadID, parentSeq int6
 }
 
 func nextThreadSeq(q *db.Queries, threadID int64) (int64, error) {
-	ctx := context.Background()
-	n, err := q.CountThreadsByID(ctx, db.CountThreadsByIDParams{ID: threadID})
-	if err != nil {
-		return 0, err
-	}
-	if n == 0 {
-		return 0, ErrNotFound
-	}
-	return nextMessageSeq(ctx, q, threadID)
+	return nextMessageSeq(context.Background(), q, threadID)
 }
 
 func nextMessageSeq(ctx context.Context, q *db.Queries, threadID int64) (int64, error) {

@@ -24,9 +24,6 @@ UPDATE agent_sessions SET reply_message_id = ? WHERE id = ?;
 -- name: FinishSession :execrows
 UPDATE agent_sessions SET status = ?, exit_code = ?, error = ?, finished_at = ? WHERE id = ?;
 
--- name: CountSessionsByID :one
-SELECT COUNT(*) FROM agent_sessions WHERE id = ?;
-
 -- name: ReconcileSessions :execrows
 UPDATE agent_sessions
 SET status = ?, finished_at = ?, error = 'daemon restarted while ' || status

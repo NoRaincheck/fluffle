@@ -10,9 +10,6 @@ import (
 
 type Querier interface {
 	CountAgentMessagesAfter(ctx context.Context, arg CountAgentMessagesAfterParams) (int64, error)
-	CountChannelsByID(ctx context.Context, arg CountChannelsByIDParams) (int64, error)
-	CountSessionsByID(ctx context.Context, arg CountSessionsByIDParams) (int64, error)
-	CountThreadsByID(ctx context.Context, arg CountThreadsByIDParams) (int64, error)
 	CreateChannel(ctx context.Context, arg CreateChannelParams) (int64, error)
 	CreateSession(ctx context.Context, arg CreateSessionParams) (int64, error)
 	CreateThread(ctx context.Context, arg CreateThreadParams) (int64, error)

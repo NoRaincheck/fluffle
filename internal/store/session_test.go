@@ -395,6 +395,9 @@ func TestSetSessionReplyZeroStoresZeroNotNull(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.db.Exec(`INSERT INTO messages(id, thread_id, seq, name, author_type, role, content) VALUES (0, ?, 2, 'human', 'human', 'user', 'seed')`, thID); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.SetSessionReply(id, 0); err != nil {
 		t.Fatal(err)
 	}

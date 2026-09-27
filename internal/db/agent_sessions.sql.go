@@ -9,21 +9,6 @@ import (
 	"context"
 )
 
-const countSessionsByID = `-- name: CountSessionsByID :one
-SELECT COUNT(*) FROM agent_sessions WHERE id = ?
-`
-
-type CountSessionsByIDParams struct {
-	ID int64
-}
-
-func (q *Queries) CountSessionsByID(ctx context.Context, arg CountSessionsByIDParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, countSessionsByID, arg.ID)
-	var count int64
-	err := row.Scan(&count)
-	return count, err
-}
-
 const createSession = `-- name: CreateSession :execlastid
 INSERT INTO agent_sessions(thread_id, trigger_message_id, agent_name, status, reply_mode, command, cwd)
 VALUES(?, ?, ?, ?, ?, ?, ?)

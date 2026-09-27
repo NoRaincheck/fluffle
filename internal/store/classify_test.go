@@ -70,5 +70,23 @@ func TestClassifyConstraintCodes(t *testing.T) {
 }
 
 func TestClassifyForeignKeyViolation(t *testing.T) {
-	t.Skip("PRAGMA foreign_keys=ON lands in task 10; un-skip this test there")
+	s, err := Open(filepath.Join(t.TempDir(), "fk.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.CreateChannel("c", "/r", "", "", "", false); err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.db.Exec(`INSERT INTO threads(channel_id, title) VALUES(99999, 't')`)
+	if err == nil {
+		t.Fatal("expected a foreign key violation")
+	}
+	got := classify(err)
+	if !errors.Is(got, ErrNotFound) {
+		t.Fatalf("classify(%v) = %v, want %v", err, got, ErrNotFound)
+	}
+	if msg := got.Error(); !strings.Contains(msg, "FOREIGN KEY constraint failed") {
+		t.Fatalf("classify message = %q, want it to contain %q", msg, "FOREIGN KEY constraint failed")
+	}
 }

@@ -9,21 +9,6 @@ import (
 	"context"
 )
 
-const countThreadsByID = `-- name: CountThreadsByID :one
-SELECT COUNT(*) FROM threads WHERE id = ?
-`
-
-type CountThreadsByIDParams struct {
-	ID int64
-}
-
-func (q *Queries) CountThreadsByID(ctx context.Context, arg CountThreadsByIDParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, countThreadsByID, arg.ID)
-	var count int64
-	err := row.Scan(&count)
-	return count, err
-}
-
 const createThread = `-- name: CreateThread :execlastid
 INSERT INTO threads(channel_id, title) VALUES(?, ?)
 `

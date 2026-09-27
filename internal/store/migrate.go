@@ -122,6 +122,17 @@ func applyMigration(conn *sql.DB, m migration) error {
 	return tx.Commit()
 }
 
+func assertForeignKeys(conn *sql.DB) error {
+	var fk int
+	if err := conn.QueryRow(`PRAGMA foreign_keys`).Scan(&fk); err != nil {
+		return err
+	}
+	if fk != 1 {
+		return fmt.Errorf("sqlite refused PRAGMA foreign_keys=ON (got %d)", fk)
+	}
+	return nil
+}
+
 func legacyRebuildRequired(conn *sql.DB) (bool, error) {
 	present, err := tableExists(conn, "messages")
 	if err != nil || !present {

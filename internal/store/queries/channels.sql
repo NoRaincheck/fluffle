@@ -48,6 +48,3 @@ SELECT id, name,
 FROM channels
 WHERE repo_abs_path = ? AND is_orphaned = 0
 ORDER BY id;
-
--- name: CountChannelsByID :one
-SELECT COUNT(*) FROM channels WHERE id = ?;

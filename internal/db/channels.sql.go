@@ -9,21 +9,6 @@ import (
 	"context"
 )
 
-const countChannelsByID = `-- name: CountChannelsByID :one
-SELECT COUNT(*) FROM channels WHERE id = ?
-`
-
-type CountChannelsByIDParams struct {
-	ID int64
-}
-
-func (q *Queries) CountChannelsByID(ctx context.Context, arg CountChannelsByIDParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, countChannelsByID, arg.ID)
-	var count int64
-	err := row.Scan(&count)
-	return count, err
-}
-
 const createChannel = `-- name: CreateChannel :execlastid
 INSERT INTO channels(name, repo_abs_path, repo_remote, repo_head_sha, repo_head_branch, is_orphaned)
 VALUES(?, ?, ?, ?, ?, ?)
