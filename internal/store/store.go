@@ -1,11 +1,14 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/NoRaincheck/fluffle/internal/db"
 
 	_ "modernc.org/sqlite"
 )
@@ -18,7 +21,18 @@ func invalid(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", ErrInvalid, fmt.Sprintf(format, args...))
 }
 
-type Store struct{ db *sql.DB }
+type Store struct {
+	db *sql.DB
+	q  *db.Queries
+}
+
+func (s *Store) tx() (*sql.Tx, *db.Queries, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, nil, err
+	}
+	return tx, s.q.WithTx(tx), nil
+}
 
 type Channel struct {
 	ID                                                                    int64
@@ -36,7 +50,7 @@ func Open(path string) (*Store, error) {
 		conn.Close()
 		return nil, err
 	}
-	return &Store{db: conn}, nil
+	return &Store{db: conn, q: db.New(conn)}, nil
 }
 
 func prepare(conn *sql.DB) error {
@@ -61,65 +75,101 @@ func (s *Store) CreateChannel(name, repoAbsPath, repoRemote, repoHeadSHA, repoHe
 	if strings.TrimSpace(name) == "" {
 		return 0, invalid("channel name required")
 	}
-	var abs any
-	var isOrphan int
+	var abs *string
+	var isOrphan int64
 	if orphaned {
 		if repoAbsPath != "" {
 			return 0, invalid("orphaned channel must not have repo path")
 		}
-		abs = nil
 		isOrphan = 1
 	} else {
 		if strings.TrimSpace(repoAbsPath) == "" {
 			return 0, invalid("repo path required")
 		}
-		abs = repoAbsPath
+		abs = &repoAbsPath
 	}
-	res, err := s.db.Exec(`INSERT INTO channels(name, repo_abs_path, repo_remote, repo_head_sha, repo_head_branch, is_orphaned) VALUES(?,?,?,?,?,?)`, name, abs, nullIfEmpty(repoRemote), nullIfEmpty(repoHeadSHA), nullIfEmpty(repoHeadBranch), isOrphan)
+	id, err := s.q.CreateChannel(context.Background(), db.CreateChannelParams{
+		Name:           name,
+		RepoAbsPath:    abs,
+		RepoRemote:     nullIfEmpty(repoRemote),
+		RepoHeadSHA:    nullIfEmpty(repoHeadSHA),
+		RepoHeadBranch: nullIfEmpty(repoHeadBranch),
+		IsOrphaned:     isOrphan,
+	})
 	if err != nil {
 		return 0, classify(err)
 	}
-	return res.LastInsertId()
+	return id, nil
 }
 
 func (s *Store) ListChannels(repoAbsPath string, includeOrphaned bool) ([]Channel, error) {
-	q := `SELECT id, name, COALESCE(repo_abs_path,''), COALESCE(repo_remote,''), COALESCE(repo_head_sha,''), COALESCE(repo_head_branch,''), is_orphaned, COALESCE(created_at,'') FROM channels`
-	var conds []string
-	var args []any
-	if repoAbsPath != "" {
-		conds = append(conds, `repo_abs_path = ?`)
-		args = append(args, repoAbsPath)
-	}
-	if !includeOrphaned {
-		conds = append(conds, `is_orphaned = 0`)
-	}
-	if len(conds) > 0 {
-		q += ` WHERE ` + strings.Join(conds, ` AND `)
-	}
-	q += ` ORDER BY id`
-	rows, err := s.db.Query(q, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []Channel
-	for rows.Next() {
-		var c Channel
-		var isOrphan int
-		if err := rows.Scan(&c.ID, &c.Name, &c.RepoAbsPath, &c.RepoRemote, &c.RepoHeadSHA, &c.RepoHeadBranch, &isOrphan, &c.CreatedAt); err != nil {
+	ctx := context.Background()
+	switch {
+	case repoAbsPath != "" && !includeOrphaned:
+		rows, err := s.q.ListChannelsByRepoNonOrphaned(ctx, db.ListChannelsByRepoNonOrphanedParams{RepoAbsPath: &repoAbsPath})
+		if err != nil {
 			return nil, err
 		}
-		c.IsOrphaned = isOrphan == 1
-		out = append(out, c)
+		return channelsFromRows(rows, func(r db.ListChannelsByRepoNonOrphanedRow) Channel {
+			return channelFromFields(r.ID, r.Name, r.RepoAbsPath, r.RepoRemote, r.RepoHeadSHA, r.RepoHeadBranch, r.IsOrphaned, r.CreatedAt)
+		}), nil
+	case repoAbsPath != "":
+		rows, err := s.q.ListChannelsByRepo(ctx, db.ListChannelsByRepoParams{RepoAbsPath: &repoAbsPath})
+		if err != nil {
+			return nil, err
+		}
+		return channelsFromRows(rows, func(r db.ListChannelsByRepoRow) Channel {
+			return channelFromFields(r.ID, r.Name, r.RepoAbsPath, r.RepoRemote, r.RepoHeadSHA, r.RepoHeadBranch, r.IsOrphaned, r.CreatedAt)
+		}), nil
+	case !includeOrphaned:
+		rows, err := s.q.ListChannelsNonOrphaned(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return channelsFromRows(rows, func(r db.ListChannelsNonOrphanedRow) Channel {
+			return channelFromFields(r.ID, r.Name, r.RepoAbsPath, r.RepoRemote, r.RepoHeadSHA, r.RepoHeadBranch, r.IsOrphaned, r.CreatedAt)
+		}), nil
+	default:
+		rows, err := s.q.ListChannelsAll(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return channelsFromRows(rows, func(r db.ListChannelsAllRow) Channel {
+			return channelFromFields(r.ID, r.Name, r.RepoAbsPath, r.RepoRemote, r.RepoHeadSHA, r.RepoHeadBranch, r.IsOrphaned, r.CreatedAt)
+		}), nil
 	}
-	return out, rows.Err()
 }
 
-func nullIfEmpty(v string) any {
+func channelFromFields(id int64, name, repoAbsPath, repoRemote, repoHeadSHA, repoHeadBranch string, isOrphaned int64, createdAt string) Channel {
+	return Channel{
+		ID:             id,
+		Name:           name,
+		RepoAbsPath:    repoAbsPath,
+		RepoRemote:     repoRemote,
+		RepoHeadSHA:    repoHeadSHA,
+		RepoHeadBranch: repoHeadBranch,
+		IsOrphaned:     isOrphaned == 1,
+		CreatedAt:      createdAt,
+	}
+}
+
+func channelsFromRows[T any](rows []T, f func(T) Channel) []Channel {
+	var out []Channel
+	for _, r := range rows {
+		out = append(out, f(r))
+	}
+	return out
+}
+
+func threadFromFields(id, channelID int64, title, createdAt string) Thread {
+	return Thread{ID: id, ChannelID: channelID, Title: title, CreatedAt: createdAt}
+}
+
+func nullIfEmpty(v string) *string {
 	if v == "" {
 		return nil
 	}
-	return v
+	return &v
 }
 
 type Thread struct {
@@ -175,35 +225,26 @@ func (s *Store) CreateThread(channelID int64, title string) (int64, error) {
 	if strings.TrimSpace(title) == "" {
 		return 0, invalid("title required")
 	}
-	var n int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM channels WHERE id = ?`, channelID).Scan(&n); err != nil {
+	n, err := s.q.CountChannelsByID(context.Background(), db.CountChannelsByIDParams{ID: channelID})
+	if err != nil {
 		return 0, err
 	}
 	if n == 0 {
 		return 0, ErrNotFound
 	}
-	res, err := s.db.Exec(`INSERT INTO threads(channel_id, title) VALUES(?,?)`, channelID, title)
-	if err != nil {
-		return 0, err
-	}
-	return res.LastInsertId()
+	return s.q.CreateThread(context.Background(), db.CreateThreadParams{ChannelID: channelID, Title: title})
 }
 
 func (s *Store) ListThreads(channelID int64) ([]Thread, error) {
-	rows, err := s.db.Query(`SELECT id, channel_id, title, COALESCE(created_at,'') FROM threads WHERE channel_id = ? ORDER BY id`, channelID)
+	rows, err := s.q.ListThreads(context.Background(), db.ListThreadsParams{ChannelID: channelID})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var out []Thread
-	for rows.Next() {
-		var th Thread
-		if err := rows.Scan(&th.ID, &th.ChannelID, &th.Title, &th.CreatedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, th)
+	for _, r := range rows {
+		out = append(out, threadFromFields(r.ID, r.ChannelID, r.Title, r.CreatedAt))
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (s *Store) AppendMessage(threadID int64, name, authorType, role, content string) (int64, error) {

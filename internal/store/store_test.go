@@ -933,3 +933,51 @@ func TestFileStoreDropsArchivedAtColumnsAndKeepsRows(t *testing.T) {
 		t.Fatalf("messages = %+v, want the one legacy row preserved", msgs)
 	}
 }
+
+func TestListChannelsCombinations(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "c.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.CreateChannel("anchored", "/repo/a", "", "", "", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateChannel("anchored2", "/repo/b", "", "", "", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateChannel("orphan", "", "", "", "", true); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name            string
+		repoAbsPath     string
+		includeOrphaned bool
+		want            []string
+	}{
+		{"all", "", true, []string{"anchored", "anchored2", "orphan"}},
+		{"by repo", "/repo/a", true, []string{"anchored"}},
+		{"non orphaned", "", false, []string{"anchored", "anchored2"}},
+		{"by repo non orphaned", "/repo/b", false, []string{"anchored2"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := s.ListChannels(tc.repoAbsPath, tc.includeOrphaned)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var names []string
+			for _, c := range got {
+				names = append(names, c.Name)
+			}
+			if len(names) != len(tc.want) {
+				t.Fatalf("got %v, want %v", names, tc.want)
+			}
+			for i := range names {
+				if names[i] != tc.want[i] {
+					t.Fatalf("got %v, want %v", names, tc.want)
+				}
+			}
+		})
+	}
+}
