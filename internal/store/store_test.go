@@ -677,6 +677,43 @@ func TestAddReactionRejectsMissingMessageTarget(t *testing.T) {
 	}
 }
 
+func TestAppendsToMissingThreadAreNotFound(t *testing.T) {
+	s, _, threadID := newStoreWithThread(t, ":memory:")
+	defer s.Close()
+	event := AppendEvent{Type: "message", Name: "alice", AuthorType: "human", Role: "user", Content: "content"}
+	if _, err := s.AppendMessage(threadID, "alice", "human", "user", "content"); err != nil {
+		t.Fatalf("control append to the existing thread = %v, want success", err)
+	}
+	if _, err := s.AppendBatch(threadID, []AppendEvent{event}); err != nil {
+		t.Fatalf("control batch to the existing thread = %v, want success", err)
+	}
+	if _, err := s.AppendMessage(9999, "alice", "human", "user", "content"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("AppendMessage to a missing thread = %v, want ErrNotFound", err)
+	}
+	if _, err := s.AppendBatch(9999, []AppendEvent{event}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("AppendBatch to a missing thread = %v, want ErrNotFound", err)
+	}
+	messages, err := s.ListMessages(threadID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("got %d messages, want only the 2 control appends: %+v", len(messages), messages)
+	}
+}
+
+func TestAppendBatchWithNoEventsToMissingThreadSucceedsEmpty(t *testing.T) {
+	s, _, _ := newStoreWithThread(t, ":memory:")
+	defer s.Close()
+	got, err := s.AppendBatch(9999, nil)
+	if err != nil {
+		t.Fatalf("AppendBatch(9999, nil) = %v, want no error", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("got %d results, want 0: %+v", len(got), got)
+	}
+}
+
 func TestValidationFailuresAreTypedClientErrors(t *testing.T) {
 	s, _, threadID := newStoreWithThread(t, ":memory:")
 	defer s.Close()

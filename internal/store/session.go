@@ -170,7 +170,7 @@ func (s *Store) SetSessionReply(id int64, replyMessageID int64) error {
 		ID:             id,
 	})
 	if err != nil {
-		return err
+		return classify(err)
 	}
 	if n == 0 {
 		return ErrNotFound

@@ -413,6 +413,25 @@ func TestSetSessionReplyZeroStoresZeroNotNull(t *testing.T) {
 	}
 }
 
+func TestSetSessionReplyRejectsMissingMessageTarget(t *testing.T) {
+	s, thID := newSessionFixture(t)
+	msgID := triggerMessage(t, s, thID, "@probe hi")
+	id, err := s.CreateSession(thID, msgID, "probe", SessionQueued, "auto", "c", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSessionReply(id, 9999); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing reply target error = %v, want ErrNotFound", err)
+	}
+	got, err := s.GetSession(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ReplyMessageID != nil {
+		t.Fatalf("reply_message_id = %d, want NULL: a rejected reply target must not be stored", *got.ReplyMessageID)
+	}
+}
+
 func TestCountAgentMessagesAfter(t *testing.T) {
 	s, thID := newSessionFixture(t)
 	humanSeq, _ := s.AppendMessage(thID, "alice", "human", "user", "human words")
