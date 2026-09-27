@@ -2875,7 +2875,7 @@ answering."
 
 **Interfaces:**
 - Consumes: `model` from Task 7, `handleKey` from Tasks 8 and 9.
-- Produces: `tickInterval`, `tickMsg`, `(*model).tick() tea.Cmd`, `(*model).refresh() tea.Cmd`, `(*model).nextGranularity() string`.
+- Produces: `tickInterval`, `tickMsg`, `(*model).tick() tea.Cmd`, `(*model).refresh() tea.Cmd`, `(*model).refetchThread() tea.Cmd`, `(*model).nextGranularity() string`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -3000,10 +3000,30 @@ func (m model) tick() tea.Cmd {
 	return tea.Tick(tickInterval, func(time.Time) tea.Msg { return tickMsg{} })
 }
 
-// refresh re-reads the rows and the selected thread. New messages append, so
-// row and line indices are stable and no scroll is reset.
+// refetchThread re-reads the selected row's thread whether or not it is
+// already loaded. syncThread would return nil once the thread is loaded, which
+// is right for a cursor move and wrong for the clock: an agent's reply is a
+// message appended to the thread already on screen, so a nil here would freeze
+// the pane and lose the one property the session pane existed to provide.
+func (m model) refetchThread() tea.Cmd {
+	row, ok := m.selectedRow()
+	if !ok || row.ThreadID == 0 {
+		return nil
+	}
+	return m.fetchThread(row.ThreadID)
+}
+
+// refresh re-reads the rows and the selected thread, and arms no tick of its
+// own. The clock is armed by the rows response this refresh produces, and by
+// nothing else. Arming one here as well would double the count every round —
+// a tick from the refresh plus a tick from that refresh's own response — so
+// two become four, then eight, and the TUI hammers the daemon instead of
+// reading it. One tick per outstanding refetch is the whole invariant.
+//
+// New messages append, so the row the cursor is on is still in the list, and
+// applyRows carries the cursor across by id.
 func (m model) refresh() tea.Cmd {
-	return tea.Batch(m.fetchRows(), m.syncThread(), m.tick())
+	return tea.Batch(m.fetchRows(), m.refetchThread())
 }
 
 func (m model) nextGranularity() string {

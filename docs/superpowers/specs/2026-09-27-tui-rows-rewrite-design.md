@@ -241,6 +241,13 @@ the TUI re-reads its rows and the selected thread's messages. The cursor is
 preserved by matching the previous `Row.ID`. New messages append, so row and
 line indices are stable and no scroll is reset.
 
+Exactly one tick is in flight: the clock is armed by the rows response and by
+nothing else. A refresh that armed its own tick would double the count every
+round — two become four, then eight — and the TUI would hammer the daemon
+instead of reading it. The clock refetches the selected thread unconditionally
+rather than only when it is unloaded, because an agent's reply is a message
+appended to the thread already on screen.
+
 This is what the session pane was buying — an agent's reply appearing without a
 keypress — for two fields and no invariants. Run transcripts stay readable
 through `flf agent session --id N`.
