@@ -23,6 +23,7 @@ import (
 	"github.com/NoRaincheck/fluffle/internal/apiserver"
 	"github.com/NoRaincheck/fluffle/internal/client"
 	"github.com/NoRaincheck/fluffle/internal/jsonl"
+	"github.com/NoRaincheck/fluffle/internal/names"
 	"github.com/NoRaincheck/fluffle/internal/repo"
 	"github.com/NoRaincheck/fluffle/internal/runner"
 	"github.com/NoRaincheck/fluffle/internal/session"
@@ -1010,12 +1011,38 @@ func messageCmd(args []string) int {
 	return messageSendCmd(args[1:])
 }
 
+// legalName turns an OS username into a legal author name: ASCII letters and
+// single dots between them, no leading or trailing dot, at most MaxName bytes.
+// Underscores and digits become dots, so john_doe reads as john.doe and
+// jsmith123 as jsmith — the same shape as the names the rules already allow. A
+// username that leaves nothing usable becomes "unknown".
+func legalName(user string) string {
+	var b strings.Builder
+	afterLetter := false
+	for i := 0; i < len(user) && b.Len() < names.MaxName; i++ {
+		c := user[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
+			b.WriteByte(c)
+			afterLetter = true
+		case afterLetter:
+			b.WriteByte('.')
+			afterLetter = false
+		}
+	}
+	out := strings.TrimRight(b.String(), ".")
+	if out == "" {
+		return "unknown"
+	}
+	return out
+}
+
 func defaultName(as string) string {
 	if as != "" {
 		return as
 	}
 	if u := os.Getenv("USER"); u != "" {
-		return u
+		return legalName(u)
 	}
 	return "unknown"
 }

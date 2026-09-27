@@ -23,6 +23,7 @@ import (
 
 	"github.com/NoRaincheck/fluffle/internal/agentcfg"
 	"github.com/NoRaincheck/fluffle/internal/jsonl"
+	"github.com/NoRaincheck/fluffle/internal/names"
 	"github.com/NoRaincheck/fluffle/internal/runner"
 	"github.com/NoRaincheck/fluffle/internal/session"
 	"github.com/NoRaincheck/fluffle/internal/store"
@@ -2532,5 +2533,53 @@ func TestDaemonStatusWithoutJSONFlagStaysPlainText(t *testing.T) {
 	}
 	if !strings.HasPrefix(stdout, "daemon up at ") {
 		t.Fatalf("stdout = %q, want plain-text %q", stdout, "daemon up at ...")
+	}
+}
+
+func TestLegalName(t *testing.T) {
+	for _, tc := range []struct{ user, want string }{
+		{"crn", "crn"},
+		{"alice", "alice"},
+		{"JohnDoe", "JohnDoe"},
+		{"bob.smith", "bob.smith"},
+		{"john_doe", "john.doe"},
+		{"jsmith123", "jsmith"},
+		{"user-name-2", "user.name"},
+		{"1abc", "abc"},
+		{"_lead", "lead"},
+		{"averylongusername", "averylonguse"},
+		{"abcdefghijklmnop", "abcdefghijkl"},
+		{"abcdefghijk_", "abcdefghijk"},
+		{"12345", "unknown"},
+		{"..", "unknown"},
+	} {
+		got := legalName(tc.user)
+		if got != tc.want {
+			t.Errorf("legalName(%q) = %q, want %q", tc.user, got, tc.want)
+		}
+		if err := names.Name(got); err != nil {
+			t.Errorf("legalName(%q) = %q, which the store would reject: %v", tc.user, got, err)
+		}
+		if len(got) > names.MaxName {
+			t.Errorf("legalName(%q) = %q, %d bytes, max %d", tc.user, got, len(got), names.MaxName)
+		}
+	}
+}
+
+func TestDefaultNameDerivesTheAuthorFromTheOSUsername(t *testing.T) {
+	t.Setenv("USER", "john_doe")
+	got := defaultName("")
+	if got != "john.doe" {
+		t.Fatalf("defaultName(\"\") = %q, want john.doe", got)
+	}
+	if err := names.Name(got); err != nil {
+		t.Fatalf("defaultName(\"\") = %q, which the store would reject: %v", got, err)
+	}
+}
+
+func TestDefaultNameLeavesAnExplicitNameUnchanged(t *testing.T) {
+	t.Setenv("USER", "john_doe")
+	if got := defaultName("ci-bot"); got != "ci-bot" {
+		t.Fatalf("defaultName(%q) = %q; an explicit --as must reach the store untouched so an illegal name is a 400, not a silent rewrite", "ci-bot", got)
 	}
 }
