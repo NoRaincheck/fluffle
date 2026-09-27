@@ -721,7 +721,15 @@ func TestValidationFailuresAreTypedClientErrors(t *testing.T) {
 			return err
 		}},
 		{name: "blank reaction", run: func() error {
-			return s.AddReaction(1, " ", "bob", "human")
+			seq, err := s.AppendMessage(threadID, "alice", "human", "user", "target")
+			if err != nil {
+				return err
+			}
+			messageID, err := s.MessageIDBySeq(threadID, seq)
+			if err != nil {
+				return err
+			}
+			return s.AddReaction(messageID, " ", "bob", "human")
 		}},
 		{name: "unknown event type", run: func() error {
 			_, err := s.AppendBatch(threadID, []AppendEvent{{Type: "thread", Name: "alice", AuthorType: "human", Role: "user", Content: "hi"}})

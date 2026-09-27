@@ -77,10 +77,7 @@ func (s *Store) CreateChannel(name, repoAbsPath, repoRemote, repoHeadSHA, repoHe
 	}
 	res, err := s.db.Exec(`INSERT INTO channels(name, repo_abs_path, repo_remote, repo_head_sha, repo_head_branch, is_orphaned) VALUES(?,?,?,?,?,?)`, name, abs, nullIfEmpty(repoRemote), nullIfEmpty(repoHeadSHA), nullIfEmpty(repoHeadBranch), isOrphan)
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE") {
-			return 0, ErrConflict
-		}
-		return 0, err
+		return 0, classify(err)
 	}
 	return res.LastInsertId()
 }
@@ -269,9 +266,6 @@ func appendMessageByParentSeqTx(tx *sql.Tx, threadID, parentSeq int64, name, aut
 }
 
 func appendMessageTx(tx *sql.Tx, threadID int64, name, authorType, role, content, createdAt string, parentID int64) (int64, int64, error) {
-	if err := validateMessage(name, authorType, role, content); err != nil {
-		return 0, 0, err
-	}
 	var n int
 	if err := tx.QueryRow(`SELECT COUNT(*) FROM threads WHERE id = ?`, threadID).Scan(&n); err != nil {
 		return 0, 0, err
@@ -304,12 +298,12 @@ func appendMessageTx(tx *sql.Tx, threadID int64, name, authorType, role, content
 		}
 		res, err = tx.Exec(`INSERT INTO messages(thread_id, seq, parent_id, name, author_type, role, content, created_at) VALUES(?,?,?,?,?,?,?,?)`, threadID, seq, nullIfInt64(parentID), name, authorType, role, content, createdAt)
 		if err != nil {
-			return 0, 0, err
+			return 0, 0, classify(err)
 		}
 	} else {
 		res, err = tx.Exec(`INSERT INTO messages(thread_id, seq, parent_id, name, author_type, role, content) VALUES(?,?,?,?,?,?,?)`, threadID, seq, nullIfInt64(parentID), name, authorType, role, content)
 		if err != nil {
-			return 0, 0, err
+			return 0, 0, classify(err)
 		}
 	}
 	id, err := res.LastInsertId()
@@ -317,19 +311,6 @@ func appendMessageTx(tx *sql.Tx, threadID int64, name, authorType, role, content
 		return 0, 0, err
 	}
 	return seq, id, nil
-}
-
-func validateMessage(name, authorType, role, content string) error {
-	if strings.TrimSpace(name) == "" || strings.TrimSpace(content) == "" {
-		return invalid("name and content required")
-	}
-	if authorType != "human" && authorType != "agent" {
-		return invalid("bad author_type %q", authorType)
-	}
-	if role != "user" && role != "assistant" && role != "system" {
-		return invalid("bad role %q", role)
-	}
-	return nil
 }
 
 func nullIfInt64(v int64) any {
@@ -450,9 +431,6 @@ func (s *Store) ListInbox(limit int) ([]InboxMessage, error) {
 }
 
 func (s *Store) AddReaction(messageID int64, emoji, name, authorType string) error {
-	if err := validateReaction(emoji, name, authorType); err != nil {
-		return err
-	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -480,16 +458,6 @@ func messageThreadIDTx(tx *sql.Tx, messageID int64) (int64, error) {
 		return 0, err
 	}
 	return threadID, nil
-}
-
-func validateReaction(emoji, name, authorType string) error {
-	if strings.TrimSpace(emoji) == "" || strings.TrimSpace(name) == "" {
-		return invalid("emoji and name required")
-	}
-	if authorType != "human" && authorType != "agent" {
-		return invalid("bad author_type %q", authorType)
-	}
-	return nil
 }
 
 func (s *Store) ListReactions(threadID int64) ([]Reaction, error) {
@@ -522,9 +490,6 @@ func (s *Store) AddReactionBySeq(threadID, messageSeq int64, emoji, name, author
 }
 
 func addReactionBySeqTx(tx *sql.Tx, threadID, messageSeq int64, emoji, name, authorType, createdAt string) (int64, int64, error) {
-	if err := validateReaction(emoji, name, authorType); err != nil {
-		return 0, 0, err
-	}
 	messageID, err := messageIDBySeqTx(tx, threadID, messageSeq)
 	if err != nil {
 		return 0, 0, err
@@ -533,9 +498,6 @@ func addReactionBySeqTx(tx *sql.Tx, threadID, messageSeq int64, emoji, name, aut
 }
 
 func addReactionTx(tx *sql.Tx, messageID int64, emoji, name, authorType, createdAt string) (int64, int64, error) {
-	if err := validateReaction(emoji, name, authorType); err != nil {
-		return 0, 0, err
-	}
 	var (
 		res sql.Result
 		err error
@@ -549,10 +511,7 @@ func addReactionTx(tx *sql.Tx, messageID int64, emoji, name, authorType, created
 		res, err = tx.Exec(`INSERT INTO reactions(message_id, emoji, name, author_type) VALUES(?,?,?,?)`, messageID, emoji, name, authorType)
 	}
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE") {
-			return 0, 0, ErrConflict
-		}
-		return 0, 0, err
+		return 0, 0, classify(err)
 	}
 	reactionID, err := res.LastInsertId()
 	if err != nil {
@@ -620,15 +579,9 @@ func validateAppendEvent(event AppendEvent) error {
 		if event.ParentSeq < 0 {
 			return invalid("parent_seq must be non-negative")
 		}
-		if err := validateMessage(event.Name, event.AuthorType, event.Role, event.Content); err != nil {
-			return err
-		}
 	case "reaction":
 		if event.MessageSeq <= 0 {
 			return invalid("message_seq must be positive")
-		}
-		if err := validateReaction(event.Emoji, event.Name, event.AuthorType); err != nil {
-			return err
 		}
 	default:
 		return invalid("unknown event type %q", event.Type)

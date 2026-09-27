@@ -97,10 +97,7 @@ func (s *Store) CreateSession(threadID, triggerMessageID int64, agentName, statu
 	res, err := s.db.Exec(`INSERT INTO agent_sessions(thread_id, trigger_message_id, agent_name, status, reply_mode, command, cwd) VALUES(?,?,?,?,?,?,?)`,
 		threadID, triggerMessageID, agentName, status, replyMode, command, nullIfEmptyPtr(cwd))
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE") {
-			return 0, ErrConflict
-		}
-		return 0, err
+		return 0, classify(err)
 	}
 	return res.LastInsertId()
 }
