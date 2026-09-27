@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/NoRaincheck/fluffle/internal/store"
@@ -92,4 +93,20 @@ func TestRowsMapsStoreFailureToDaemonError(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/rows?g=message", nil))
 	assertErrorEnvelope(t, rec, http.StatusInternalServerError, "DAEMON_ERROR")
+}
+
+func TestRowsEndpointEmitsAnEmptyArrayNotNull(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	rec := httptest.NewRecorder()
+	NewHandler(s).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/rows?g=message", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := strings.TrimSpace(rec.Body.String()); got != "[]" {
+		t.Fatalf("body = %q, want []: a null body is rejected by the TUI's decoder, so it must never reach the wire", got)
+	}
 }

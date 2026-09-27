@@ -400,6 +400,9 @@ func NewHandlerWithDeps(s *store.Store, d Deps) http.Handler {
 			writeErr(w, http.StatusInternalServerError, "DAEMON_ERROR", err.Error())
 			return
 		}
+		if rows == nil {
+			rows = []store.Row{}
+		}
 		writeJSON(w, http.StatusOK, rows)
 	})
 	mux.HandleFunc("/v1/channels", func(w http.ResponseWriter, r *http.Request) {

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -145,6 +146,35 @@ func TestRowLineSanitizesContent(t *testing.T) {
 	}
 	if !strings.Contains(plain(raw), "clean text") {
 		t.Errorf("sanitization must keep the surrounding text: %q", plain(raw))
+	}
+}
+
+func TestRowLineTruncatedContentKeepsTheTail(t *testing.T) {
+	r := testRow()
+	r.Content = strings.Repeat("z", 100)
+	line := plain(rowLine(80, r, false))
+	if !strings.HasSuffix(line, "…") {
+		t.Errorf("truncated content must end in the tail, so the reader knows it was cut: %q", line)
+	}
+	if got := termtext.DisplayWidth(line); got != 80 {
+		t.Errorf("line is %d cells, want 80", got)
+	}
+}
+
+func TestRenderRowsLinesFillTheRequestedWidth(t *testing.T) {
+	rows := []store.Row{{ID: 1, Channel: "eng", Name: "alice", Content: "short"}}
+	for _, c := range []struct {
+		name string
+		rows []store.Row
+	}{
+		{"rows", rows},
+		{"empty state", nil},
+	} {
+		for i, line := range strings.Split(renderRows(100, 4, c.rows, 0, 0), "\n") {
+			if got := termtext.DisplayWidth(plain(line)); got != 100 {
+				t.Errorf("%s line %d is %d cells, want 100: %q", c.name, i, got, line)
+			}
+		}
 	}
 }
 
@@ -480,6 +510,91 @@ func TestComposeSendRepliesToTheSelectedThread(t *testing.T) {
 	}
 	if !strings.Contains(gotBody, "thanks") {
 		t.Errorf("body = %q, want the reply text", gotBody)
+	}
+}
+
+func TestComposeSendClosesTheBox(t *testing.T) {
+	m := selectedModel(t, NewAPIClient("http://127.0.0.1:1"), []store.Row{{ID: 1, ThreadID: 5}})
+	m.compose.open("eng › pr-review")
+	m.compose.text = "thanks"
+	if !m.compose.active {
+		t.Fatal("the reply box must be open before sending")
+	}
+	if _, _ = m.handleComposeSend(composeSendMsg{text: "thanks"}); m.compose.active {
+		t.Error("sending must close the reply box")
+	}
+	if m.compose.text != "" {
+		t.Errorf("text = %q, want it cleared on close", m.compose.text)
+	}
+}
+
+func TestComposeSendWithNoSelectedThreadDoesNothing(t *testing.T) {
+	posted := false
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		posted = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"seq":7}`))
+	}))
+	defer ts.Close()
+
+	// A channel row has no thread, so there is nothing to reply to.
+	m := selectedModel(t, NewAPIClient(ts.URL), []store.Row{{ID: 1, ThreadID: 0}})
+	if m.threadID != 0 {
+		t.Fatalf("threadID = %d, want 0", m.threadID)
+	}
+	_, cmd := m.handleComposeSend(composeSendMsg{text: "thanks"})
+	if cmd != nil {
+		t.Error("a reply with no selected thread must not produce a command")
+	}
+	if posted {
+		t.Error("nothing may be posted when no thread is selected")
+	}
+}
+
+func TestSentMsgReportsSuccessAndFailure(t *testing.T) {
+	m := selectedModel(t, NewAPIClient("http://127.0.0.1:1"), []store.Row{{ID: 1, ThreadID: 5}})
+
+	next, cmd := m.Update(sentMsg{err: errors.New("DELIVERY_UNKNOWN: the reply was not acknowledged")})
+	got := toModel(next)
+	if !strings.Contains(got.status, "error:") || !strings.Contains(got.status, "DELIVERY_UNKNOWN") {
+		t.Errorf("status = %q, want the delivery failure", got.status)
+	}
+	if cmd != nil {
+		t.Error("a failed send must not refetch")
+	}
+
+	next, cmd = m.Update(sentMsg{})
+	got = toModel(next)
+	if got.status != "sent" {
+		t.Errorf("status = %q, want sent", got.status)
+	}
+	if cmd == nil {
+		t.Error("a successful send must refresh the rows and the thread")
+	}
+}
+
+func TestRowsFetchedErrorIsReported(t *testing.T) {
+	m := toModel(New("http://127.0.0.1:1"))
+	m.width, m.height = 80, 40
+	next, _ := m.Update(rowsFetchedMsg{
+		granularity: store.GranularityMessage,
+		err:         errors.New("DAEMON_DOWN: connection refused"),
+	})
+	if got := toModel(next).status; !strings.Contains(got, "error:") || !strings.Contains(got, "DAEMON_DOWN") {
+		t.Errorf("status = %q, want the failure", got)
+	}
+}
+
+func TestRowsFetchedForAnotherGranularityIsIgnored(t *testing.T) {
+	m := selectedModel(t, NewAPIClient("http://127.0.0.1:1"), []store.Row{{ID: 1, ThreadID: 5}})
+	before := len(m.rows)
+	m.granularity = store.GranularityChannel
+	next, _ := m.Update(rowsFetchedMsg{
+		granularity: store.GranularityMessage,
+		rows:        []store.Row{{ID: 99}},
+	})
+	if got := toModel(next); len(got.rows) != before || got.rows[0].ID != 1 {
+		t.Errorf("a response for another granularity must be ignored, got %+v", got.rows)
 	}
 }
 

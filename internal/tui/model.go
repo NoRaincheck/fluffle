@@ -191,9 +191,6 @@ func (m *model) clamp() {
 	if m.scroll < 0 {
 		m.scroll = 0
 	}
-	if m.scroll > m.cursor {
-		m.scroll = m.cursor
-	}
 	if m.cursor >= m.scroll+visible {
 		m.scroll = m.cursor - visible + 1
 	}

@@ -84,8 +84,9 @@ func renderRows(w, h int, rows []store.Row, cursor, scroll int) string {
 	}
 	lines := make([]string, 0, h)
 	if len(rows) == 0 {
+		// clamp has already zeroed scroll, so the window below cannot read
+		// before the start of an empty list.
 		lines = append(lines, pad(placeholder("no rows — press g to change group"), w))
-		scroll = 0
 	}
 	for i := scroll; i < len(rows) && len(lines) < h; i++ {
 		lines = append(lines, rowLine(w, rows[i], i == cursor))

@@ -1312,3 +1312,23 @@ func TestListRowsClampsLimit(t *testing.T) {
 		}
 	}
 }
+
+func TestListRowsReturnsEmptySliceNotNil(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for _, granularity := range []string{GranularityMessage, GranularityThread, GranularityChannel} {
+		got, err := s.ListRows(context.Background(), granularity, 10)
+		if err != nil {
+			t.Fatalf("ListRows(%s): %v", granularity, err)
+		}
+		if got == nil {
+			t.Fatalf("ListRows(%s) returned nil for an empty database; the /v1/rows handler writes the slice straight to JSON and the TUI's decodeStrictJSON rejects a null body, so it must be an empty slice to render [] and not null", granularity)
+		}
+		if len(got) != 0 {
+			t.Fatalf("ListRows(%s) = %d rows, want 0 for an empty database", granularity, len(got))
+		}
+	}
+}
