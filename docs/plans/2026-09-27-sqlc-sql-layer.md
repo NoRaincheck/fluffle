@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go 1.26, sqlc v1.31.1, `modernc.org/sqlite` v1.59.0 (`database/sql`).
 
-**Spec:** `docs/superpowers/specs/2026-09-27-sqlc-sql-layer-design.md` — read it before starting; this plan argues from it and the two must agree.
+**Spec:** `docs/specs/2026-09-27-sqlc-sql-layer-design.md` — read it before starting; this plan argues from it and the two must agree.
 
 ## Global Constraints
 
