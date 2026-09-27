@@ -162,9 +162,10 @@ content, allowing whitespace between them, and returns each distinct name once.
 | `@reviewer, can you look` | `[reviewer]` | `, can you look` |
 
 The last row is intended. The mention is leading and the comma is the
-separator. Requiring whitespace-or-end after the name would also accept it, and
-would additionally reject `@reviewer-x`, which the name charset already allows.
-**The name charset, not the delimiter, defines the token.**
+separator. **The name charset, not the delimiter, defines the token.** `-` is
+not a name byte at all but a continuation byte, so `@reviewer-x` is not a
+mention of `reviewer` that runs into a dash: the token is not a name, and it
+yields nothing, exactly as `@reviewer2` does.
 
 The mention charset and the config charset are the same charset, and
 `internal/names` is the only place either is written down:
@@ -173,10 +174,11 @@ The mention charset and the config charset are the same charset, and
   letters and dots, starting and ending with a letter. An agent profile is named
   `ci.bot`, never `ci-bot`, `ci_bot`, or `ci2`.
 - `mentions.Parse` scans a mention token with that charset, and a token the
-  charset would have continued is not a name at all: `@alice2` and `@alice-bot`
-  parse to no name rather than to `alice`, because a mention is a lexical scan
-  of arbitrary text and `alice2` is far more likely to be prose than an agent
-  called `alice`. A mention of a 13-byte token is not a name either.
+  charset would have continued is not a name at all: `@alice2`, `@alice-bot`,
+  and `@alice_bot` parse to no name rather than to `alice`, because a mention is
+  a lexical scan of arbitrary text and `alice2` is far more likely to be prose
+  than an agent called `alice`. A mention of a 13-byte token is not a name
+  either.
 - A name may not end with a dot: `mentions` trims trailing dots off a token, so
   an agent named `ci.` could never be mentioned and would silently never
   trigger.

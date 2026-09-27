@@ -652,7 +652,7 @@ In `internal/agentcfg/agentcfg.go`, `regexp` is used only by `nameRe`, so delete
 - [ ] **Step 9: Run the gate and fix the fallout**
 
 Run: `go test ./... 2>&1 | grep -v '^ok' | head -40`
-Expected: failures wherever a test used a name or slug the new rules reject. Fix the *inputs*, never the rules: agent `ci-bot` becomes `ci.bot`, thread title `something broke` becomes `something-broke`, and a title of `test` stays. Where a test asserted that a spaced title was accepted, that assertion is a behavior change and is updated deliberately here.
+Expected: failures wherever a test used a name or slug the new rules reject. Fix the *inputs*, never the rules: agent `ci-bot` becomes `ci.bot`, the spaced thread title `Schema migration` becomes `db-migration`, and a title of `test` stays. A dash-joined slug can still overflow the bound — `something-broke` is 15 bytes and `auth-refactor` is 13, so count the replacement rather than assuming it fits. Where a test asserted that a spaced title was accepted, that assertion is a behavior change and is updated deliberately here.
 
 - [ ] **Step 10: Commit**
 
@@ -1293,7 +1293,7 @@ Add the imports `"crypto/sha256"` and `"encoding/hex"`, and drop `"path/filepath
 - [ ] **Step 4: Run the gate and fix the fallout**
 
 Run: `go test ./cmd/flf/ 2>&1 | head -40`
-Expected: failures in CLI and e2e tests that assert on `/v1/inbox` fixtures or on free-text thread titles. Repoint fixtures at `/v1/rows?g=message` with `Row` bodies, and re-slug the titles: `--title "something broke"` becomes `--title something-broke`, `--title "test"` stays. Where a test asserted that a spaced title was accepted, that is a behavior change and the assertion changes deliberately here.
+Expected: failures in CLI and e2e tests that assert on `/v1/inbox` fixtures or on free-text thread titles. Repoint fixtures at `/v1/rows?g=message` with `Row` bodies, and re-slug the titles: `--title "Schema migration"` becomes `--title db-migration`, `--title "test"` stays. A dash-joined slug can still exceed 12 bytes, so count the replacement. Where a test asserted that a spaced title was accepted, that is a behavior change and the assertion changes deliberately here.
 
 - [ ] **Step 5: Commit**
 
@@ -3046,15 +3046,15 @@ How to add a renderer or a granularity: the two render functions, the one `Row` 
 
 Delete the sections on the preview pane and the 500 ms poll. Keep the daemon-side contract: a leading `@mention` on a human message starts one session, the reply lands as an ordinary agent-authored message, and `flf agent session --id N` reads a transcript. Add one line: the TUI shows the agent's reply in the thread and does not show the run.
 
-Update the mention-charset paragraph to the new rule: the charset is `[A-Za-z][A-Za-z.]*` with trailing dots trimmed, and a token a looser charset would have continued is not a name at all. State the validation rule alongside it, so the paragraph says a legal name starts and ends with a letter and never ends with a dot, which is why the trailing dot is trimmed rather than resolved. Update the `agentcfg` charset sentence to `^[A-Za-z](?:[A-Za-z.]{0,10}[A-Za-z])?$`, which caps the name at 12 bytes and, like `names.Name`, refuses a trailing dot.
+**The mention-charset paragraph is already done.** Task 3 (`c4e9eb0`) replaced it with the shipped `internal/names` rule, the continuation-byte rule (`@alice2`, `@alice-bot`, and `@alice_bot` are not names at all), the trailing-dot reason, and a correction to the sentence that had claimed the charset allowed `@reviewer-x`. Verify with `rg -n 'continuation|not a name at all' docs/agent-sessions.md` before editing anything here; do not reintroduce a hand-written regex such as `^[A-Za-z](?:[A-Za-z.]{0,10}[A-Za-z])?$`, which is the same rule written twice.
 
 - [ ] **Step 5: Update `README.md` and `VISION.md`**
 
-Re-slug every example: `auth-refactor` stays, `Schema migration` becomes `schema-migration`, `pr-review` stays, `ci-bot` becomes `ci.bot`. In `VISION.md`, add a fifth entry to Decisions Locked In covering the two name rules and the 12-byte bound, including that a name may not end with a dot, and replace the described TUI surface with the new keymap.
+Re-slug every example, counting bytes — the 12-byte bound rejects the obvious replacements. `auth-refactor` is 13 bytes and must become `auth-ref`; `Schema migration` is 16 and must become `db-migration` (exactly 12, the longest legal slug); `pr-review` is 9 and stays; `ci-bot` is not a name at all and becomes `ci.bot`. Check each remaining example against `internal/names` rather than eyeballing it: pull every inline-code span out of VISION.md and README.md and reject anything over 12 bytes, or holding a space, underscore, or dot where a slug is meant. In `VISION.md`, add a fifth entry to Decisions Locked In covering the two name rules and the 12-byte bound, including that a name may not end with a dot, and replace the described TUI surface with the new keymap.
 
 - [ ] **Step 5b: Update `docs/backend.md`**
 
-It currently states the pre-rewrite mention rule — "A name is `[A-Za-z0-9]` plus `_`/`-` after the first byte" — and no other task owns that sentence, so it would survive as a false claim. Replace it with the new tokenizer behaviour: `mentions.Parse` scans a run of `[A-Za-z][A-Za-z.]*`, trims trailing dots so `@alice. what changed?` yields `alice`, treats a token a looser charset would have continued as not a name at all so `@alice2` stays prose, and resolves the trimmed token against names that start and end with a letter. Leave the rest of the file alone.
+It stated the pre-rewrite mention rule — "A name is `[A-Za-z0-9]` plus `_`/`-` after the first byte" — and no other task owned that sentence, so it would have survived as a false claim. **Task 3 (`c4e9eb0`) already replaced it**, along with the `agentcfg` charset sentence above it and the two API contracts that said "blank name"/"blank title". Verify with `rg -n 'A-Za-z0-9|blank name|blank title' docs/backend.md` — every hit should be gone. Leave the rest of the file alone.
 
 - [ ] **Step 6: Verify no doc names a deleted thing**
 

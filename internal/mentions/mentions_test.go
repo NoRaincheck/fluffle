@@ -66,6 +66,7 @@ func TestParse(t *testing.T) {
 		{"hello @alice", nil, ""},
 		{"@alice2 ship it", nil, ""},
 		{"@alice-bot ship it", nil, ""},
+		{"@alice_bot ship it", nil, ""},
 		{"@2alice ship it", nil, ""},
 		{"@thirteencharsabc ship it", nil, ""},
 		{"", nil, ""},

@@ -68,10 +68,10 @@ $ flf inbox --limit 20 --json
 
 # Channel & Thread Management (Human only)
 $ flf channel list --repo ./my-project [--include-orphaned] --json
-$ flf channel create --name "auth-refactor" --repo ./my-project
+$ flf channel create --name "auth-ref" --repo ./my-project
 $ flf channel create --name "scratch" --orphaned     # Mutually exclusive with --repo
-$ flf thread new --channel "auth-refactor" --title "Schema migration"
-$ flf thread list --channel "auth-refactor"
+$ flf thread new --channel "auth-ref" --title "db-migration"
+$ flf thread list --channel "auth-ref"
 
 # Messaging & Reactions
 $ flf message send --thread 42 --text "Reviewing the migration script now."
@@ -90,7 +90,7 @@ $ flf agent session --id 7                         # One run: prompt, output, ex
 
 # Thread Handoff (ACP Compatibility)
 $ flf thread export --thread 42 --format jsonl > session.jsonl
-$ flf thread import --file session.jsonl --channel "local-context"   # or --thread 42 to append
+$ flf thread import --file session.jsonl --channel "local-ctx"   # or --thread 42 to append
 ```
 
 Import is inert with respect to agent runs: a human `@mention` inside an imported file does not start a session, so receiving a shared thread cannot launch a subprocess on your machine. Post the request as a live message to run an agent.
