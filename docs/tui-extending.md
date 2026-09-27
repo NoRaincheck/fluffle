@@ -94,7 +94,7 @@ Do not add a second decode path. `decodeStrictJSON` rejecting a second JSON valu
 
 ## Refreshing
 
-The clock re-reads two things on a 2-second tick, and the tick is armed by the rows response and by nothing else. If you add a third thing to refresh, arm it from the same place or not at all: a second arming site doubles the tick count every round, and the invariant the TUI holds is one tick per outstanding refetch.
+The clock re-reads two things on a 2-second tick, and `refresh()` is the only thing that arms the tick. If you add a third thing to refresh, add it inside `refresh()`; arming from anywhere else forks the chain, and each fork arms its own, so two become four, then eight and the TUI hammers the daemon. The invariant is exactly one tick in flight, whatever the user is doing — which holds only because the tick is armed before the request is sent, so neither a response nor a keypress is on the chain.
 
 `refresh` deliberately calls `refetchThread` rather than `syncThread`. `syncThread` is for the cursor — it returns nil when the selected thread is already loaded, which is right for `j` and `k` and wrong for the clock, because an agent's reply is appended to the thread already on screen. Keep the two calls separate; sharing one freezes the pane at the moment it matters.
 

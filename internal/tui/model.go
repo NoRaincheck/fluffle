@@ -48,7 +48,7 @@ func New(base string) tea.Model {
 	return model{granularity: store.GranularityMessage, api: NewAPIClient(base)}
 }
 
-func (m model) Init() tea.Cmd { return m.fetchRows() }
+func (m model) Init() tea.Cmd { return m.refresh() }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -57,19 +57,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.compose.resize(m.width)
 		return m, nil
 	case rowsFetchedMsg:
+		// No tick is armed here, on either outcome, and that is the whole
+		// arrangement. The clock is armed by refresh() before the request is
+		// sent, so a response is never on the chain: it cannot starve it by
+		// returning no command, and it cannot fork it by returning one. What
+		// this path owes the clock is nothing.
 		if msg.err != nil {
 			m.status = "error: " + msg.err.Error()
-			// The clock is armed here and nowhere else, so an error that
-			// returned no command would end the tick chain for the rest of the
-			// session — and DAEMON_DOWN is exactly the transient error that
-			// would cause it. Arming here is what makes the clock self-healing.
-			return m, m.tick()
+			return m, nil
 		}
 		if msg.granularity != m.granularity {
 			return m, nil
 		}
 		m.applyRows(msg.rows)
-		return m, tea.Batch(m.syncThread(), m.tick())
+		return m, m.syncThread()
 	case threadFetchedMsg:
 		// A response is stale or it is not, and the thread id that selects it
 		// is the whole test. That is true of the failure as much as the
@@ -450,19 +451,28 @@ const tickInterval = 2 * time.Second
 
 type tickMsg struct{}
 
-// tick arms the next refresh. It is scheduled from a response, never from a
-// timer loop, so the clock's rate is the request rate and nothing runs behind
-// it.
+// tick arms the next refresh. refresh() is its only caller, so the clock is a
+// chain of refreshes rather than a timer loop: the clock's rate is the request
+// rate and nothing runs behind it.
 func (m model) tick() tea.Cmd {
 	return tea.Tick(tickInterval, func(time.Time) tea.Msg { return tickMsg{} })
 }
 
-// refresh re-reads the rows and the selected thread. It arms no tick of its
-// own: the clock is armed by the rows response this refresh produces, and by
-// nothing else. Arming one here as well would double the count every round —
-// a tick from the refresh and a tick from that refresh's own response — so two
-// become four, then eight, and the TUI ends up hammering the daemon instead of
-// reading it. One tick per outstanding refetch is the whole invariant.
+// refresh re-reads the rows and the selected thread, and arms the next tick.
+// It is the only place a tick is armed, and refresh is reached from exactly two
+// places — Init, which starts the chain, and tickMsg, which is the chain — so
+// there is one tick in flight, always, and no response or keypress can fork it.
+// A key that triggers its own refetch, g or the rows a sentMsg refreshes, arms
+// no tick of its own precisely because the tick is armed here, before the
+// request, rather than when a response comes back.
+//
+// Arming on the response instead is what this used to do, and it made every
+// rows response a second clock. A tick already in flight when a user-initiated
+// response arrived was joined by another; each of those produced a response that
+// armed one more; two became four, then eight, and the TUI hammered the daemon
+// instead of reading it. That is also why the rows response arms nothing on its
+// error path: the chain does not run through the response, so a DAEMON_DOWN
+// cannot stop it.
 //
 // New messages prepend — the feed is newest-first — so the row the cursor is on
 // is still in the list but has moved down by however many arrived, and
@@ -470,7 +480,7 @@ func (m model) tick() tea.Cmd {
 // follows the carried cursor, which is why a new message at the top does not
 // push the row you are reading off the screen.
 func (m model) refresh() tea.Cmd {
-	return tea.Batch(m.fetchRows(), m.refetchThread())
+	return tea.Batch(m.fetchRows(), m.refetchThread(), m.tick())
 }
 
 func (m model) nextGranularity() string {

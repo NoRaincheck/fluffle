@@ -244,11 +244,19 @@ down by however many arrived, which is why the cursor is carried by id and not
 by index. The window follows the carried cursor, so a message arriving at the
 top pushes the row you are reading down rather than off the screen.
 
-The clock is armed by the rows response and by nothing else, so a steady state
-holds exactly one tick per outstanding refetch; a key that triggers its own
-refetch briefly adds a second. A refresh that armed its own tick would double
-the count every round — two become four, then eight — and the TUI would hammer
-the daemon instead of reading it. The clock refetches the selected thread unconditionally
+`refresh()` arms the next tick, and nothing else does. `refresh` is reached from
+exactly two places — `Init`, which starts the chain, and `tickMsg`, which is the
+chain — so there is exactly one tick in flight, whatever the user is doing. A key
+that triggers its own refetch (`g`, or the rows a `sentMsg` refreshes) arms no
+tick of its own, and neither does the response it waits for, because the tick is
+armed before the request is sent rather than when a response comes back. That
+ordering is the whole invariant: arming on the response instead made every rows
+response a second clock, and since each response armed another, two became four,
+then eight — the TUI hammering the daemon instead of reading it. The same ordering
+is what makes the clock self-healing, because the chain does not run through the
+response and a `DAEMON_DOWN` cannot break it.
+
+The clock refetches the selected thread unconditionally
 rather than only when it is unloaded, because an agent's reply is a message
 appended to the thread already on screen.
 

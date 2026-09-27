@@ -96,12 +96,84 @@ func TestStaleThreadResponseIsDropped(t *testing.T) {
 	}
 }
 
-func TestTickIsArmedByTheFirstRowsResponse(t *testing.T) {
+// The clock is one chain, whatever else is in flight. It starts at Init, and
+// refresh() arms the next tick and is the only thing that arms one, so a round —
+// the tick, then the rows response it produced — leaves exactly one tick
+// outstanding and never two. A second arming site doubles the count every round,
+// two become four, then eight, and the TUI hammers the daemon instead of
+// reading it.
+//
+// The steps are counted after they are all produced, so the whole round costs
+// one tickInterval rather than one per step.
+func TestTheClockHoldsExactlyOneTick(t *testing.T) {
 	m := toModel(New("http://127.0.0.1:1"))
-	m.granularity = store.GranularityMessage
-	_, cmd := m.Update(rowsFetchedMsg{granularity: store.GranularityMessage})
-	if cmd == nil {
-		t.Fatal("the first rows response must arm a tick")
+	m.rows = []store.Row{{ID: 1, ThreadID: 5}}
+	m.threadID = 5
+
+	const rounds = 4
+	steps := []tea.Cmd{m.Init()}
+	for range rounds {
+		next, cmd := m.Update(tickMsg{})
+		m = toModel(next)
+		steps = append(steps, cmd)
+		next, cmd = m.Update(rowsFetchedMsg{granularity: store.GranularityMessage})
+		m = toModel(next)
+		steps = append(steps, cmd)
+	}
+
+	counts := countTicksAll(steps)
+	if counts[0] != 1 {
+		t.Errorf("Init left %d ticks in flight, want 1: the clock has to start somewhere, and refresh() is the only place it starts", counts[0])
+	}
+	for r := range rounds {
+		refreshed, responded := counts[1+2*r], counts[2+2*r]
+		if responded != 0 {
+			t.Errorf("round %d's rows response armed %d ticks, want 0: the chain does not run through a response", r, responded)
+		}
+		if inFlight := refreshed + responded; inFlight != 1 {
+			t.Errorf("round %d left %d ticks in flight, want 1: refresh() arms the clock and nothing else does", r, inFlight)
+		}
+	}
+}
+
+// g is the user's fetch, not the clock's, so neither the key nor the response
+// it waits for may arm a tick. The clock is a self-sustaining chain and a tick
+// nothing consumes is a second chain: each tick produces a rows response, each
+// response armed another, and 2 became 4, then 8. The TUI was hammering the
+// daemon instead of reading it, which is the opposite of what the clock is for.
+//
+// The baseline is taken the same way whichever site arms the tick, by adding up
+// a whole clock round, so the number it reports is ticks-in-flight rather than
+// ticks-somewhere.
+func TestAUserFetchAddsNoTick(t *testing.T) {
+	m := toModel(New("http://127.0.0.1:1"))
+	m.width, m.height = 120, 40
+	m.rows = []store.Row{{ID: 1, ThreadID: 5}}
+	m.threadID = 5
+
+	// One clock round: the clock fires and its refetch comes back. Whatever
+	// that leaves in flight is the clock.
+	next, refresh := m.Update(tickMsg{})
+	m = toModel(next)
+	next, clocked := m.Update(rowsFetchedMsg{granularity: store.GranularityMessage})
+	m = toModel(next)
+
+	// g, and the response it is waiting for.
+	next, pressed := m.handleKey(key("g"))
+	m = toModel(next)
+	_, responded := m.Update(rowsFetchedMsg{granularity: m.granularity})
+
+	counts := countTicksAll([]tea.Cmd{refresh, clocked, pressed, responded})
+	before := counts[0] + counts[1]
+	if before != 1 {
+		t.Fatalf("a clock round left %d ticks in flight, want 1", before)
+	}
+	added := counts[2] + counts[3]
+	if added != 0 {
+		t.Errorf("g added %d ticks, want 0: a keypress is not part of the clock, and a tick nothing consumes is a second chain", added)
+	}
+	if total := before + added; total != 1 {
+		t.Errorf("%d ticks in flight after g, want 1: each extra chain arms its own, so two become four, then eight", total)
 	}
 }
 
@@ -181,20 +253,26 @@ func watch(cmd tea.Cmd, into chan<- tea.Msg) {
 	}()
 }
 
-// g cycles between three different lists, so a message row has no counterpart
-// at channel granularity and the cursor cannot be carried across. Resetting is
-// the honest answer; matching by id would either keep the wrong row or land on
-// an arbitrary one.
-// The clock is armed by the rows response and by nothing else, so a rows
-// response that returns no command ends the tick chain for the rest of the
-// session. DAEMON_DOWN is transient by definition — a daemon restarted under a
-// running TUI produces exactly one — and the user sees a TUI that has quietly
-// stopped reading: no keypress brings the reply, and only g restarts the clock.
-// The error path has to arm the tick for the same reason the success path does.
-func TestARowsErrorStillArmsTheClock(t *testing.T) {
+// A transient DAEMON_DOWN must not stop the clock. The chain does not run
+// through the rows response at all — refresh() arms the next tick before the
+// request is even sent — so a response that arms nothing leaves the tick that
+// was already in flight, and the round after the failure is armed like any
+// other. The error reaches the status line and nothing else; the TUI recovers
+// on its own, with no keypress, which is what the previous wave's fix was for.
+//
+// Before that fix the error path armed nothing either, but the clock was armed
+// by the rows response and by nothing else, so one DAEMON_DOWN ended the chain
+// for the rest of the session. Inverting the arming removes the dependency: the
+// response is no longer on the chain, so it cannot break it.
+func TestARowsErrorDoesNotStarveTheClock(t *testing.T) {
 	m := toModel(New("http://127.0.0.1:1"))
 	m.granularity = store.GranularityMessage
+	m.rows = []store.Row{{ID: 1, ThreadID: 5}}
+	m.threadID = 5
 
+	// The clock fires and its refetch fails.
+	next, refresh := m.Update(tickMsg{})
+	m = toModel(next)
 	next, failed := m.Update(rowsFetchedMsg{
 		granularity: store.GranularityMessage,
 		err:         errors.New("DAEMON_DOWN: connection refused"),
@@ -202,46 +280,49 @@ func TestARowsErrorStillArmsTheClock(t *testing.T) {
 	if toModel(next).status == "" {
 		t.Error("the error must still reach the status line")
 	}
-	_, good := m.Update(rowsFetchedMsg{granularity: store.GranularityMessage})
 
-	// One tick each, and only one: an error path that armed a second would
-	// double the clock every round, and two become four.
-	var failedTicks, goodTicks int
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() { defer wg.Done(); failedTicks = countTicks(failed) }()
-	go func() { defer wg.Done(); goodTicks = countTicks(good) }()
-	wg.Wait()
+	// The next fire of the clock, which is the round after the failure.
+	next, after := m.Update(tickMsg{})
 
-	if failedTicks != 1 {
-		t.Errorf("a rows error armed %d ticks, want 1: the clock has to survive a transient DAEMON_DOWN", failedTicks)
+	counts := countTicksAll([]tea.Cmd{refresh, failed, after})
+	if counts[1] != 0 {
+		t.Errorf("a rows error armed %d ticks, want 0: the clock is armed by refresh() and the chain does not run through the response", counts[1])
 	}
-	if goodTicks != 1 {
-		t.Errorf("a good rows response armed %d ticks, want 1", goodTicks)
+	if counts[0] != 1 {
+		t.Errorf("the round that failed left %d ticks in flight, want 1: a clock with nothing in flight never recovers", counts[0])
+	}
+	if counts[2] != 1 {
+		t.Errorf("the round after a rows error armed %d ticks, want 1: the TUI has to recover on its own", counts[2])
 	}
 }
 
-// countTicks runs a command tree in the background and reports how many ticks
-// it arms. A tick blocks for a whole tickInterval before it fires, so this
-// waits one interval out rather than running the command synchronously.
-func countTicks(cmd tea.Cmd) int {
-	if cmd == nil {
-		return 0
+// countTicksAll counts the ticks each command tree arms and returns one count
+// per tree, in order. A tick blocks for a whole tickInterval before it fires,
+// so a tree cannot be counted by running it; every tree handed to this is armed
+// at once and nothing waits between them, so one interval covers all of them
+// and counting them one at a time would cost a wait per tree.
+func countTicksAll(cmds []tea.Cmd) []int {
+	fired := make([]chan tea.Msg, len(cmds))
+	for i, cmd := range cmds {
+		fired[i] = make(chan tea.Msg, 16)
+		watch(cmd, fired[i])
 	}
-	fired := make(chan tea.Msg, 16)
-	watch(cmd, fired)
-	ticks := 0
-	deadline := time.After(tickInterval + time.Second)
-	for {
-		select {
-		case msg := <-fired:
-			if _, isTick := msg.(tickMsg); isTick {
-				ticks++
+	time.Sleep(tickInterval + 100*time.Millisecond)
+	counts := make([]int, len(cmds))
+	for i, ch := range fired {
+	drain:
+		for {
+			select {
+			case msg := <-ch:
+				if _, isTick := msg.(tickMsg); isTick {
+					counts[i]++
+				}
+			default:
+				break drain
 			}
-		case <-deadline:
-			return ticks
 		}
 	}
+	return counts
 }
 
 // g cycles between three different lists, so a message row has no counterpart

@@ -184,7 +184,9 @@ A send appends to the thread and never sets `parent_id`: a reply is a message in
 
 One unconditional 2-second tick. On each tick the TUI re-reads its rows and the selected thread's messages, so an agent's reply appears in the thread without a keypress. That is the property the pane that showed a run was buying, for no state at all.
 
-**The clock is armed by the rows response and by nothing else.** `Update` batches `syncThread()` and `tick()` on `rowsFetchedMsg`; `refresh()` arms no tick of its own. A refresh that armed one would double the count every round — a tick from the refresh and a tick from that refresh's own response — so two become four, then eight, and the TUI ends up hammering the daemon instead of reading it. The invariant is **one tick per outstanding refetch**: a key that triggers its own refetch briefly holds a second, and a steady state holds one.
+**`refresh()` is the only thing that arms a tick, and `refresh` is reached only from `Init` and `tickMsg`.** So the clock is one chain, started at `Init` and advanced by nothing but its own ticks, and there is exactly one tick in flight whatever the user is doing. `Update` returns `m.syncThread()` alone on `rowsFetchedMsg`; a key that triggers its own refetch arms no tick either.
+
+The ordering is the invariant. The tick is armed *before* the request is sent, so a response is never on the chain: it cannot starve the clock by returning no command, and it cannot fork it by returning one. Arming on the response instead — which is what the first version did — made every rows response a second clock. A tick already in flight when a user-initiated response arrived was joined by another, each of those produced a response that armed one more, two became four, then eight, and the TUI ended up hammering the daemon instead of reading it. It is also why a `DAEMON_DOWN` cannot stop the clock: the chain does not run through the response, so the error path arms nothing and costs the clock nothing.
 
 The tick re-reads the thread *unconditionally*, through `refetchThread`, not through `syncThread`. `syncThread` returns nil when the selected thread is already loaded, which is right for `j` and `k` — you do not refetch a thread that is on screen every time you move within it — and wrong for the clock, because an agent's reply is a message appended to the thread already on screen and nothing about the selection has changed for `syncThread` to notice. The two are deliberately separate calls.
 
@@ -284,8 +286,8 @@ key ──▶ Update(tea.KeyMsg)
                                 Esc       ──▶ detail = false
                                 r         ──▶ detail, compose.open, syncThread
 
-tickMsg ──▶ refresh ──▶ fetchRows + refetchThread
-rowsFetchedMsg ──▶ applyRows, syncThread, tick          // the only arming site
+tickMsg ──▶ refresh ──▶ fetchRows + refetchThread + tick   // the only arming site
+rowsFetchedMsg ──▶ applyRows, syncThread                 // arms no tick: not on the chain
 threadFetchedMsg ──▶ applied iff threadID == m.threadID
 sentMsg ──▶ status, fetchRows + fetchThread
 ```
@@ -295,7 +297,7 @@ sentMsg ──▶ status, fetchRows + fetchThread
 | Package | Covers |
 |---|---|
 | `tui` | `rowLine` at 71, 80, and 200 columns; a 40-byte channel and a 40-byte author truncated into a 12-cell column without breaking the row width; only the content's first line is drawn; sanitizing the name, the content, the thread header, the author, and the status; `renderThread` at every width, the empty state, the tail cut, the narrow pane, an overlong author; `g` cycles and resets; `v` reverses and keeps the cursor; `Enter`/`Esc` in both geometries; the view is never wider than the terminal and is exactly `MinHeight` rows; `r` on a channel row; a refused send keeps the reason it was refused; the hint names every bound key and fits the floor; `l p s n C e f c` are not bound; a stale rows and a stale thread response are both dropped; a failed thread fetch clears the pane and retries |
-| `tui` (clock) | A tick arms its successor; four rounds produce four ticks, not more; a tick keeps the cursor on the same row; a tick shows an appended reply with no keypress; a refresh re-reads the thread already on screen; a late thread error does not blank the thread on screen |
+| `tui` (clock) | A tick arms its successor; four rounds produce four ticks, not more; a clock round leaves exactly one tick in flight and `g` adds none; a rows error arms no tick and does not starve the clock; a tick keeps the cursor on the same row; a tick shows an appended reply with no keypress; a refresh re-reads the thread already on screen; a late thread error does not blank the thread on screen |
 | `tui` (api) | `ListRows` decodes the feed, defaults the limit, and rejects a `null` body; `ListMessages`; the error envelope surfaces; an envelope-free 4xx is `DAEMON_ERROR`; `SendReply` posts the text with no parent, and a missing sequence is `DELIVERY_UNKNOWN`; a pre-dispatch connection failure is `DAEMON_DOWN`; a dispatched timeout is `DELIVERY_UNKNOWN`; a context cancellation returns promptly; the strict decoder rejects a second value, a `null`, and trailing bytes |
 | `screen`, `termtext` | One smoke test each, so the fork is exercised rather than assumed |
 | `store` | `ListRows` per granularity: counts, newest-first order, original-post content, a channel row carrying no thread, and an unknown granularity |
@@ -307,8 +309,8 @@ sentMsg ──▶ status, fetchRows + fetchThread
 2. **One column width and no drop ladder.** Every text column is 12 because that is the name bound, so `rowPrefixW` is arithmetic and `MinWidth` derives from it. A row is drawn whole or not at all.
 3. **`split` is a width comparison and nothing else.** Below it the list takes the whole width and `Enter` gives the thread the terminal; above it the thread sits beside the list. One rule, so `Enter` and `Esc` mean the same thing in both geometries and no key is a no-op at some widths.
 4. **One `renderThread` in two placements.** The pane and the detail view are the same function at two widths, so the original post needs no special case and the two cannot drift.
-5. **One unconditional tick, armed by the rows response.** An agent's reply appears without a keypress, which is what the pane that showed a run was buying, for two fields and no release rules. The old poll covered a live run's lifetime rather than the thread's, and a session started in the thread you were already looking at was not discovered until you moved away and back.
-6. **One tick per outstanding refetch, and the rows response is the only arming site.** A tick armed anywhere else doubles the count every round.
+5. **One unconditional tick, armed by `refresh()`.** An agent's reply appears without a keypress, which is what the pane that showed a run was buying, for two fields and no release rules. The old poll covered a live run's lifetime rather than the thread's, and a session started in the thread you were already looking at was not discovered until you moved away and back.
+6. **Exactly one clock chain, and `refresh()` is the only arming site.** A tick armed anywhere else doubles the count every round, and the response is the worst place to arm one: the chain must not depend on a response at all, or a transient `DAEMON_DOWN` ends it for the session.
 7. **A response is stale when the field that selects it no longer matches.** `granularity` for rows, `threadID` for the thread, errors included. There are only two requests in flight, so there is nothing to interleave and no generation counter.
 8. **The clock refetches the thread; the cursor does not.** `refetchThread` and `syncThread` are different calls because the reasons are different, and sharing one would have kept the pane frozen exactly when it mattered.
 9. **The cursor is carried by `Row.ID`, and `g` drops the rows entirely.** Messages prepend, so a refreshed feed still holds the row the cursor was on; a different granularity is a different list, where a message row has no counterpart and the id namespaces overlap, so `g` clears `m.rows` rather than leaving an id for the next response to match.
