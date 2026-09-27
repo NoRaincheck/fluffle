@@ -352,6 +352,17 @@ func TestListSessionsIsScopedToItsThread(t *testing.T) {
 	}
 }
 
+func TestMarkSessionRunningUnknownIDIsNotFound(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.MarkSessionRunning(9999, "2026-01-01T00:00:00Z"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("got %v, want ErrNotFound", err)
+	}
+}
+
 func TestCountAgentMessagesAfter(t *testing.T) {
 	s, thID := newSessionFixture(t)
 	humanSeq, _ := s.AppendMessage(thID, "alice", "human", "user", "human words")

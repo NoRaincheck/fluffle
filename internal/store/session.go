@@ -59,20 +59,6 @@ type ThreadContext struct {
 	RepoAbsPath *string
 }
 
-const sessionColumns = `id, thread_id, trigger_message_id, agent_name, status, reply_mode, command,
-	cwd, exit_code, error, reply_message_id, started_at, finished_at, created_at`
-
-type scanner interface {
-	Scan(dest ...any) error
-}
-
-func scanSession(row scanner) (Session, error) {
-	var s Session
-	err := row.Scan(&s.ID, &s.ThreadID, &s.TriggerMessageID, &s.AgentName, &s.Status, &s.ReplyMode, &s.Command,
-		&s.Cwd, &s.ExitCode, &s.Error, &s.ReplyMessageID, &s.StartedAt, &s.FinishedAt, &s.CreatedAt)
-	return s, err
-}
-
 func (s *Store) CreateSession(threadID, triggerMessageID int64, agentName, status, replyMode, command string, cwd *string) (int64, error) {
 	if strings.TrimSpace(agentName) == "" || strings.TrimSpace(command) == "" {
 		return 0, invalid("agent_name and command required")
@@ -87,8 +73,9 @@ func (s *Store) CreateSession(threadID, triggerMessageID int64, agentName, statu
 	default:
 		return 0, invalid("bad reply mode %q", replyMode)
 	}
-	var msgThread int64
-	if err := s.db.QueryRow(`SELECT thread_id FROM messages WHERE id = ?`, triggerMessageID).Scan(&msgThread); err != nil {
+	ctx := context.Background()
+	msgThread, err := s.q.GetMessageThreadIDByID(ctx, db.GetMessageThreadIDByIDParams{ID: triggerMessageID})
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return 0, ErrNotFound
 		}
@@ -97,52 +84,98 @@ func (s *Store) CreateSession(threadID, triggerMessageID int64, agentName, statu
 	if msgThread != threadID {
 		return 0, invalid("trigger message not in this thread")
 	}
-	res, err := s.db.Exec(`INSERT INTO agent_sessions(thread_id, trigger_message_id, agent_name, status, reply_mode, command, cwd) VALUES(?,?,?,?,?,?,?)`,
-		threadID, triggerMessageID, agentName, status, replyMode, command, nullIfEmptyPtr(cwd))
+	id, err := s.q.CreateSession(ctx, db.CreateSessionParams{
+		ThreadID:         threadID,
+		TriggerMessageID: triggerMessageID,
+		AgentName:        agentName,
+		Status:           status,
+		ReplyMode:        replyMode,
+		Command:          command,
+		Cwd:              nullIfEmptyPtr(cwd),
+	})
 	if err != nil {
 		return 0, classify(err)
 	}
-	return res.LastInsertId()
+	return id, nil
 }
 
-func nullIfEmptyPtr(v *string) any {
+func nullIfEmptyPtr(v *string) *string {
 	if v == nil || *v == "" {
 		return nil
 	}
-	return *v
+	return v
 }
 
 func (s *Store) ListSessions(threadID int64) ([]Session, error) {
-	rows, err := s.db.Query(`SELECT `+sessionColumns+` FROM agent_sessions WHERE thread_id = ? ORDER BY id ASC`, threadID)
+	rows, err := s.q.ListSessions(context.Background(), db.ListSessionsParams{ThreadID: threadID})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	out := []Session{}
-	for rows.Next() {
-		sess, err := scanSession(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, sess)
+	for _, r := range rows {
+		out = append(out, sessionFromRow(r))
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (s *Store) GetSession(id int64) (Session, error) {
-	sess, err := scanSession(s.db.QueryRow(`SELECT `+sessionColumns+` FROM agent_sessions WHERE id = ?`, id))
+	r, err := s.q.GetSession(context.Background(), db.GetSessionParams{ID: id})
 	if errors.Is(err, sql.ErrNoRows) {
 		return Session{}, ErrNotFound
 	}
-	return sess, err
+	if err != nil {
+		return Session{}, err
+	}
+	return sessionFromRow(r), nil
+}
+
+func sessionFromRow(r db.AgentSession) Session {
+	return Session{
+		ID:               r.ID,
+		ThreadID:         r.ThreadID,
+		TriggerMessageID: r.TriggerMessageID,
+		AgentName:        r.AgentName,
+		Status:           r.Status,
+		ReplyMode:        r.ReplyMode,
+		Command:          r.Command,
+		Cwd:              r.Cwd,
+		ExitCode:         r.ExitCode,
+		Error:            r.Error,
+		ReplyMessageID:   r.ReplyMessageID,
+		StartedAt:        r.StartedAt,
+		FinishedAt:       r.FinishedAt,
+		CreatedAt:        r.CreatedAt,
+	}
 }
 
 func (s *Store) MarkSessionRunning(id int64, startedAt string) error {
-	return s.execSessionUpdate(`UPDATE agent_sessions SET status = ?, started_at = ? WHERE id = ? AND status = ?`, SessionRunning, startedAt, id, SessionQueued)
+	n, err := s.q.MarkSessionRunning(context.Background(), db.MarkSessionRunningParams{
+		Status:    SessionRunning,
+		StartedAt: &startedAt,
+		ID:        id,
+		Status_2:  SessionQueued,
+	})
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *Store) SetSessionReply(id int64, replyMessageID int64) error {
-	return s.execSessionUpdate(`UPDATE agent_sessions SET reply_message_id = ? WHERE id = ?`, replyMessageID, id)
+	n, err := s.q.SetSessionReply(context.Background(), db.SetSessionReplyParams{
+		ReplyMessageID: &replyMessageID,
+		ID:             id,
+	})
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *Store) FinishSession(id int64, status string, exitCode *int64, errMsg *string, finishedAt string) error {
@@ -151,16 +184,13 @@ func (s *Store) FinishSession(id int64, status string, exitCode *int64, errMsg *
 	default:
 		return invalid("bad terminal session status %q", status)
 	}
-	return s.execSessionUpdate(`UPDATE agent_sessions SET status = ?, exit_code = ?, error = ?, finished_at = ? WHERE id = ?`,
-		status, exitCode, nullIfEmptyPtr(errMsg), finishedAt, id)
-}
-
-func (s *Store) execSessionUpdate(query string, args ...any) error {
-	res, err := s.db.Exec(query, args...)
-	if err != nil {
-		return err
-	}
-	n, err := res.RowsAffected()
+	n, err := s.q.FinishSession(context.Background(), db.FinishSessionParams{
+		Status:     status,
+		ExitCode:   exitCode,
+		Error:      nullIfEmptyPtr(errMsg),
+		FinishedAt: &finishedAt,
+		ID:         id,
+	})
 	if err != nil {
 		return err
 	}
@@ -176,31 +206,29 @@ func (s *Store) AppendSessionEvent(sessionID int64, eventType, content string) (
 	default:
 		return 0, 0, invalid("bad session event type %q", eventType)
 	}
-	tx, err := s.db.Begin()
+	tx, q, err := s.tx()
 	if err != nil {
 		return 0, 0, err
 	}
 	defer tx.Rollback()
-	var exists int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM agent_sessions WHERE id = ?`, sessionID).Scan(&exists); err != nil {
+	ctx := context.Background()
+	exists, err := q.CountSessionsByID(ctx, db.CountSessionsByIDParams{ID: sessionID})
+	if err != nil {
 		return 0, 0, err
 	}
 	if exists == 0 {
 		return 0, 0, ErrNotFound
 	}
-	var maxSeq sql.NullInt64
-	if err := tx.QueryRow(`SELECT MAX(seq) FROM agent_session_events WHERE session_id = ?`, sessionID).Scan(&maxSeq); err != nil {
-		return 0, 0, err
-	}
-	seq := int64(1)
-	if maxSeq.Valid {
-		seq = maxSeq.Int64 + 1
-	}
-	res, err := tx.Exec(`INSERT INTO agent_session_events(session_id, seq, type, content) VALUES(?,?,?,?)`, sessionID, seq, eventType, content)
+	seq, err := nextSessionEventSeq(ctx, q, sessionID)
 	if err != nil {
 		return 0, 0, err
 	}
-	id, err := res.LastInsertId()
+	id, err := q.InsertSessionEvent(ctx, db.InsertSessionEventParams{
+		SessionID: sessionID,
+		Seq:       seq,
+		Type:      eventType,
+		Content:   content,
+	})
 	if err != nil {
 		return 0, 0, err
 	}
@@ -210,21 +238,34 @@ func (s *Store) AppendSessionEvent(sessionID int64, eventType, content string) (
 	return seq, id, nil
 }
 
+func nextSessionEventSeq(ctx context.Context, q *db.Queries, sessionID int64) (int64, error) {
+	last, err := q.GetLastSessionEventSeq(ctx, db.GetLastSessionEventSeqParams{SessionID: sessionID})
+	if errors.Is(err, sql.ErrNoRows) {
+		return 1, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return last + 1, nil
+}
+
 func (s *Store) ListSessionEvents(sessionID int64) ([]SessionEvent, error) {
-	rows, err := s.db.Query(`SELECT id, session_id, seq, type, content, COALESCE(created_at,'') FROM agent_session_events WHERE session_id = ? ORDER BY seq ASC`, sessionID)
+	rows, err := s.q.ListSessionEvents(context.Background(), db.ListSessionEventsParams{SessionID: sessionID})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	out := []SessionEvent{}
-	for rows.Next() {
-		var e SessionEvent
-		if err := rows.Scan(&e.ID, &e.SessionID, &e.Seq, &e.Type, &e.Content, &e.CreatedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, e)
+	for _, r := range rows {
+		out = append(out, SessionEvent{
+			ID:        r.ID,
+			SessionID: r.SessionID,
+			Seq:       r.Seq,
+			Type:      r.Type,
+			Content:   r.Content,
+			CreatedAt: r.CreatedAt,
+		})
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (s *Store) CountAgentMessagesAfter(threadID int64, name string, afterSeq int64) (int, error) {
@@ -265,12 +306,11 @@ func (s *Store) MessageByID(id int64) (Message, error) {
 }
 
 func (s *Store) ReconcileSessions(finishedAt string) (int, error) {
-	res, err := s.db.Exec(`UPDATE agent_sessions
-		SET status = ?, finished_at = ?, error = 'daemon restarted while ' || status
-		WHERE status IN (?, ?)`, SessionCanceled, finishedAt, SessionQueued, SessionRunning)
-	if err != nil {
-		return 0, err
-	}
-	n, err := res.RowsAffected()
+	n, err := s.q.ReconcileSessions(context.Background(), db.ReconcileSessionsParams{
+		Status:     SessionCanceled,
+		FinishedAt: &finishedAt,
+		Status_2:   SessionQueued,
+		Status_3:   SessionRunning,
+	})
 	return int(n), err
 }
