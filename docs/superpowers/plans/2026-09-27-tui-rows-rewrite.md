@@ -1178,7 +1178,7 @@ Expected: FAIL — `/v1/rows` is an unknown route. The `/v1/inbox` half of the c
 
 - [ ] **Step 3: Replace the handler**
 
-**Add** a `/v1/rows` handler in `internal/apiserver/server.go`, alongside the existing `/v1/inbox` one. Do not delete `/v1/inbox` in this task: `cmd/flf`'s `inbox` command still calls it, and removing the route now would break that command at runtime until Task 6. Task 6 migrates the CLI and removes the route in the same commit.
+**Add** a `/v1/rows` handler in `internal/apiserver/server.go`, alongside the existing `/v1/inbox` one. Do not delete `/v1/inbox` in this task: `cmd/flf`'s `inbox` command still calls it, and removing the route now would break that command at runtime until Task 6. Task 6 migrates the CLI. The route itself is removed in Task 7, because the old TUI still calls it and deleting it earlier breaks the tree at compile time.
 
 ```go
 	mux.HandleFunc("/v1/rows", func(w http.ResponseWriter, r *http.Request) {
@@ -1220,8 +1220,8 @@ One endpoint, three granularities, one row type shared with the CLI. A
 missing or unknown g is a 400 with the standard error envelope rather than a
 silently defaulted feed.
 
-/v1/inbox stays until the CLI migrates, so the branch is never broken at
-runtime mid-sequence."
+/v1/inbox stays until the old TUI is replaced in Task 7, so the branch is
+never broken mid-sequence."
 ```
 
 ---
