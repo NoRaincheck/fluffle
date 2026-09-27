@@ -429,8 +429,8 @@ func TestInboxJSONUsesLimitAndDecodesEntries(t *testing.T) {
 		switch r.URL.Path {
 		case "/v1/health":
 			_, _ = w.Write([]byte(`{"ok":true}`))
-		case "/v1/inbox":
-			_, _ = w.Write([]byte(`[{"ID":9,"ThreadID":3,"Seq":2,"ParentID":null,"Name":"alice","AuthorType":"human","Role":"user","Content":"portable","CreatedAt":"2026-09-25T01:00:00Z","channel_name":"dev","channel_id":4,"thread_title":"agent-loop"}]`))
+		case "/v1/rows":
+			_, _ = w.Write([]byte(`[{"ID":9,"ThreadID":3,"Time":"2026-09-25T01:00:00Z","Channel":"dev","Thread":"agent-loop","Name":"alice","Content":"portable","Count":1}]`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -446,25 +446,18 @@ func TestInboxJSONUsesLimitAndDecodesEntries(t *testing.T) {
 	}
 	recorded := snapshotCLIRequests(&requests, &mu)
 	if len(recorded) != 2 {
-		t.Fatalf("requests = %d, want health and inbox", len(recorded))
+		t.Fatalf("requests = %d, want health and rows", len(recorded))
 	}
-	if got := recorded[1]; got.Method != http.MethodGet || got.Path != "/v1/inbox" || got.RawQuery != "limit=7" {
-		t.Fatalf("inbox request = %s %s?%s", got.Method, got.Path, got.RawQuery)
+	if got := recorded[1]; got.Method != http.MethodGet || got.Path != "/v1/rows" || got.RawQuery != "g=message&limit=7" {
+		t.Fatalf("rows request = %s %s?%s", got.Method, got.Path, got.RawQuery)
 	}
-	var got []struct {
-		ThreadID    int64  `json:"ThreadID"`
-		Seq         int64  `json:"Seq"`
-		Name        string `json:"Name"`
-		Content     string `json:"Content"`
-		ChannelName string `json:"channel_name"`
-		ChannelID   int64  `json:"channel_id"`
-		ThreadTitle string `json:"thread_title"`
-	}
+	var got []store.Row
 	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0].ThreadID != 3 || got[0].Seq != 2 || got[0].Name != "alice" || got[0].Content != "portable" || got[0].ChannelName != "dev" || got[0].ChannelID != 4 || got[0].ThreadTitle != "agent-loop" {
-		t.Fatalf("inbox = %+v", got)
+	want := []store.Row{{ID: 9, ThreadID: 3, Time: "2026-09-25T01:00:00Z", Channel: "dev", Thread: "agent-loop", Name: "alice", Content: "portable", Count: 1}}
+	if len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("inbox = %+v, want %+v", got, want)
 	}
 }
 
@@ -475,7 +468,7 @@ func TestInboxEmptyJSONOutputsArray(t *testing.T) {
 			_, _ = w.Write([]byte(`{"ok":true}`))
 			return
 		}
-		if r.URL.Path == "/v1/inbox" {
+		if r.URL.Path == "/v1/rows" {
 			_, _ = w.Write([]byte(`[]`))
 			return
 		}
@@ -502,8 +495,8 @@ func TestInboxTextIncludesPortableMessageFields(t *testing.T) {
 			_, _ = w.Write([]byte(`{"ok":true}`))
 			return
 		}
-		if r.URL.Path == "/v1/inbox" {
-			_, _ = w.Write([]byte(`[{"ID":9,"ThreadID":3,"Seq":2,"ParentID":null,"Name":"alice","AuthorType":"human","Role":"user","Content":"portable","CreatedAt":"2026-09-25T01:00:00Z","channel_name":"dev","channel_id":4,"thread_title":"agent-loop"}]`))
+		if r.URL.Path == "/v1/rows" {
+			_, _ = w.Write([]byte(`[{"ID":9,"ThreadID":3,"Time":"2026-09-25T01:00:00Z","Channel":"dev","Thread":"agent-loop","Name":"alice","Content":"portable first line\nportable second line","Count":1}]`))
 			return
 		}
 		http.NotFound(w, r)
@@ -517,10 +510,36 @@ func TestInboxTextIncludesPortableMessageFields(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0: %s", code, stderr)
 	}
-	for _, want := range []string{"dev", "agent-loop", "2", "alice", "portable"} {
-		if !strings.Contains(stdout, want) {
-			t.Fatalf("stdout %q does not contain %q", stdout, want)
+	if want := "dev/9 agent-loop/3 alice: portable first line\n"; stdout != want {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
+	}
+}
+
+func TestInboxTextPrintsEveryRowOfTheFeed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/health" {
+			_, _ = w.Write([]byte(`{"ok":true}`))
+			return
 		}
+		if r.URL.Path == "/v1/rows" {
+			_, _ = w.Write([]byte(`[{"ID":9,"ThreadID":3,"Channel":"dev","Thread":"agent-loop","Name":"alice","Content":"newest","Count":1},{"ID":4,"ThreadID":2,"Channel":"bugs","Thread":"tri","Name":"bob","Content":"older","Count":1}]`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	useTestDaemon(t, server)
+
+	code, stdout, stderr := captureOutput(t, func() int {
+		return run([]string{"inbox"})
+	})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0: %s", code, stderr)
+	}
+	want := "dev/9 agent-loop/3 alice: newest\nbugs/4 tri/2 bob: older\n"
+	if stdout != want {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
 	}
 }
 
@@ -1367,35 +1386,42 @@ func TestCLIReadResponsesAreSemanticallyValidated(t *testing.T) {
 			name: "inbox null",
 			args: []string{"inbox", "--json"},
 			responses: map[string]string{
-				"/v1/inbox": `null`,
+				"/v1/rows": `null`,
 			},
 		},
 		{
 			name: "inbox object instead of array",
 			args: []string{"inbox", "--json"},
 			responses: map[string]string{
-				"/v1/inbox": `{"items":[]}`,
+				"/v1/rows": `{"items":[]}`,
 			},
 		},
 		{
 			name: "inbox trailing json",
 			args: []string{"inbox", "--json"},
 			responses: map[string]string{
-				"/v1/inbox": `[] {}`,
+				"/v1/rows": `[] {}`,
 			},
 		},
 		{
 			name: "inbox zero id",
 			args: []string{"inbox", "--json"},
 			responses: map[string]string{
-				"/v1/inbox": `[{"ID":0,"ThreadID":3,"Seq":1,"Name":"","AuthorType":"human","Role":"user","Content":"x","channel_name":"dev","channel_id":4,"thread_title":"t"}]`,
+				"/v1/rows": `[{"ID":0,"ThreadID":3,"Channel":"dev","Thread":"agent-loop","Name":"alice","Content":"x","Count":1}]`,
 			},
 		},
 		{
 			name: "inbox missing content",
 			args: []string{"inbox", "--json"},
 			responses: map[string]string{
-				"/v1/inbox": `[{"ID":9,"ThreadID":3,"Seq":1,"Name":"alice","AuthorType":"human","Role":"user","channel_name":"dev","channel_id":4,"thread_title":"t"}]`,
+				"/v1/rows": `[{"ID":9,"ThreadID":3,"Channel":"dev","Thread":"agent-loop","Name":"alice","Count":1}]`,
+			},
+		},
+		{
+			name: "inbox blank channel",
+			args: []string{"inbox", "--json"},
+			responses: map[string]string{
+				"/v1/rows": `[{"ID":9,"ThreadID":3,"Channel":"  ","Thread":"agent-loop","Name":"alice","Content":"x","Count":1}]`,
 			},
 		},
 		{
@@ -2582,4 +2608,136 @@ func TestDefaultNameLeavesAnExplicitNameUnchanged(t *testing.T) {
 	if got := defaultName("ci-bot"); got != "ci-bot" {
 		t.Fatalf("defaultName(%q) = %q; an explicit --as must reach the store untouched so an illegal name is a 400, not a silent rewrite", "ci-bot", got)
 	}
+}
+
+func TestValidateRows(t *testing.T) {
+	rows := []store.Row{{ID: 1, ThreadID: 2, Channel: "eng", Thread: "pr-review", Name: "alice", Content: "hi", Count: 1}}
+	if err := validateRows(&rows)(); err != nil {
+		t.Fatalf("a well-formed row was rejected: %v", err)
+	}
+	for label, bad := range map[string]store.Row{
+		"zero id":         {ID: 0, ThreadID: 2, Channel: "eng", Thread: "t", Name: "alice", Content: "hi"},
+		"negative id":     {ID: -3, ThreadID: 2, Channel: "eng", Thread: "t", Name: "alice", Content: "hi"},
+		"blank channel":   {ID: 1, ThreadID: 2, Channel: "  ", Thread: "t", Name: "alice", Content: "hi"},
+		"blank name":      {ID: 1, ThreadID: 2, Channel: "eng", Thread: "t", Content: "hi"},
+		"blank thread":    {ID: 1, ThreadID: 2, Channel: "eng", Name: "alice", Content: "hi"},
+		"negative count":  {ID: 1, ThreadID: 2, Channel: "eng", Thread: "t", Count: -1},
+		"count, no name":  {ID: 1, ThreadID: 2, Channel: "eng", Thread: "t", Content: "hi", Count: 2},
+		"count, no first": {ID: 1, ThreadID: 2, Channel: "eng", Thread: "t", Name: "alice", Count: 2},
+	} {
+		rows := []store.Row{bad}
+		if err := validateRows(&rows)(); err == nil {
+			t.Errorf("%s: the row was accepted", label)
+		}
+	}
+}
+
+func TestValidateRowsAcceptsCoarseGranularityRows(t *testing.T) {
+	for label, row := range map[string]store.Row{
+		"message":         {ID: 9, ThreadID: 3, Channel: "dev", Thread: "agent-loop", Name: "alice", Content: "portable", Count: 1},
+		"thread":          {ID: 3, ThreadID: 3, Channel: "dev", Thread: "agent-loop", Name: "alice", Content: "portable", Count: 4},
+		"empty thread":    {ID: 3, ThreadID: 3, Channel: "dev", Thread: "agent-loop", Count: 0},
+		"channel":         {ID: 4, Channel: "dev", Name: "alice", Content: "portable", Count: 4},
+		"empty channel":   {ID: 4, Channel: "dev"},
+		"blank thread id": {ID: 4, Channel: "dev", Name: "alice", Content: "portable", Count: 4},
+	} {
+		rows := []store.Row{row}
+		if err := validateRows(&rows)(); err != nil {
+			t.Errorf("%s: a legitimate row was rejected: %v", label, err)
+		}
+	}
+}
+
+func TestImportSlugIsValid(t *testing.T) {
+	slug := importSlug("session.jsonl")
+	if err := names.Slug(slug); err != nil {
+		t.Fatalf("importSlug = %q: %v", slug, err)
+	}
+	if len(slug) > names.MaxSlug {
+		t.Fatalf("importSlug = %q is %d bytes", slug, len(slug))
+	}
+	if importSlug("a.jsonl") == importSlug("b.jsonl") {
+		t.Fatal("two files must not produce the same slug")
+	}
+}
+
+func TestImportSlugIsStableAndDistinctPerPath(t *testing.T) {
+	if importSlug("a/session.jsonl") != importSlug("a/session.jsonl") {
+		t.Fatal("importSlug is not deterministic")
+	}
+	paths := []string{
+		"session.jsonl", "a.jsonl", "b.jsonl", "./session.jsonl",
+		"a/session.jsonl", "b/session.jsonl", "a/very/long/path/that/keeps/going/session.jsonl",
+		"", "/tmp/one.jsonl", "/tmp/two.jsonl", "SESSION.JSONL",
+	}
+	seen := map[string]string{}
+	for _, path := range paths {
+		slug := importSlug(path)
+		if err := names.Slug(slug); err != nil {
+			t.Fatalf("importSlug(%q) = %q: %v", path, slug, err)
+		}
+		if other, ok := seen[slug]; ok {
+			t.Fatalf("importSlug(%q) = %q collides with importSlug(%q)", path, slug, other)
+		}
+		seen[slug] = path
+	}
+}
+
+func TestThreadImportTitlesTheThreadWithALegalSlug(t *testing.T) {
+	var requests []recordedCLIRequest
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		recordCLIRequest(&requests, &mu, r)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/v1/health":
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		case r.URL.Path == "/v1/channels" && r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`[]`))
+		case r.URL.Path == "/v1/channels" && r.Method == http.MethodPost:
+			_, _ = w.Write([]byte(`{"id":5}`))
+		case r.URL.Path == "/v1/channels/5/threads":
+			_, _ = w.Write([]byte(`{"id":8}`))
+		case r.URL.Path == "/v1/threads/8/events":
+			_, _ = w.Write([]byte(`[{"SourceSeq":1,"Seq":1,"MessageID":11,"ReactionID":0}]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	useTestDaemon(t, server)
+
+	file := filepath.Join(t.TempDir(), "Session Export.JSONL")
+	if err := os.WriteFile(file, []byte(`{"type":"message","name":"alice","role":"user","content":"one"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	code, stdout, stderr := captureOutput(t, func() int {
+		return run([]string{"thread", "import", "--file", file, "--channel", "dev", "--orphaned"})
+	})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0: %s", code, stderr)
+	}
+	if stdout != "thread 8\n" {
+		t.Fatalf("stdout = %q, want the new thread id", stdout)
+	}
+	for _, got := range snapshotCLIRequests(&requests, &mu) {
+		if got.Path != "/v1/channels/5/threads" {
+			continue
+		}
+		var body struct {
+			Title string `json:"Title"`
+		}
+		if err := json.Unmarshal(got.Body, &body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Title != importSlug(file) {
+			t.Fatalf("Title = %q, want %q", body.Title, importSlug(file))
+		}
+		if err := names.Slug(body.Title); err != nil {
+			t.Fatalf("Title = %q, which the store would reject: %v", body.Title, err)
+		}
+		return
+	}
+	t.Fatal("the thread was never created")
 }
