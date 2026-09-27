@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 )
@@ -1038,5 +1039,27 @@ func TestListChannelsPreservesRepoMetadata(t *testing.T) {
 				t.Fatalf("created_at is empty")
 			}
 		})
+	}
+}
+
+func TestListMessagesLastNKeepsAscendingOrder(t *testing.T) {
+	s, _, threadID := newStoreWithThread(t, ":memory:")
+	for i := 0; i < 5; i++ {
+		if _, err := s.AppendMessage(threadID, "human", "human", "user", fmt.Sprintf("m%d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.ListMessages(threadID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d messages, want 2", len(got))
+	}
+	if got[0].Seq >= got[1].Seq {
+		t.Fatalf("not ascending: %d then %d", got[0].Seq, got[1].Seq)
+	}
+	if got[1].Seq != 5 {
+		t.Fatalf("last seq = %d, want 5 (last 2 of 1..5)", got[1].Seq)
 	}
 }
