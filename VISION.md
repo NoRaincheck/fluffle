@@ -82,8 +82,9 @@ $ flf react add --thread 42 --message-seq 41 --emoji "👀"   # Humans and agent
 # Agent Interaction (Append-only, CLI-triggered)
 # External agent frameworks call this to read context and append responses.
 # --agent-id marks the caller as an agent; --as names a human author.
-$ flf agent read --thread 42 --last 5              # Outputs last 5 events as JSONL
-$ flf agent read --thread 42 --after-seq 40        # Monotonic cursor; full reaction snapshot
+$ flf agent read --thread 42 --last 5 --json       # Portable JSONL; --json is what selects it
+$ flf agent read --thread 42 --after-seq 40 --json  # Monotonic cursor; full reaction snapshot
+$ flf agent read --thread 42 --last 5              # Without --json: indented array of raw message records
 $ flf agent append --thread 42 --file response.jsonl
 $ flf agent list --repo ./my-project               # Resolved agent definitions and source config
 $ flf agent session --id 7                         # One run: prompt, output, exit status
@@ -100,7 +101,7 @@ There is deliberately no `flf agent invoke`. An agent run is started by a human 
 ---
 
 ## 🔍 Decisions Locked In
-These five questions were left open when this manifesto was written. Each is now settled by the implementation.
+These six questions were left open when this manifesto was written. Each is now settled by the implementation.
 
 1. **Daemon Lifecycle — auto-spawn, with explicit override.** Every daemon-touching command first probes `GET /v1/health`; if the daemon is down, the CLI re-execs itself as `daemon start --background` and retries the probe three times at one-second intervals. `flf daemon start|stop|status` remain available for explicit control. `stop` is graceful first (`POST /api/shutdown`, then wait up to five seconds for exit) and only falls back to killing the process.
 
@@ -115,4 +116,6 @@ These five questions were left open when this manifesto was written. Each is now
 
 4. **Orphaned Channel Lifecycle — permanently persistent, no TTL.** `--orphaned` sets `is_orphaned=1` and leaves `repo_abs_path` NULL; the channel name is then globally unique rather than unique per repo. Reaping is left to the human via manual archive. Note that archiving is not implemented: `channels.archived_at` and `threads.archived_at` were removed from the schema after being found to be read by seven queries and written by none, so today there is no reaping mechanism at all.
 
-5. **Names — two rules, 12 bytes each, no third.** A **slug**, which names a channel or titles a thread, is `^[A-Za-z][A-Za-z0-9-]*$`. A **name**, which identifies an author, human or agent, is `^[A-Za-z](?:[A-Za-z.]*[A-Za-z])?$`. Both start with a letter and are at most 12 bytes; a name must also **end** with one, because mention parsing trims a trailing dot off a token and an agent called `ci.bot.` could then never be mentioned. So an agent profile is `ci.bot`, never `ci-bot` or `ci_bot`, and a thread title is a label — `db-migration`, not `Schema migration` — because the original post is the subject. The bound is 12 because the TUI draws every name in one fixed 12-cell column, and a truncated author is a lie about who wrote something. Both rules live in `internal/names`, are enforced in Go at every write path, and change no schema: the `length(trim(x)) > 0` CHECKs stay as they are, so there is exactly one definition of the character rules and no data-repair path. Digits are legal in a slug and illegal in a name — slugs need collision suffixes, names need to stay typeable.
+5. **Repo move detection — stored, never compared.** A channel records the `origin` remote and the HEAD SHA it was created against, so a reader can see what the anchor looked like at creation. Nothing reads them back: no command warns when HEAD has moved and no write path rejects one, so a moved, rebased, or re-pointed repo is tolerated exactly as the design intended — it just tolerates it silently rather than by warning. `repo_head_branch` is the one column with no writer at all: the daemon accepts it on `POST /v1/channels` and `channel create` never sends it, so it is always the empty string.
+
+6. **Names — two rules, 12 bytes each, no third.** A **slug**, which names a channel or titles a thread, is `^[A-Za-z][A-Za-z0-9-]*$`. A **name**, which identifies an author, human or agent, is `^[A-Za-z](?:[A-Za-z.]*[A-Za-z])?$`. Both start with a letter and are at most 12 bytes; a name must also **end** with one, because mention parsing trims a trailing dot off a token and an agent called `ci.bot.` could then never be mentioned. So an agent profile is `ci.bot`, never `ci-bot` or `ci_bot`, and a thread title is a label — `db-migration`, not `Schema migration` — because the original post is the subject. The bound is 12 because the TUI draws every name in one fixed 12-cell column, and a truncated author is a lie about who wrote something. Both rules live in `internal/names`, are enforced in Go at every write path, and change no schema: the `length(trim(x)) > 0` CHECKs stay as they are, so there is exactly one definition of the character rules and no data-repair path. Digits are legal in a slug and illegal in a name — slugs need collision suffixes, names need to stay typeable.
