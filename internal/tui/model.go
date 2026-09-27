@@ -225,12 +225,18 @@ func (m model) fetchThread(threadID int64) tea.Cmd {
 }
 
 // syncThread loads the selected row's thread when it is not the one already
-// loaded. A channel row has no thread, so it fetches nothing.
-func (m model) syncThread() tea.Cmd {
+// loaded, and records which thread that is. A channel row has no thread, so it
+// loads nothing and clears the selection.
+func (m *model) syncThread() tea.Cmd {
 	row, ok := m.selectedRow()
-	if !ok || row.ThreadID == 0 || row.ThreadID == m.threadID {
+	if !ok || row.ThreadID == 0 {
+		m.threadID = 0
 		return nil
 	}
+	if row.ThreadID == m.threadID {
+		return nil
+	}
+	m.threadID = row.ThreadID
 	return m.fetchThread(row.ThreadID)
 }
 

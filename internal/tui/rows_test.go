@@ -2,6 +2,9 @@ package tui
 
 import (
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -369,11 +372,124 @@ func TestClampBoundsTheCursorToTheList(t *testing.T) {
 	}
 }
 
+// selectedModel drives the production path to a loaded thread: it feeds a
+// rowsFetchedMsg through Update rather than assigning fields, so it cannot mask
+// a model that never records the selection.
+func selectedModel(t *testing.T, api *apiClient, rows []store.Row) model {
+	t.Helper()
+	m := toModel(New(api.base))
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	next, _ = next.Update(rowsFetchedMsg{granularity: store.GranularityMessage, rows: rows})
+	return toModel(next)
+}
+
+func TestSyncThreadRecordsTheSelectedThread(t *testing.T) {
+	m := toModel(New("http://127.0.0.1:1"))
+	m.width, m.height = 120, 40
+	m.rows = []store.Row{{ID: 1, ThreadID: 5}, {ID: 2, ThreadID: 6}}
+	if cmd := m.syncThread(); cmd == nil {
+		t.Error("the selected thread must be fetched")
+	}
+	if m.threadID != 5 {
+		t.Fatalf("threadID = %d, want 5: nothing else records the selection", m.threadID)
+	}
+	if cmd := m.syncThread(); cmd != nil {
+		t.Error("the already-loaded thread must not be fetched again")
+	}
+	if _, _ = m.handleKey(key("j")); m.threadID != 6 {
+		t.Errorf("threadID = %d, want 6 after moving down", m.threadID)
+	}
+}
+
+func TestSyncThreadClearsTheThreadForAChannelRow(t *testing.T) {
+	m := toModel(New("http://127.0.0.1:1"))
+	m.width, m.height = 120, 40
+	m.rows = []store.Row{{ID: 1, ThreadID: 5}, {ID: 2, ThreadID: 0}}
+	if _, _ = m.handleKey(key("j")); m.threadID != 0 {
+		t.Fatalf("threadID = %d, want 0 on a channel row", m.threadID)
+	}
+	if cmd := m.syncThread(); cmd != nil {
+		t.Error("a channel row has no thread and must fetch nothing")
+	}
+	if _, _ = m.handleKey(key("k")); m.threadID != 5 {
+		t.Errorf("threadID = %d, want 5 after moving back onto a thread row", m.threadID)
+	}
+	m.rows = nil
+	if _, _ = m.handleKey(key("j")); m.threadID != 0 {
+		t.Errorf("threadID = %d, want 0 with no selection at all", m.threadID)
+	}
+}
+
+func TestRowsFetchedRecordsTheThreadThroughUpdate(t *testing.T) {
+	m := selectedModel(t, NewAPIClient("http://127.0.0.1:1"),
+		[]store.Row{{ID: 1, ThreadID: 5}})
+	if m.threadID != 5 {
+		t.Fatalf("threadID = %d, want 5: Update's value receiver must keep the write", m.threadID)
+	}
+}
+
+func TestThreadResponseIsAppliedForTheSelectedThread(t *testing.T) {
+	m := selectedModel(t, NewAPIClient("http://127.0.0.1:1"),
+		[]store.Row{{ID: 1, ThreadID: 5}})
+	if m.threadID != 5 {
+		t.Fatalf("threadID = %d, want 5", m.threadID)
+	}
+	next, _ := m.Update(threadFetchedMsg{
+		threadID: 5,
+		messages: []store.Message{{ID: 1, Content: "hi"}},
+	})
+	if got := toModel(next).thread; len(got) != 1 || got[0].Content != "hi" {
+		t.Fatalf("the response for the loaded thread must be applied, got %+v", got)
+	}
+	next, _ = m.Update(threadFetchedMsg{
+		threadID: 4,
+		messages: []store.Message{{ID: 2, Content: "stale"}},
+	})
+	if got := toModel(next).thread; len(got) != 0 {
+		t.Fatalf("a response for another thread must be dropped, got %+v", got)
+	}
+}
+
+func TestComposeSendRepliesToTheSelectedThread(t *testing.T) {
+	var gotPath, gotBody string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		raw, _ := io.ReadAll(r.Body)
+		gotBody = string(raw)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"seq":7}`))
+	}))
+	defer ts.Close()
+
+	m := selectedModel(t, NewAPIClient(ts.URL), []store.Row{{ID: 1, ThreadID: 5}})
+	if m.threadID != 5 {
+		t.Fatalf("threadID = %d, want 5", m.threadID)
+	}
+	next, cmd := m.handleComposeSend(composeSendMsg{text: "thanks"})
+	if cmd == nil {
+		t.Fatal("a reply must produce a command; a nil one is a silent no-op")
+	}
+	if toModel(next).compose.active {
+		t.Error("the reply box must close on send")
+	}
+	if _, ok := cmd().(sentMsg); !ok {
+		t.Fatalf("cmd returned %T, want sentMsg", cmd())
+	}
+	if gotPath != "/v1/threads/5/messages" {
+		t.Errorf("posted to %q, want /v1/threads/5/messages", gotPath)
+	}
+	if !strings.Contains(gotBody, "thanks") {
+		t.Errorf("body = %q, want the reply text", gotBody)
+	}
+}
+
 func TestSyncThreadFetchesOnlyWhatChanged(t *testing.T) {
 	m := toModel(New("http://127.0.0.1:1"))
 	m.height = 40
 	m.rows = []store.Row{{ID: 1, ThreadID: 5}}
-	m.threadID = 5
+	if cmd := m.syncThread(); cmd == nil {
+		t.Error("the selected thread must be fetched")
+	}
 	if cmd := m.syncThread(); cmd != nil {
 		t.Error("the already-loaded thread must not be fetched again")
 	}
