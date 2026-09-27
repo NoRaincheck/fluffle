@@ -188,16 +188,16 @@ package names
 import "testing"
 
 func TestSlug(t *testing.T) {
-	ok := []string{"a", "eng", "pr-review", "schema-migration-2", "AbC123", "twelvechars"}
+	ok := []string{"a", "eng", "pr-review", "pr-review-2", "AbC123", "twelvechars", "abcdefghijkl"}
 	bad := map[string]string{
-		"":                 "empty",
-		"-lead":            "leading dash",
-		"1lead":            "leading digit",
-		".lead":            "leading dot",
-		"has space":        "space",
-		"has_underscore":   "underscore",
-		"has.dot":          "dot",
-		"thirteencharsabc": "thirteen bytes",
+		"":               "empty",
+		"-lead":          "leading dash",
+		"1lead":          "leading digit",
+		".lead":          "leading dot",
+		"has space":      "space",
+		"has_underscore": "underscore",
+		"has.dot":        "dot",
+		"thirteenchars":  "thirteen bytes",
 	}
 	for _, s := range ok {
 		if err := Slug(s); err != nil {
@@ -218,16 +218,18 @@ func TestSlug(t *testing.T) {
 }
 
 func TestName(t *testing.T) {
-	ok := []string{"a", "alice", "bob.smith", "ci.bot", "X"}
+	ok := []string{"a", "alice", "bob.smith", "ci.bot", "ci..bot", "X", "abcdefghijkl"}
 	bad := map[string]string{
-		"":            "empty",
-		"-lead":       "leading dash",
-		"1lead":       "leading digit",
-		".lead":       "leading dot",
-		"ci-bot":      "dash",
-		"ci_bot":      "underscore",
-		"ci2":         "digit",
-		"twelvecharsX": "thirteen bytes",
+		"":              "empty",
+		"-lead":         "leading dash",
+		"1lead":         "leading digit",
+		".lead":         "leading dot",
+		"alice.":        "trailing dot",
+		"ci.bot.":       "trailing dot",
+		"ci-bot":        "dash",
+		"ci_bot":        "underscore",
+		"ci2":           "digit",
+		"twelvecharsXY": "thirteen bytes",
 	}
 	for _, s := range ok {
 		if err := Name(s); err != nil {
@@ -240,6 +242,9 @@ func TestName(t *testing.T) {
 	for s, why := range bad {
 		if err := Name(s); err == nil {
 			t.Errorf("Name(%q) = nil, want an error (%s)", s, why)
+		}
+		if ValidName(s) {
+			t.Errorf("ValidName(%q) = true, want false (%s)", s, why)
 		}
 	}
 }
@@ -305,7 +310,7 @@ const (
 
 var (
 	slugRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9-]*$`)
-	nameRe = regexp.MustCompile(`^[A-Za-z][A-Za-z.]*$`)
+	nameRe = regexp.MustCompile(`^[A-Za-z](?:[A-Za-z.]*[A-Za-z])?$`)
 )
 
 // Slug reports whether s is a legal channel or thread slug: ASCII letters,
@@ -322,13 +327,15 @@ func Slug(s string) error {
 
 // Name reports whether s is a legal author name: ASCII letters and dots,
 // leading letter, at most MaxName bytes. It admits no digits, dashes, or
-// underscores, so an agent profile is named ci.bot and not ci-bot.
+// underscores, so an agent profile is named ci.bot and not ci-bot. A name may
+// not end with a dot because mentions trims trailing dots off a token, which
+// would leave such an agent impossible to mention.
 func Name(s string) error {
 	if len(s) > MaxName {
 		return fmt.Errorf("name %q is %d bytes, max %d", s, len(s), MaxName)
 	}
 	if !nameRe.MatchString(s) {
-		return fmt.Errorf("name %q must start with a letter and hold only letters and dots", s)
+		return fmt.Errorf("name %q must start and end with a letter and hold only letters and dots", s)
 	}
 	return nil
 }
@@ -3039,7 +3046,7 @@ How to add a renderer or a granularity: the two render functions, the one `Row` 
 
 Delete the sections on the preview pane and the 500 ms poll. Keep the daemon-side contract: a leading `@mention` on a human message starts one session, the reply lands as an ordinary agent-authored message, and `flf agent session --id N` reads a transcript. Add one line: the TUI shows the agent's reply in the thread and does not show the run.
 
-Update the mention-charset paragraph to the new rule: the charset is `[A-Za-z][A-Za-z.]*` with trailing dots trimmed, and a token a looser charset would have continued is not a name at all. Update the `agentcfg` charset sentence to `^[A-Za-z][A-Za-z.]{0,11}$`.
+Update the mention-charset paragraph to the new rule: the charset is `[A-Za-z][A-Za-z.]*` with trailing dots trimmed, and a token a looser charset would have continued is not a name at all. Update the `agentcfg` charset sentence to `^[A-Za-z](?:[A-Za-z.]{0,10}[A-Za-z])?$`, which caps the name at 12 bytes and, like `names.Name`, refuses a trailing dot.
 
 - [ ] **Step 5: Update `README.md` and `VISION.md`**
 

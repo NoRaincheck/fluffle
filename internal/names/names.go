@@ -18,7 +18,7 @@ const (
 
 var (
 	slugRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9-]*$`)
-	nameRe = regexp.MustCompile(`^[A-Za-z][A-Za-z.]*$`)
+	nameRe = regexp.MustCompile(`^[A-Za-z](?:[A-Za-z.]*[A-Za-z])?$`)
 )
 
 // Slug reports whether s is a legal channel or thread slug: ASCII letters,
@@ -35,13 +35,15 @@ func Slug(s string) error {
 
 // Name reports whether s is a legal author name: ASCII letters and dots,
 // leading letter, at most MaxName bytes. It admits no digits, dashes, or
-// underscores, so an agent profile is named ci.bot and not ci-bot.
+// underscores, so an agent profile is named ci.bot and not ci-bot. A name may
+// not end with a dot because mentions trims trailing dots off a token, which
+// would leave such an agent impossible to mention.
 func Name(s string) error {
 	if len(s) > MaxName {
 		return fmt.Errorf("name %q is %d bytes, max %d", s, len(s), MaxName)
 	}
 	if !nameRe.MatchString(s) {
-		return fmt.Errorf("name %q must start with a letter and hold only letters and dots", s)
+		return fmt.Errorf("name %q must start and end with a letter and hold only letters and dots", s)
 	}
 	return nil
 }

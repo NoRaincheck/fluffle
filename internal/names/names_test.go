@@ -33,12 +33,14 @@ func TestSlug(t *testing.T) {
 }
 
 func TestName(t *testing.T) {
-	ok := []string{"a", "alice", "bob.smith", "ci.bot", "X", "abcdefghijkl"}
+	ok := []string{"a", "alice", "bob.smith", "ci.bot", "ci..bot", "X", "abcdefghijkl"}
 	bad := map[string]string{
 		"":              "empty",
 		"-lead":         "leading dash",
 		"1lead":         "leading digit",
 		".lead":         "leading dot",
+		"alice.":        "trailing dot",
+		"ci.bot.":       "trailing dot",
 		"ci-bot":        "dash",
 		"ci_bot":        "underscore",
 		"ci2":           "digit",
