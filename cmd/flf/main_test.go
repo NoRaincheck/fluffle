@@ -2578,6 +2578,12 @@ func TestLegalName(t *testing.T) {
 		{"abcdefghijk_", "abcdefghijk"},
 		{"12345", "unknown"},
 		{"..", "unknown"},
+		// A character the name rule cannot hold is dropped, not transliterated:
+		// names.Name admits no accents, so éclair is clair and the store would
+		// reject é. One rune is one decision, and the drop is the decision.
+		{"éclair", "clair"},
+		{"josé.clair", "jos.clair"},
+		{"日本語", "unknown"},
 	} {
 		got := legalName(tc.user)
 		if got != tc.want {

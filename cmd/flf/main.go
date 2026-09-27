@@ -1039,14 +1039,23 @@ func messageCmd(args []string) int {
 // Underscores and digits become dots, so john_doe reads as john.doe and
 // jsmith123 as jsmith — the same shape as the names the rules already allow. A
 // username that leaves nothing usable becomes "unknown".
+//
+// The walk is over runes so that one character is one decision. Walking bytes
+// happens to give the same answer, because a UTF-8 continuation byte can be
+// neither an ASCII letter nor a dot, but it makes that a property of the
+// encoding rather than of the code. A character outside the name rule is
+// dropped, not transliterated: éclair is clair, because names.Name admits no
+// accents and inventing one the store would reject helps nobody.
 func legalName(user string) string {
 	var b strings.Builder
 	afterLetter := false
-	for i := 0; i < len(user) && b.Len() < names.MaxName; i++ {
-		c := user[i]
+	for _, r := range user {
+		if b.Len() >= names.MaxName {
+			break
+		}
 		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
-			b.WriteByte(c)
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
 			afterLetter = true
 		case afterLetter:
 			b.WriteByte('.')
