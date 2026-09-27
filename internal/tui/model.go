@@ -22,7 +22,6 @@ type model struct {
 	scroll        int
 	threadID      int64
 	thread        []store.Message
-	threadScroll  int
 	status        string
 	api           *apiClient
 	compose       composeModel
@@ -317,9 +316,10 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// openThread reads the selected row's thread. In a split terminal it fills
+// openThread opens the selected row's thread. In a split terminal it fills
 // the terminal; in a stacked one it replaces the list. Same rule either way,
-// which is what replaces the old detail view and its five state fields.
+// so Enter and Esc mean the same thing in both geometries. A channel row has
+// no thread and says so rather than opening an empty pane.
 func (m *model) openThread() (tea.Model, tea.Cmd) {
 	row, ok := m.selectedRow()
 	if !ok {
@@ -331,7 +331,6 @@ func (m *model) openThread() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.detail = true
-	m.threadScroll = 0
 	return m, m.syncThread()
 }
 

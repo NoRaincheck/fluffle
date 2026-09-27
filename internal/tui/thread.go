@@ -15,7 +15,6 @@ const (
 	threadClockW  = 5
 	threadHeadGap = 1
 	threadBodyAt  = threadIndent + threadClockW + threadHeadGap
-	threadMinBody = 8
 )
 
 // renderThread draws a thread at any width: in the pane beside the list, or
@@ -45,8 +44,13 @@ func renderThread(w, h int, title string, thread []store.Message) string {
 // threadLines is every message as a header line plus its wrapped content.
 // Every line is truncated and padded to w, so a long author name or a wide
 // grapheme cannot push a line past the pane.
+//
+// The body column is exactly what is left after the indent, with no floor: a
+// floor wider than that space wraps at one width and truncates at a narrower
+// one, which silently drops words. Below the indent the body is blank, which
+// is the one width at which content cannot be shown at all.
 func threadLines(w int, thread []store.Message) []string {
-	body := max(w-threadBodyAt, threadMinBody)
+	body := w - threadBodyAt
 	lines := make([]string, 0, len(thread)*3)
 	for _, m := range thread {
 		header := strings.Repeat(" ", threadIndent) +
@@ -58,7 +62,7 @@ func threadLines(w int, thread []store.Message) []string {
 			// Clamping the indent keeps a line inside a pane narrower than the
 			// indent itself, and is the same string at every wider pane.
 			lines = append(lines, pad(
-				threadBodyStyle.Render(strings.Repeat(" ", min(threadBodyAt, w))+termtext.Truncate(line, w-threadBodyAt, "")), w))
+				threadBodyStyle.Render(strings.Repeat(" ", min(threadBodyAt, w))+termtext.Truncate(line, body, "")), w))
 		}
 	}
 	return lines

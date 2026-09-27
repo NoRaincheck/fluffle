@@ -739,8 +739,15 @@ func TestThreadTitleIsEmptyForAChannelRow(t *testing.T) {
 func TestViewIsNarrowNoticeWhenTooNarrow(t *testing.T) {
 	m := toModel(New("http://127.0.0.1:1"))
 	m.width, m.height = 40, 10
-	if !strings.Contains(plain(m.View()), "needs 71 columns") {
-		t.Fatalf("view = %q", m.View())
+	view := plain(m.View())
+	if !strings.Contains(view, "needs 71 columns") {
+		t.Fatalf("view = %q", view)
+	}
+	// The call site must pass the width first. TestNarrowNoticeNamesTheMinimum
+	// calls narrowNotice with its own arguments, so only this can catch them
+	// arriving the other way round, and a swapped pair prints a lie.
+	if !strings.Contains(view, "got 40x10") {
+		t.Fatalf("the notice must report the terminal it was given, not 10x40: %q", view)
 	}
 }
 

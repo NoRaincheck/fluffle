@@ -42,6 +42,55 @@ func TestRenderThreadHeaderNamesTheThread(t *testing.T) {
 	}
 }
 
+// squeeze drops every space, so a body that was re-wrapped and re-indented
+// can be compared against the content it came from.
+func squeeze(s string) string { return strings.Join(strings.Fields(s), "") }
+
+// threadBodyText is what one message renders below its header line, with the
+// indent removed, so a test can compare it to the content that produced it.
+func threadBodyText(w int, content string) string {
+	lines := threadLines(w, []store.Message{{
+		Name: "alice", AuthorType: "human", Content: content, CreatedAt: "2026-09-23T10:00:00Z",
+	}})
+	indent := strings.Repeat(" ", min(threadBodyAt, w))
+	cells := make([]string, 0, len(lines)-1)
+	for _, line := range lines[1:] {
+		cells = append(cells, strings.TrimPrefix(plain(line), indent))
+	}
+	return strings.Join(cells, " ")
+}
+
+// The brief's width test uses 20, 40, 74 and 200, where the body column is
+// wider than the indent and the truncation is provably a no-op, so it proves
+// nothing. These are the widths where a body-column floor would wrap at one
+// width and then truncate at a narrower one, silently dropping words.
+func TestRenderThreadKeepsEveryCharacterInANarrowPane(t *testing.T) {
+	for _, w := range []int{9, 12, 15} {
+		for _, content := range []string{"a b c d e f g h", "hello world"} {
+			msgs := []store.Message{{
+				Name: "alice", AuthorType: "human", Content: content, CreatedAt: "2026-09-23T10:00:00Z",
+			}}
+			for i, line := range strings.Split(renderThread(w, 24, "eng", msgs), "\n") {
+				if got := termtext.DisplayWidth(line); got > w {
+					t.Errorf("width %d row %d is %d cells, and %q was lost", w, i, got, content)
+				}
+			}
+			if got := threadBodyText(w, content); squeeze(got) != squeeze(content) {
+				t.Errorf("width %d silently dropped text: %q rendered as %q", w, content, got)
+			}
+		}
+	}
+	// A 2-cell grapheme needs 2 body cells. From 10 columns up there are, and
+	// the text survives; below that the width invariant wins and the character
+	// is dropped rather than split or allowed to overrun the pane.
+	for _, w := range []int{12, 15} {
+		const wide = "多角形 字 テスト"
+		if got := threadBodyText(w, wide); squeeze(got) != squeeze(wide) {
+			t.Errorf("width %d silently dropped wide text: %q rendered as %q", w, wide, got)
+		}
+	}
+}
+
 func TestRenderThreadEmptyState(t *testing.T) {
 	got := plain(renderThread(60, 24, "", nil))
 	if !strings.Contains(got, "no thread") {
