@@ -1065,18 +1065,26 @@ func TestListMessagesLastNKeepsAscendingOrder(t *testing.T) {
 }
 
 func TestListInboxReturnsEmptySliceNotNil(t *testing.T) {
-	s, _, threadID := newStoreWithThread(t, ":memory:")
-	if _, err := s.AppendMessage(threadID, "human", "human", "user", "hi"); err != nil {
-		t.Fatal(err)
-	}
+	s, _, _ := newStoreWithThread(t, ":memory:")
 	got, err := s.ListInbox(10)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got == nil {
-		t.Fatal("ListInbox returned nil; must return an empty slice so JSON is [] not null")
+		t.Fatal("ListInbox returned nil for an empty inbox; the handler writes the slice straight to JSON, so it must be an empty slice to render [] and not null")
 	}
-	if len(got) != 1 {
-		t.Fatalf("got %d, want 1", len(got))
+	if len(got) != 0 {
+		t.Fatalf("got %d messages, want 0 for an empty inbox", len(got))
+	}
+}
+
+func TestListReactionsReturnsNilForEmptyThread(t *testing.T) {
+	s, _, threadID := newStoreWithThread(t, ":memory:")
+	got, err := s.ListReactions(threadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nil {
+		t.Fatalf("ListReactions returned a non-nil slice of length %d for an empty thread; want nil", len(got))
 	}
 }

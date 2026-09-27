@@ -615,20 +615,7 @@ func (s *Store) AppendBatch(threadID int64, events []AppendEvent) ([]AppendResul
 			if mapped, ok := sourceSeqs[parentSeq]; ok {
 				parentSeq = mapped
 			}
-			var parentID int64
-			if parentSeq > 0 {
-				parentID, err = q.GetMessageIDByThreadSeq(context.Background(), db.GetMessageIDByThreadSeqParams{
-					ThreadID: threadID,
-					Seq:      parentSeq,
-				})
-				if err != nil {
-					if errors.Is(err, sql.ErrNoRows) {
-						return nil, ErrNotFound
-					}
-					return nil, err
-				}
-			}
-			seq, messageID, err := s.appendMessage(q, threadID, event.Name, event.AuthorType, event.Role, event.Content, event.CreatedAt, parentID)
+			seq, messageID, err := s.appendMessageByParentSeq(q, threadID, parentSeq, event.Name, event.AuthorType, event.Role, event.Content, event.CreatedAt)
 			if err != nil {
 				return nil, err
 			}
