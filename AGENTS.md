@@ -5,6 +5,7 @@
 - **No comments** unless explicitly requested. Code should be self-documenting.
 - **gofmt -l** must be empty for all changed files. **go vet ./...** must be clean.
 - **TDD:** failing test → implementation → commit. Never commit without tests passing.
+- **Never modify an existing test to accommodate a new implementation.** A test that *must* change means behavior changed, which needs sign-off. When a behavior change is intended, update the affected assertion deliberately in the same commit as the change.
 - **Exit codes:** 0 = success, 1 = client error, 2 = daemon error. Never deviate.
 - **Error envelope:** `{"code","message"}` at every layer boundary.
 - **Agent identity:** `X-Fluffle-Agent` header. The daemon re-derives `author_type` from it for anti-spoofing. Never trust `author_type` from client request bodies.
@@ -18,7 +19,7 @@
 1. **Repo-anchored by default:** every channel/thread ties to a local Git repo path.
 2. **SQLite-first:** single database file, `SetMaxOpenConns(1)`.
 3. **Localhost-only:** daemon binds `127.0.0.1:0`. No remote access.
-4. **YAGNI:** do not add features not in the plan or spec.
+4. **YAGNI:** do not add features that were not asked for.
 
 ## Common Pitfalls
 

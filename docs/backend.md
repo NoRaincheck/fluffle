@@ -118,6 +118,58 @@ meaningful; hand-editing it is what makes `just diff` fail. The generator is
 `sqlc-dev/sqlc`, pinned as a Go tool in `go.mod`, so the invocation is
 `go tool sqlc generate` — no `go install`, and no version drift away from the module.
 
+### The store/`db` boundary
+
+Two rules define the layer, and both exist to keep the wire contract checkable:
+
+1. **Only `internal/db` speaks SQL.** Every statement is a generated method; no package assembles SQL by hand. The one exception is `internal/store/migrate.go`, which owns the version table and the `PRAGMA`s and is not read by `sqlc`.
+2. **Only `internal/store` defines types that get marshaled.** It keeps the wire types, the error sentinels, the validation that produces user-facing text, and the transaction orchestration; `internal/db` supplies typed queries, models, and `WithTx`.
+
+`internal/db` is imported by `internal/store` and by nothing else. Review enforces that, not tooling, since `internal/` already limits it to the module.
+
+`Store` holds both a `*sql.DB` and a `*db.Queries`. The raw handle is kept for `Close`, the migration runner, and a test that reaches into the unexported field to assert a column is gone.
+
+### The wire contract
+
+`store.Channel`, `store.Thread`, `store.Message`, `store.Reaction`, `store.Session`, `store.SessionEvent`, and `store.ThreadContext` are marshaled straight to JSON by `apiserver` and unmarshaled straight by `tui` and `internal/client`. They carry almost no JSON tags — only `json:"-"` on `Message.ParentSeq` and three tags on `InboxMessage` — so **the Go field names are the API field names.** Promoting a generated `db` model into a wire position would silently become the API, which is why generated types are never marshaled and why `emit_json_tags: false` is load-bearing: set it `true` and sqlc emits `json:"RepoHeadSha"` against a field named `RepoHeadSHA`.
+
+Nullable columns keep their `COALESCE(col, '')` wrappers in the read queries, which is what keeps `Channel.RepoAbsPath` and friends pointer-free. There are exactly two read-side exceptions and both are deliberate: `messages.parent_id` and the `p.seq AS parent_seq` projection are `sql.NullInt64` before and after the move onto sqlc. Coalescing either would turn "no parent" into a fake `0` and make the TUI's `.Valid` check read a real parent as absent.
+
+`ParentSeq` is not a column. It is a projection — `LEFT JOIN messages p ON p.id = m.parent_id` selecting `p.seq` — so it stays an explicit column in the query and a hand-written field on `store.Message`.
+
+### Nil versus empty slices
+
+The convention is per method and deliberately not symmetric:
+
+| Returns `nil` when empty | Returns non-nil `[]T{}` |
+|---|---|
+| `ListChannels`, `ListThreads`, `ListMessages`, `ListMessagesAfter`, `ListReactions` | `ListInbox`, `ListSessions`, `ListSessionEvents` |
+
+`sqlc` runs with `emit_empty_slices: false`, so a `:many` query hands back `nil`; the three methods on the right seed an empty slice explicitly.
+
+Two of the eight are visible on the wire. The handlers for channels, threads, messages, reactions, and session events normalize `nil` to `[]` before writing, so for those five the store-side choice is an internal detail. `GET /v1/inbox` and the per-thread session list do not normalize — both hand the slice straight to `writeJSON` — so a `nil` from `ListInbox` or `ListSessions` would render an empty result as `null` rather than `[]`. Do not "fix" a `nil`-returning method into returning an empty slice either: that is still a behavior change, just an invisible one.
+
+### Error classification
+
+`internal/store/classify.go` maps SQLite extended error codes onto the sentinels, replacing substring matching on error strings. The driver returns extended codes, which the constants already in `modernc.org/sqlite/lib` name:
+
+| Condition | Code | Sentinel | HTTP |
+|---|---|---|---|
+| UNIQUE | 2067 | `ErrConflict` | 409 |
+| FOREIGN KEY | 787 | `ErrNotFound` | 404 |
+| CHECK | 275 | `ErrInvalid` | 400 |
+| NOT NULL | 1299 | `ErrInvalid` | 400 |
+
+`sql.ErrNoRows` still maps to `ErrNotFound` by `errors.Is` at the same call sites. Because the database now raises the constraint, the hand-rolled `validateMessage` and `validateReaction` checks that used to re-implement the `CHECK` constraints in Go are gone. The session status and reply-mode `switch` validations are **kept**: they produce specific user-facing text that a bare `constraint failed` would degrade, and they run before the database call.
+
+### Context
+
+Every `Store` method takes a `context.Context`, because the generated queries require one. `apiserver` passes `r.Context()`. `session.Manager` passes `m.ctx` everywhere except one place: `Shutdown` calls `m.cancel()` *before* writing the terminal `agent_sessions` rows, so those writes use `context.Background()`. Passing `m.ctx` there returns `context.Canceled` and strands sessions in a non-terminal state. `m.ctx` still drives the runner and the cancellation checks, which is what it is for. `cmd/flf` and `devseed` pass `context.Background()`; neither installs a signal-bound root context.
+
+### What the foreign key does not check
+
+A foreign key enforces existence, not membership. A parent message must belong to the *same thread* as its child, and no declared FK can express that, so `appendMessage` and `CreateSession` still look the parent up and compare thread IDs in Go. Those checks are load-bearing, not leftovers from before the pragma — see "Foreign keys are enforced" above for what the pragma did make redundant.
+
 ### Workflow
 
 Every task in this repo runs through [`justfile`](../justfile); there is no `Makefile`.
@@ -151,6 +203,51 @@ Note that `just test` does **not** run `diff`; run both before committing.
   `internal/store/migrate.go` (`enableForeignKeys`, `assertForeignKeys`, `hasColumn`),
   outside `queries/` and not read by sqlc. Do not read a passing `no-pragma` as
   evidence that no pragma slipped into a query file.
+
+Three properties of the rule mechanism, each learned the hard way:
+
+- **`rules` is declared twice on purpose.** The top-level `rules` block *defines* the CEL
+  expressions; the per-package `rules:` list *enables* them by name. Omitting the
+  per-package list silently disables the rule rather than erroring.
+- **A rule states the offending condition, not the passing one.** sqlc reports a
+  violation when the expression evaluates to true, so the bodies carry no `!` prefix.
+  A `!`-negated body fails every query file in an otherwise clean tree.
+- **Rules are file-scoped, not per-query.** `query.sql` is the entire file's contents,
+  so one `DELETE` anywhere in a query file fails the rule for every query in it. Coarser
+  than ideal, and a correct gate: a query file either contains no `DELETE` at all or it
+  does not belong in `queries/`.
+
+### Query annotations
+
+The annotation on a query decides the shape of the generated method, and picking the wrong one costs a round trip or a silent behavior change:
+
+| Need | Annotation |
+|---|---|
+| Insert, need only the new id | `:execlastid` |
+| Insert or update, need the affected count | `:execrows` |
+| Insert or update, result unused | `:exec` |
+| Exactly one row | `:one` |
+| A row set | `:many` |
+| Count or `MAX` aggregate | `:one` returning a scalar |
+
+`:execrows` is what turns "no such row" into `ErrNotFound` at an update site: the facade checks the returned count. sqlc's `:batch*` annotations are PostgreSQL-only and are not used; `AppendBatch` opens a transaction and calls `WithTx` instead.
+
+### Why each emit setting
+
+| Setting | Value | Reason |
+|---|---|---|
+| `emit_json_tags` | `false` | **Load-bearing.** See "The wire contract". |
+| `emit_pointers_for_null_types` | `true` | Makes the generated `AgentSession` field-for-field identical to the hand-written `store.Session`, including `Cwd *string`, `ExitCode *int64`, `StartedAt *string`. |
+| `emit_exact_table_names` | `false` | Singularization yields exactly the current type names: `Channel`, `Thread`, `Message`, `Reaction`, `AgentSession`, `AgentSessionEvent`. `true` would produce `Channels`, `Messages`, `AgentSessions`. |
+| `emit_empty_slices` | `false` | See "Nil versus empty slices". |
+| `emit_interface` | `true` | Emits the `Querier` interface, which lets a test substitute a fake. |
+| `query_parameter_limit` | `0` | Always emit a named params struct. Most store methods take 4-8 parameters and named structs make call sites self-documenting. |
+| `rename` | `repo_head_sha: RepoHeadSHA` | Restores the `RepoHeadSHA` spelling; the default would be `RepoHeadSha`. |
+| `overrides` | `messages.parent_id` → `sql.NullInt64` | Reproduces `Message.ParentID`, whose `.Valid` the TUI reads. The override key for SQLite is `[tablename.colname]`. |
+
+Two settings are deliberately not used. `emit_result_struct_pointers` and `emit_params_struct_pointers` would add pointer indirection to every row for no benefit. `omit_unused_structs` is left `false` because all six tables are queried, and keeping it off holds the models stable if one goes temporarily unused.
+
+`IsOrphaned` is the only `bool` on the wire. SQLite has no boolean type, so it converts in the facade rather than through a per-column `bool` override — `is_orphaned` is the only such column today, and a future `INTEGER` column would inherit the override by accident.
 
 ### Adding a migration
 
@@ -556,51 +653,6 @@ These are product expansions, not prerequisites for a useful local agent loop. T
 - **A session is a transcript, not memory.** `agent_session_events` records what an agent was asked and what it printed. It is never included in any prompt, and one run's transcript is never carried into the next. The thread's JSONL remains the only agent context, which is what lets VISION tenet 5 hold while a run is still auditable after the fact.
 - **A human mention is the only trigger.** There is no invoke command and no agent-reachable start route, so every session has a committed human message in the thread to point at and the append-only rule cannot be laundered into process execution.
 
-## Design rationale
-
-### Scope decision
-
-The agent contract hardening is driven by a single goal: a small, reliable, repo-scoped agent loop.
-
-1. A human creates or selects a thread in a repo-anchored channel.
-2. An external agent reads the thread through the CLI.
-3. The agent appends a reply and reaction using references from the read result.
-4. The thread can be exported and imported as a complete, portable context stream.
-5. The agent can resume from a monotonic cursor and discover new work through the inbox.
-
-This replaces the original six-feature roadmap. The goal is not feature parity with Buzz.
-
-### What was rejected
-
-These are product expansions, not prerequisites for a useful local agent loop. They are explicitly out of scope:
-
-- Nostr protocol adapters, DMs, profiles, presence, moderation, media, GIFs, notes.
-- Agent memory, embeddings, summaries, or opaque per-agent state.
-- Canvas revisions, channel documents, or any second source of project context.
-- YAML workflows, schedules, webhooks, inotify reloads, plugins, daemon-owned agent execution.
-- First-class Git patches, issues, PRs, repository hosting, or branch tracking.
-- Multi-repo project administration.
-- TUI redesign or new TUI-only state.
-- Compact output projections, server-side search, or reaction browsing beyond agent needs.
-
-### Implementation order
-
-1. **Baseline repair:** fix the tagged e2e compile failure and correct error-to-exit-code mapping.
-2. **JSONL contract:** add event typing, portable references, reaction events, and import mapping.
-3. **Agent read loop:** add `after_seq`, expose `flf inbox`, verify no duplicate or skipped messages.
-4. **Agent write loop:** add stdin, atomic batch append, reaction-by-sequence, response-loss handling.
-5. **Transport hardening:** centralize finite HTTP clients, contexts, structured CLI errors.
-6. **Measured enhancements:** consider compact output, search, reaction browsing, and human-triggered invocation only after observing real usage.
-
-### Key design choices
-
-- **Thread-local `seq` as the portable reference.** Database `id` is internal only. On import, source sequences are remapped to destination sequences and `parent_seq`/`message_seq` are resolved through that map.
-- **Parse-before-write atomicity.** A multi-line append must commit all events or none. A response lost after dispatch is `DELIVERY_UNKNOWN` — no automatic retry.
-- **No `retryable` field.** The error envelope remains exactly `{"code","message"}`. Changing this requires an explicit contract amendment.
-- **Reactions have no independent cursor.** Every JSONL read emits the complete reaction snapshot. Filtering reactions out would silently drop context the cursor cannot represent.
-- **`after_seq` and `last` are mutually exclusive.** An explicit `--last 0` counts as present, so `--after-seq 0 --last 0` is a client error rather than a silent precedence choice.
-- **Live `seq` values are ignored on appends.** The daemon assigns destination sequences. Only import preserves source sequences for remapping.
-
 ## Implementation notes
 
 - `store.Open(":memory:")` for tests — always `SetMaxOpenConns(1)` to avoid SQLite locking.
@@ -609,3 +661,21 @@ These are product expansions, not prerequisites for a useful local agent loop. T
 - Import/append: parse the whole file before the first POST. No partial writes on validation failure.
 - `nullIfEmpty("")` returns `nil` for SQLite INSERT (empty string → NULL for nullable columns).
 - `AppendMessageAt` accepts optional `createdAt` (RFC3339) for import replay.
+
+### Verifying a change
+
+`just test` and `just diff` are the gate, but both are unit-level. Before calling work done, confirm the daemon actually starts against a real database file and that the JSON contract did not move:
+
+```bash
+go test ./... -count=1
+rm -rf /tmp/fluffle-verify && mkdir -p /tmp/fluffle-verify
+go build -o /tmp/fluffle-verify/flf ./cmd/flf
+/tmp/fluffle-verify/flf daemon --help
+```
+
+Then spot-check the wire contract, since Go field names are the API and a regression here is invisible to the unit tests unless a test happens to assert it. Against a daemon running on a scratch database file:
+
+- an empty thread renders as `[]`, not `null` — see "Nil versus empty slices" for which endpoints normalize and which depend on the store
+- an empty inbox and an empty session list also render as `[]`
+- `Message.ParentID` appears as a nullable integer, never a pointer-encoded field, and `ParentSeq` is absent from responses entirely
+

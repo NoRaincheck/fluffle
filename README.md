@@ -73,6 +73,8 @@ The SQL layer is owned by [sqlc](https://sqlc.dev), pinned as a Go tool in `go.m
 
 A query change is the same three beats against the matching file in `internal/store/queries/`, plus `just vet`; the generated methods are listed in `internal/db/querier.go`. Never edit a migration that has already been applied — write a new numbered one, or the schema on disk silently diverges from the migration set. The full rules, including why the `no-pragma` vet rule can never actually fire, are in [docs/backend.md](docs/backend.md#sql-layer).
 
+Neither `just test` nor `just diff` starts the daemon, so before calling a change done, build the binary and smoke-test it against a scratch database file — [Verifying a change](docs/backend.md#verifying-a-change) has the recipe and the JSON spot-checks, which matter because a wire-contract regression is invisible to the unit suite.
+
 Manual QA: `./scripts/seed-tui.sh` builds a scratch install under `.tui-seed/`, seeds orphan and repo-anchored channels, threads, replies, reactions, and agent sessions across a 14-day timestamp spread, fires one live `@mention`, verifies the result, and execs the TUI. No environment setup, no daemon to start by hand. `--no-tui` stops after seeding; `SEED_AGENT_SLEEP` tunes how long the live agent runs.
 
 Thread data lives in `scripts/fixtures/*.jsonl`, where `@T-14d` style tokens are resolved against the clock at seed time. Agent sessions are staged by `scripts/seed-sessions.go` through `internal/store`, which needs the daemon stopped — the store has no WAL and no `busy_timeout`. `queued` and `running` sessions are deliberately never staged: the daemon reconciles both to `canceled` on startup, so only the live `@mention` can show those states.
