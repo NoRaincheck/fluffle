@@ -44,7 +44,19 @@ const (
 	// the thread's first line and the only cue is that one of them stopped
 	// mid-word.
 	PaneDividerW    = 1
-	paneDividerRune = '│'
+	paneDividerRune = '|'
+)
+
+// ruleRune draws the rule under a pane's header, and truncTail is what a cut
+// string ends in. Neither may be a glyph the app and the emulator can measure
+// differently: `─` and `…` are East Asian Ambiguous, one cell to this app and
+// two to a terminal configured to render ambiguous width as wide, and a line
+// measured one cell per occurrence too wide wraps and takes the frame with it.
+// See TestNoDrawnGlyphIsEastAsianAmbiguous, which derives the ambiguous set
+// rather than trusting this list.
+const (
+	ruleRune  = '-'
+	truncTail = "..."
 )
 
 // rowHeader labels the four fixed columns and the count, in the same cells
@@ -103,7 +115,7 @@ func rowLine(w int, row store.Row, selected bool) string {
 			count = "99+"
 		}
 	}
-	content := termtext.Truncate(termtext.SanitizeLine(firstLine(row.Content)), contentWidth(w), "…")
+	content := termtext.Truncate(termtext.SanitizeLine(firstLine(row.Content)), contentWidth(w), truncTail)
 	return pad(marker+
 		cell(formatTime(row.Time))+strings.Repeat(" ", ColGap)+
 		cell(row.Channel)+strings.Repeat(" ", ColGap)+
@@ -120,11 +132,11 @@ func renderRows(w, h int, rows []store.Row, cursor, scroll int) string {
 	if h <= 0 || w <= 0 {
 		return ""
 	}
-	lines := []string{rowHeader(w), pad(sepStyle.Render(strings.Repeat("─", w)), w)}
+	lines := []string{rowHeader(w), pad(sepStyle.Render(strings.Repeat(string(ruleRune), w)), w)}
 	if len(rows) == 0 {
 		// clamp has already zeroed scroll, so the window below cannot read
 		// before the start of an empty list.
-		lines = append(lines, pad(placeholder("no rows — press g to change group"), w))
+		lines = append(lines, pad(placeholder("no rows - press g to change group"), w))
 	}
 	for i := scroll; i < len(rows) && len(lines) < h; i++ {
 		lines = append(lines, rowLine(w, rows[i], i == cursor))

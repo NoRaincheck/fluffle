@@ -493,8 +493,10 @@ func TestComposeViewFitsLongTypedText(t *testing.T) {
 			len(lines), composeBoxLines)
 	}
 	// The border is drawn in cells that are not whitespace, so it is trimmed
-	// explicitly to get at the text column.
-	if got := strings.Trim(lines[2], "│ "); got != strings.Repeat("x", c.width-6) {
+	// explicitly to get at the text column. The cutset is the border rune
+	// rather than a literal, so the box can change shape without this test
+	// mistaking a border cell for text.
+	if got := strings.Trim(lines[2], string(paneDividerRune)+" "); got != strings.Repeat("x", c.width-6) {
 		t.Errorf("the text line is %d cells of content, want %d",
 			termtext.DisplayWidth(got), c.width-6)
 	}
@@ -547,7 +549,7 @@ func TestComposeViewDrawsTheCursor(t *testing.T) {
 	for _, r := range "hi" {
 		c.update(key(string(r)))
 	}
-	if got := plain(c.view()); !strings.Contains(got, "hi▏") {
+	if got := plain(c.view()); !strings.Contains(got, "hi"+string(caretRune)) {
 		t.Errorf("the cursor is not drawn after the typed text: %q", got)
 	}
 }
@@ -567,9 +569,9 @@ func TestComposeViewDrawsTheCaretAtTheCursor(t *testing.T) {
 		left int
 		want string
 	}{
-		{"cursor at the start", 0, "▏hi"},
-		{"cursor in the middle", 1, "h▏i"},
-		{"cursor at the end", 2, "hi▏"},
+		{"cursor at the start", 0, string(caretRune) + "hi"},
+		{"cursor in the middle", 1, "h" + string(caretRune) + "i"},
+		{"cursor at the end", 2, "hi" + string(caretRune)},
 	} {
 		c.cursor = tc.left
 		if got := plain(c.view()); !strings.Contains(got, tc.want) {
@@ -587,11 +589,11 @@ func TestComposeViewDrawsTheCaretAmongMultiByteRunes(t *testing.T) {
 	c.open("reply in eng › pr-review")
 	c.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("aé")})
 	c.cursor = 1
-	if got := plain(c.view()); !strings.Contains(got, "a▏é") {
+	if got := plain(c.view()); !strings.Contains(got, "a"+string(caretRune)+"é") {
 		t.Errorf("the caret is not between the two runes: %q", got)
 	}
 	c.cursor = 99
-	if got := plain(c.view()); !strings.Contains(got, "aé▏") {
+	if got := plain(c.view()); !strings.Contains(got, "aé"+string(caretRune)) {
 		t.Errorf("a caret past the end was not clamped: %q", got)
 	}
 }
@@ -705,7 +707,7 @@ func TestReplyWithNoLoadedThreadSaysSo(t *testing.T) {
 	m.compose.open("reply in eng › pr-review")
 	next, _ := m.handleComposeSend(composeSendMsg{text: "hi"})
 	mm := toModel(next)
-	const want = "cannot reply — the thread is not loaded"
+	const want = "cannot reply - the thread is not loaded"
 	if mm.status != want {
 		t.Errorf("status = %q, want %q", mm.status, want)
 	}
@@ -731,7 +733,7 @@ func TestRefusedReplyKeepsTheReasonItWasRefused(t *testing.T) {
 	if mm.status == "error: DAEMON_DOWN: connection refused" {
 		t.Errorf("status = %q, want the explanation appended", mm.status)
 	}
-	if want := "cannot reply — the thread is not loaded"; !strings.Contains(mm.status, want) {
+	if want := "cannot reply - the thread is not loaded"; !strings.Contains(mm.status, want) {
 		t.Errorf("status = %q, want it to contain %q", mm.status, want)
 	}
 }

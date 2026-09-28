@@ -15,6 +15,8 @@ There are exactly two, and they are the whole of the drawing:
 
 Both are pure functions of their arguments. They read no model field, take no callback, and know nothing about the other one, which is what lets the same `renderThread` draw the pane beside the list and the thread that fills the terminal, and what lets `bodyView` choose a geometry without either renderer learning a second mode.
 
+**Before you add a glyph, check it is not East Asian Ambiguous.** Every line of the view is drawn at exactly the terminal's width, so a glyph the app measures at one cell and the terminal measures at two wraps that row and the frame loses one. `─ │ ▕ ▏ · … ↑ ↓ —` are all Ambiguous and none of them may be drawn; `▸ › ❯ » ✓` are not, and `TestNoDrawnGlyphIsEastAsianAmbiguous` is the check. Box-drawing borders from lipgloss count too — `RoundedBorder` is eight ambiguous cells per line.
+
 **To change what a row looks like**, edit `rowLine`. It is exactly `w` cells wide for an ASCII row, and that is the invariant: sanitize, truncate, pad, in that order, all in cells. Note that `cell` pads the four fixed columns with `%-*s`, which counts runes, so a wide grapheme in a channel, thread, or author name overruns the column — the ASCII-only name rules are what keep that unreachable, not the renderer. `renderRows` supplies the window and the empty state; do not put per-row state in it.
 
 **To change what the list looks like**, edit `rowLine` for a data row or `rowHeader` for the labels above them — they share the same prefix arithmetic, so a column width change belongs in `ColW` and reaches both. `renderRows` keeps the header outside the scrolling window, so anything added there costs the window a row and `listWindowH` has to follow.
@@ -72,7 +74,7 @@ Granularity is a store and daemon question first. The TUI half is four edits:
 3. Nothing in the renderer. The count column, the empty state, and the columns are granularity-blind by design; if a new granularity needs a renderer change, the row type is wrong.
 4. A test in `internal/tui` that `g` reaches it, and one in `internal/store` for the query: counts, order, and which message represents the group.
 
-A granularity whose rows have no thread is the `channel` case, and it is already handled: `syncThread` loads nothing, the pane says `no thread — press g`, and `r` and `Enter` refuse. If a new granularity can be reached both with and without a thread, that is a `ThreadID` question and the answer belongs in `Row`, not in a renderer branch.
+A granularity whose rows have no thread is the `channel` case, and it is already handled: `syncThread` loads nothing, the pane says `no thread - press g`, and `r` and `Enter` refuse. If a new granularity can be reached both with and without a thread, that is a `ThreadID` question and the answer belongs in `Row`, not in a renderer branch.
 
 ## Adding a key
 

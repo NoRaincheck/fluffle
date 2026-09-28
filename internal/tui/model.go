@@ -179,7 +179,7 @@ func (m model) statusBand() string {
 	block := m.width - statusBlockPad
 	content := block - statusStyle.GetPaddingLeft() - statusStyle.GetPaddingRight()
 	return statusStyle.Width(block).Render(
-		termtext.Truncate(termtext.SanitizeLine(m.statusLine()), content, "…"))
+		termtext.Truncate(termtext.SanitizeLine(m.statusLine()), content, truncTail))
 }
 
 // chromeH is the title band, the footer, and the status band. The footer is
@@ -236,7 +236,7 @@ func (m model) titleLine() string {
 	if m.reversed {
 		order = "oldest first"
 	}
-	return titleStyle.Render(fmt.Sprintf("flf · %s · %d rows · %s", m.granularity, len(m.rows), order))
+	return titleStyle.Render(fmt.Sprintf("flf - %s - %d rows - %s", m.granularity, len(m.rows), order))
 }
 
 func (m model) statusLine() string {
@@ -253,7 +253,7 @@ func appendStatus(status, note string) string {
 	if status == "" {
 		return note
 	}
-	return status + " · " + note
+	return status + " - " + note
 }
 
 // threadTitle names the thread the pane shows, or is empty for a channel row,
@@ -267,7 +267,7 @@ func (m model) threadTitle() string {
 }
 
 func narrowNotice(w, h int) string {
-	return fmt.Sprintf("flf needs %d columns and %d rows (got %dx%d) — resize the terminal",
+	return fmt.Sprintf("flf needs %d columns and %d rows (got %dx%d) - resize the terminal",
 		MinWidth, MinHeight, w, h)
 }
 
@@ -458,7 +458,7 @@ func (m *model) openThread() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if row.ThreadID == 0 {
-		m.status = "no thread on this row — press g"
+		m.status = "no thread on this row - press g"
 		return m, nil
 	}
 	m.detail = true
@@ -471,7 +471,7 @@ func (m *model) handleComposeSend(msg composeSendMsg) (tea.Model, tea.Cmd) {
 		// A failed thread load clears the id, so there is nowhere to send. The
 		// typed text is gone either way; say so rather than dropping it in
 		// silence, and keep the error that explains why the thread is not there.
-		m.status = appendStatus(m.status, "cannot reply — the thread is not loaded")
+		m.status = appendStatus(m.status, "cannot reply - the thread is not loaded")
 		return m, nil
 	}
 	threadID, text := m.threadID, msg.text
@@ -489,7 +489,7 @@ func (m *model) openReply() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if row.ThreadID == 0 {
-		m.status = "no thread on this row — press g"
+		m.status = "no thread on this row - press g"
 		return m, nil
 	}
 	m.detail = true

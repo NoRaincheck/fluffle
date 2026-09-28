@@ -178,7 +178,7 @@ func TestRenderThreadAtNoSizeIsNothing(t *testing.T) {
 
 func TestRenderThreadInOneRowKeepsTheRule(t *testing.T) {
 	got := plain(renderThread(60, 1, "eng › pr-review", threadFixture()))
-	if want := strings.Repeat("─", 60); got != want {
+	if want := strings.Repeat(string(ruleRune), 60); got != want {
 		t.Errorf("a one-row pane is %q, want the rule %q", got, want)
 	}
 }
@@ -187,7 +187,7 @@ func TestRenderThreadInOneRowKeepsTheRule(t *testing.T) {
 // push a message out of a pane that has room for exactly two rows of chrome.
 func TestRenderThreadInTwoRowsIsTheHeaderAndTheRule(t *testing.T) {
 	got := plain(renderThread(60, 2, "eng › pr-review", threadFixture()))
-	want := []string{"eng › pr-review", strings.Repeat("─", 60)}
+	want := []string{"eng › pr-review", strings.Repeat(string(ruleRune), 60)}
 	for i, line := range strings.Split(got, "\n") {
 		if line = strings.TrimRight(line, " "); line != want[i] {
 			t.Errorf("row %d is %q, want %q", i, line, want[i])
@@ -211,8 +211,8 @@ func TestRenderThreadTruncatesALongHeader(t *testing.T) {
 	if termtext.DisplayWidth(head) != 20 {
 		t.Fatalf("header is %d cells, want 20: %q", termtext.DisplayWidth(head), head)
 	}
-	if !strings.HasSuffix(strings.TrimRight(head, " "), "…") {
-		t.Errorf("a truncated header must end in an ellipsis: %q", head)
+	if !strings.HasSuffix(strings.TrimRight(head, " "), truncTail) {
+		t.Errorf("a truncated header must end in the tail, so the reader knows it was cut: %q", head)
 	}
 	if !strings.HasPrefix(head, "engineering › ") {
 		t.Errorf("a truncated header must keep what fits: %q", head)

@@ -188,7 +188,7 @@ func TestRowLineTruncatedContentKeepsTheTail(t *testing.T) {
 	r := testRow()
 	r.Content = strings.Repeat("z", 100)
 	line := plain(rowLine(80, r, false))
-	if !strings.HasSuffix(line, "…") {
+	if !strings.HasSuffix(line, truncTail) {
 		t.Errorf("truncated content must end in the tail, so the reader knows it was cut: %q", line)
 	}
 	if got := termtext.DisplayWidth(line); got != 80 {

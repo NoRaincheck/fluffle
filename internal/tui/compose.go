@@ -88,13 +88,33 @@ func (m *composeModel) update(msg tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
-// caret is the text with the cursor glyph drawn between the two halves at the
+// caretRune is the box's text cursor. It is a plain bar rather than the block
+// element a text cursor would rather be, because U+258F is East Asian
+// Ambiguous. See TestNoDrawnGlyphIsEastAsianAmbiguous.
+const caretRune = '|'
+
+// caret is the text with the cursor drawn between the two halves at the
 // cursor, so the box shows where the next keystroke lands. The cursor is a rune
 // index and is clamped, so a stale one splits nothing and overruns nothing.
 func (m composeModel) caret() string {
 	r := []rune(m.text)
 	at := min(max(m.cursor, 0), len(r))
-	return string(r[:at]) + "▏" + string(r[at:])
+	return string(r[:at]) + string(caretRune) + string(r[at:])
+}
+
+// asciiBorder is the reply box's border. lipgloss's RoundedBorder and
+// NormalBorder are both drawn from East Asian Ambiguous box-drawing glyphs, and
+// a box is four rules and four corners: eight cells per line the app and the
+// emulator can disagree about, on the one surface drawn over the list.
+var asciiBorder = lipgloss.Border{
+	Top:         string(ruleRune),
+	Bottom:      string(ruleRune),
+	Left:        string(paneDividerRune),
+	Right:       string(paneDividerRune),
+	TopLeft:     "+",
+	TopRight:    "+",
+	BottomLeft:  "+",
+	BottomRight: "+",
 }
 
 func (m composeModel) view() string {
@@ -105,10 +125,10 @@ func (m composeModel) view() string {
 		// so what reaches the box is not necessarily keystrokes.
 		pad(termtext.Truncate(termtext.SanitizeLine(m.caret()), m.width-6, ""), m.width-6),
 		m.errLine(),
-		modalHintStyle.Render("Enter to send · Esc to cancel"),
+		modalHintStyle.Render("Enter to send - Esc to cancel"),
 	}
 	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
+		Border(asciiBorder).
 		BorderForeground(modalBorder).
 		Foreground(modalFg).
 		Padding(0, 2).

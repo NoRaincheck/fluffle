@@ -1,9 +1,12 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mattn/go-runewidth"
 
 	"github.com/NoRaincheck/fluffle/internal/store"
 	"github.com/NoRaincheck/fluffle/internal/tui/termtext"
@@ -101,9 +104,91 @@ func TestTheStatusBandCutsRatherThanWraps(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("a 300-cell note drew a %d-row status band", len(got))
 	}
-	if !strings.HasSuffix(strings.TrimRight(got[0], " "), "…") {
-		t.Errorf("status band = %q, want it cut to an ellipsis", got[0])
+	if !strings.HasSuffix(strings.TrimRight(got[0], " "), truncTail) {
+		t.Errorf("status band = %q, want it cut to the tail, so the reader knows it was cut", got[0])
 	}
+}
+
+// The app and the emulator have to agree on how many cells every glyph is
+// worth, or the render desyncs: a line the app believes is exactly the
+// terminal's width is written as such, the terminal puts it one cell over, the
+// row wraps, and the frame loses a row. The glyphs the two can disagree about
+// are the East Asian Ambiguous ones — one cell narrow, two wide — and which
+// one a terminal uses is a user setting rather than a terminfo capability, so
+// nothing at startup can negotiate it.
+//
+// The app's answer is to draw none of them. This derives the ambiguous set
+// from the Unicode table rather than listing the glyphs the chrome happens to
+// use today, so a new one cannot slip in.
+func TestNoDrawnGlyphIsEastAsianAmbiguous(t *testing.T) {
+	defer func(eastAsian bool) { runewidth.DefaultCondition.EastAsianWidth = eastAsian }(runewidth.DefaultCondition.EastAsianWidth)
+
+	widthOf := func(r rune, eastAsian bool) int {
+		runewidth.DefaultCondition.EastAsianWidth = eastAsian
+		return runewidth.RuneWidth(r)
+	}
+
+	ambiguous := map[rune]string{}
+	for _, s := range everyView(t) {
+		for _, r := range s {
+			if r < 128 {
+				continue
+			}
+			narrow, wide := widthOf(r, false), widthOf(r, true)
+			if narrow == 1 && wide == 2 {
+				ambiguous[r] = fmt.Sprintf("U+%04X is %d cell narrow and %d wide", r, narrow, wide)
+			}
+		}
+	}
+	for r, why := range ambiguous {
+		t.Errorf("the view draws %q (%s); a terminal that renders ambiguous width as wide "+
+			"measures every line holding it one cell per occurrence too wide, which wraps the row", r, why)
+	}
+}
+
+// everyView is every shape the TUI can draw, so the glyph audit covers the
+// stacked list, the split panes, the fullscreen thread, the reply box, both
+// empty states, a status note, and the too-narrow notice.
+func everyView(t *testing.T) []string {
+	t.Helper()
+	// A row and a thread title long enough to be truncated, so the audit also
+	// covers the glyph a truncation leaves behind.
+	rows := []store.Row{
+		{ID: 1, ThreadID: 1, Channel: "general", Thread: "welcome", Name: "alice", Count: 3,
+			Content: "hello", Time: time.Now().Format(time.RFC3339)},
+		{ID: 2, ThreadID: 2, Channel: "a-very-long-channel", Thread: "a-very-long-thread",
+			Name: "a-very-long-name", Count: 12345,
+			Content: "a representative message whose first line is much wider than any content column",
+			Time:    time.Now().Format(time.RFC3339)},
+	}
+	thread := []store.Message{
+		{ID: 1, ThreadID: 1, Name: "alice", AuthorType: "human", Content: "hi",
+			CreatedAt: time.Now().Format(time.RFC3339)},
+		{ID: 2, ThreadID: 2, Name: "a-very-long-author", AuthorType: "agent",
+			Content:   "a body long enough that the narrowest pane wraps it over several lines",
+			CreatedAt: time.Now().Format(time.RFC3339)},
+	}
+	views := []string{narrowNotice(60, 10)}
+	for _, size := range [][2]int{{MinWidth, MinHeight}, {80, 24}, {110, 30}, {200, 50}} {
+		for _, filled := range []bool{true, false} {
+			for _, detail := range []bool{false, true} {
+				for _, status := range []string{"", "sent", "error: DAEMON_DOWN: refused"} {
+					m := model{width: size[0], height: size[1], granularity: store.GranularityMessage,
+						rows: rows, thread: thread, threadID: 1, detail: detail, status: status}
+					if !filled {
+						m.rows, m.thread, m.threadID = nil, nil, 0
+					}
+					m.clamp()
+					views = append(views, m.View())
+					composing := m
+					composing.compose.open("reply in general > welcome")
+					composing.compose.resize(composing.width)
+					views = append(views, composing.View())
+				}
+			}
+		}
+	}
+	return views
 }
 
 // The footer is the last band above the status, and the status is the last row:

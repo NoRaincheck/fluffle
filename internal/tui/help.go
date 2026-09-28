@@ -24,14 +24,19 @@ const helpColumnGap = 2
 // helpDivider separates two columns of the footer. It is the same cell
 // splitlayout uses between panes, so one rule describes every division on
 // screen.
-const helpDivider = "▕"
+const helpDivider = "|"
 
 // helpItems is the whole keymap, in the order handleKey reads it. `q` and
 // ctrl+c both quit and both say so: the footer is the only place a key is
 // documented, and a key that is not on it is a key the user has to guess at.
+//
+// The arrow keys are named in the description rather than drawn as U+2191 and
+// U+2193, because those are East Asian Ambiguous and a footer that names them
+// with glyphs is a footer that wraps on a terminal which renders them wide.
+// The keys are still bound and still named; only the spelling changed.
 func helpItems() []helpItem {
 	return []helpItem{
-		{key: "↑↓ j k", description: "move the cursor"},
+		{key: "j k", description: "move the cursor, or the arrows"},
 		{key: "Enter", description: "read the thread"},
 		{key: "Esc", description: "back to the list"},
 		{key: "g", description: "group the rows"},

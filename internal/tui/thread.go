@@ -27,10 +27,10 @@ func renderThread(w, h int, title string, thread []store.Message) string {
 	if len(thread) == 0 {
 		// pad only right-fills, so a placeholder wider than the pane has to be
 		// cut first or it overruns the row it shares with the list.
-		return padLines(termtext.Truncate(placeholder("no thread — press g"), w, "…"), w, h)
+		return padLines(termtext.Truncate(placeholder("no thread - press g"), w, truncTail), w, h)
 	}
-	header := pad(sepStyle.Render(termtext.Truncate(termtext.SanitizeLine(title), w, "…")), w)
-	rows := []string{header, pad(sepStyle.Render(strings.Repeat("─", w)), w)}
+	header := pad(sepStyle.Render(termtext.Truncate(termtext.SanitizeLine(title), w, truncTail)), w)
+	rows := []string{header, pad(sepStyle.Render(strings.Repeat(string(ruleRune), w)), w)}
 	if keep := h - 2; keep > 0 {
 		body := threadLines(w, thread)
 		if len(body) > keep {

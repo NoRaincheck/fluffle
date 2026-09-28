@@ -109,15 +109,17 @@ func TestTheSplitStillFillsTheTerminalWithTheDivider(t *testing.T) {
 }
 
 // The detail view is the thread alone, so it has no list to divide from and no
-// list header to draw.
+// list header to draw. The check is over the body rows only: the footer draws
+// its own column dividers with the same rune, and chrome is not a pane edge.
 func TestTheDetailViewHasNoDivider(t *testing.T) {
 	m := sizedModel(200, 40, 5)
 	m.detail = true
 	m.threadID = 1
 	m.thread = []store.Message{{ID: 1, Name: "alice", AuthorType: "human", Content: "hello"}}
-	for i, line := range plainLines(m.bodyView()) {
+	body := plainLines(m.bodyView())
+	for i, line := range body[titleH : titleH+m.height-m.chromeH()] {
 		if strings.ContainsRune(line, paneDividerRune) {
-			t.Errorf("detail row %d carries a pane divider: %q", i, line)
+			t.Errorf("detail body row %d carries a pane divider: %q", i, line)
 		}
 	}
 }

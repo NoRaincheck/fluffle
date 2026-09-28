@@ -28,7 +28,7 @@ Every other key does nothing. `l`, `p`, `s`, `n`, `C`, `e`, `f`, and `c` are unb
 |---|---|---|---|---|
 | `message` | a message | that message | 1, and drawn blank | Reply to its thread; open its thread |
 | `thread` | a thread | the original post | replies | Reply to it; open it |
-| `channel` | a channel | the newest message | messages | `no thread on this row — press g` |
+| `channel` | a channel | the newest message | messages | `no thread on this row - press g` |
 
 `g` drops the rows it was showing, resets the cursor to the top, and drops the loaded thread, because a message row has no counterpart at channel granularity — and the id namespaces differ per granularity, so a row left behind would be matched against the next list by a number that means something else. `v` keeps the cursor: the same rows in the other order, so the row under the cursor is still there. The title line names the granularity, the row count, and the order.
 
@@ -64,7 +64,7 @@ Opened by `r`; the thread is shown behind it.
 
 The box is 80% of the terminal width, titled `reply in <channel> › <thread>`, and draws a caret at the cursor. Positions are rune indices, so a multi-byte character is edited whole. Whitespace-only text is refused in the box with `cannot be empty`. A send appends to the thread and never sets `parent_id`.
 
-`r` with no row under the cursor says `no row selected`; `r` on a channel-granularity row says `no thread on this row — press g`. A send refused because the thread is not loaded says so and keeps the error that explains why.
+`r` with no row under the cursor says `no row selected`; `r` on a channel-granularity row says `no thread on this row - press g`. A send refused because the thread is not loaded says so and keeps the error that explains why.
 
 ## Status line
 
@@ -75,11 +75,11 @@ One row above the bottom edge, always present:
 | *(empty)* | Nothing has happened yet |
 | `sent` | A reply was acknowledged |
 | `no row selected` | `Enter` or `r` with an empty or out-of-range list |
-| `no thread on this row — press g` | `Enter` or `r` on a channel-granularity row |
-| `cannot reply — the thread is not loaded` | Appended after a send the TUI cannot make; the reason stays on screen |
+| `no thread on this row - press g` | `Enter` or `r` on a channel-granularity row |
+| `cannot reply - the thread is not loaded` | Appended after a send the TUI cannot make; the reason stays on screen |
 | `error: <CODE>: <message>` | `DAEMON_DOWN`, `DAEMON_ERROR`, or `DELIVERY_UNKNOWN` |
 
-Notes later in the same band are joined with ` · ` rather than replacing what is there, so the reason an action was refused is still readable after a note explains it. The line is sanitized and truncated to the terminal width.
+Notes later in the same band are joined with ` - ` rather than replacing what is there, so the reason an action was refused is still readable after a note explains it. The line is sanitized and truncated to the terminal width.
 
 ## Not in the TUI
 
