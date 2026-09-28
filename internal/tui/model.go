@@ -8,7 +8,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/NoRaincheck/fluffle/internal/store"
-	"github.com/NoRaincheck/fluffle/internal/tui/screen"
 	"github.com/NoRaincheck/fluffle/internal/tui/termtext"
 )
 
@@ -130,7 +129,7 @@ func (m model) View() string {
 		return narrowNotice(m.width, m.height)
 	}
 	if m.compose.active {
-		return screen.OverlayCentered(m.bodyView(), m.compose.view(), m.width, m.height)
+		return overlayCentered(m.bodyView(), m.compose.view(), m.width, m.height)
 	}
 	return m.bodyView()
 }
@@ -164,7 +163,7 @@ func (m model) bodyView() string {
 const statusBlockPad = 2
 
 // statusBand is the last row of the view, and it is one row whatever the note
-// in it. The note is budgeted to the band's *content* width, which is narrower
+// in it. The note is budgeted to the band's **content** width, which is narrower
 // than its block width because the style pads a cell each side and lipgloss
 // wraps at the content width.
 //
@@ -173,13 +172,17 @@ const statusBlockPad = 2
 // row taller than the terminal, and a renderer cannot reach into a terminal's
 // scrollback, so it drops the top line to fit. The title band disappears, the
 // column header moves up into its row, and the footer lands in the status
-// band's row. The padding is read from the style rather than stated beside it
-// so the two cannot drift.
+// band's row.
+//
+// The block width carries the excess too, because lipgloss measures narrow:
+// without it the padded band is a cell or two wider than the terminal on a
+// wide-ambiguous one. See cells.go.
 func (m model) statusBand() string {
 	block := m.width - statusBlockPad
+	note := termtext.SanitizeLine(m.statusLine())
 	content := block - statusStyle.GetPaddingLeft() - statusStyle.GetPaddingRight()
-	return statusStyle.Width(block).Render(
-		termtext.Truncate(termtext.SanitizeLine(m.statusLine()), content, truncTail))
+	band := max(block-excessCells(note), 0)
+	return statusStyle.Width(band).Render(truncateCells(note, content, truncTail))
 }
 
 // chromeH is the title band, the footer, and the status band. The footer is

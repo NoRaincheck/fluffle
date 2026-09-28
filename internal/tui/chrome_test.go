@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/clipperhouse/displaywidth"
 	"github.com/mattn/go-runewidth"
 
 	"github.com/NoRaincheck/fluffle/internal/store"
@@ -189,6 +190,57 @@ func everyView(t *testing.T) []string {
 		}
 	}
 	return views
+}
+
+// The invariant, and it is the one that matters: **no line the TUI draws may
+// be wider than the terminal under either reading of East Asian Ambiguous
+// width.** A line that the app measures at the terminal's width and the
+// terminal measures at width+1 wraps, and a wrapped line makes the emulator
+// consume a row the renderer does not know about, so every line after it is
+// written one row off. That is the redraw mess: the chrome is re-rendered
+// correctly and lands in the wrong place.
+//
+// The text is untrusted, so the characters that trigger it arrive in message
+// content, not in the chrome. Curly quotes, em dashes, ellipses, arrows,
+// middots, degrees and primes are all Ambiguous and all ordinary in prose.
+func TestNoLineIsWiderThanTheTerminalUnderEitherAmbiguousWidth(t *testing.T) {
+	// Measured independently of the app's own width layer, so a mistake in
+	// that layer cannot make this pass.
+	narrow := displaywidth.Options{ControlSequences: true}
+	wide := displaywidth.Options{EastAsianWidth: true, ControlSequences: true}
+
+	// The characters that do it, in text a person would actually write.
+	content := strings.Join([]string{
+		"it's the \u201cbest\u201d release we've shipped, isn't it?",
+		"one \u2014 two \u2014 three, and a loading\u2026 done\u2026",
+		"up\u2192 right\u2192 down\u2192; a \u00b7 b \u00b7 c; 20\u00b0C, 3\u00d74, x\u2032y\u2033",
+	}, "\n")
+
+	for _, size := range [][2]int{{MinWidth, MinHeight}, {80, 24}, {110, 30}, {120, 40}, {200, 50}} {
+		{
+			m := model{width: size[0], height: size[1], granularity: store.GranularityMessage}
+			m.rows = []store.Row{{
+				ID: 1, ThreadID: 1, Channel: "general", Thread: "welcome", Name: "alice",
+				Content: strings.ReplaceAll(content, "\n", " "), Time: time.Now().Format(time.RFC3339),
+			}}
+			m.thread = []store.Message{{
+				ID: 1, ThreadID: 1, Name: "alice", AuthorType: "human",
+				Content: content, CreatedAt: time.Now().Format(time.RFC3339),
+			}}
+			m.clamp()
+			for _, view := range []struct {
+				what string
+				text string
+			}{{"list", m.View()}, {"thread", func() string { m.detail = true; return m.View() }()}} {
+				for i, line := range strings.Split(view.text, "\n") {
+					if n := wide.String(line); n > size[0] {
+						t.Errorf("%dx%d %s row %d is %d cells on a wide-ambiguous terminal and %d narrow, over a %d-cell terminal",
+							size[0], size[1], view.what, i, n, narrow.String(line), size[0])
+					}
+				}
+			}
+		}
+	}
 }
 
 // The footer is the last band above the status, and the status is the last row:

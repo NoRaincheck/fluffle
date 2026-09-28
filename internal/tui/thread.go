@@ -27,9 +27,9 @@ func renderThread(w, h int, title string, thread []store.Message) string {
 	if len(thread) == 0 {
 		// pad only right-fills, so a placeholder wider than the pane has to be
 		// cut first or it overruns the row it shares with the list.
-		return padLines(termtext.Truncate(placeholder("no thread - press g"), w, truncTail), w, h)
+		return padLines(truncateCells(placeholder("no thread - press g"), w, truncTail), w, h)
 	}
-	header := pad(sepStyle.Render(termtext.Truncate(termtext.SanitizeLine(title), w, truncTail)), w)
+	header := pad(sepStyle.Render(truncateCells(termtext.SanitizeLine(title), w, truncTail)), w)
 	rows := []string{header, pad(sepStyle.Render(strings.Repeat(string(ruleRune), w)), w)}
 	if keep := h - 2; keep > 0 {
 		body := threadLines(w, thread)
@@ -56,13 +56,13 @@ func threadLines(w int, thread []store.Message) []string {
 		header := strings.Repeat(" ", threadIndent) +
 			pad(formatClock(m.CreatedAt), threadClockW) +
 			strings.Repeat(" ", threadHeadGap) +
-			nameStyle(m.AuthorType).Render(termtext.Truncate(termtext.SanitizeLine(m.Name), ColW, ""))
-		lines = append(lines, pad(threadHeaderStyle.Render(termtext.Truncate(header, w, "")), w))
-		for _, line := range termtext.Wrap(termtext.SanitizeBlock(m.Content), body) {
+			nameStyle(m.AuthorType).Render(truncateCells(termtext.SanitizeLine(m.Name), ColW, ""))
+		lines = append(lines, pad(threadHeaderStyle.Render(truncateCells(header, w, "")), w))
+		for _, line := range wrapCells(termtext.SanitizeBlock(m.Content), body) {
 			// Clamping the indent keeps a line inside a pane narrower than the
 			// indent itself, and is the same string at every wider pane.
 			lines = append(lines, pad(
-				threadBodyStyle.Render(strings.Repeat(" ", min(threadBodyAt, w))+termtext.Truncate(line, body, "")), w))
+				threadBodyStyle.Render(strings.Repeat(" ", min(threadBodyAt, w))+truncateCells(line, body, "")), w))
 		}
 	}
 	return lines

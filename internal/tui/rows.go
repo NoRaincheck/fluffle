@@ -91,7 +91,7 @@ func contentWidth(w int) int {
 // rules would never accept, typed straight into the database, overran the
 // column and shifted every column after it.
 func cell(s string) string {
-	return pad(termtext.Truncate(termtext.SanitizeLine(s), ColW, ""), ColW)
+	return pad(truncateCells(termtext.SanitizeLine(s), ColW, ""), ColW)
 }
 
 // firstLine is the representative message's first line. A row is a preview,
@@ -115,7 +115,7 @@ func rowLine(w int, row store.Row, selected bool) string {
 			count = "99+"
 		}
 	}
-	content := termtext.Truncate(termtext.SanitizeLine(firstLine(row.Content)), contentWidth(w), truncTail)
+	content := truncateCells(termtext.SanitizeLine(firstLine(row.Content)), contentWidth(w), truncTail)
 	return pad(marker+
 		cell(formatTime(row.Time))+strings.Repeat(" ", ColGap)+
 		cell(row.Channel)+strings.Repeat(" ", ColGap)+
@@ -150,9 +150,11 @@ func renderRows(w, h int, rows []store.Row, cursor, scroll int) string {
 }
 
 // pad right-fills a rendered line to w cells, measuring cells rather than
-// runes so styling and wide graphemes do not shift the row.
+// runes so styling and wide graphemes do not shift the row. The measurement is
+// the wide reading of ambiguous width, which is what makes the result a line
+// that fits on every terminal rather than only on half of them. See cells.go.
 func pad(s string, w int) string {
-	if n := w - termtext.DisplayWidth(s); n > 0 {
+	if n := w - wideCells.String(s); n > 0 {
 		return s + strings.Repeat(" ", n)
 	}
 	return s

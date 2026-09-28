@@ -118,27 +118,44 @@ var asciiBorder = lipgloss.Border{
 }
 
 func (m composeModel) view() string {
+	// Sanitized like every other draw site, and not only because the text is
+	// untrusted: a paste arrives as a tea.PasteMsg that nothing handles, so what
+	// reaches the box is not necessarily keystrokes.
+	// See composeTextBudget for the 6.
+	budget := max(m.width-composeTextBudget, 1)
+	title := truncateCells(termtext.SanitizeLine(m.context), budget, "")
+	text := truncateCells(termtext.SanitizeLine(m.caret()), budget, "")
+	failure := truncateCells(termtext.SanitizeLine(m.err), budget, "")
+	hint := "Enter to send - Esc to cancel"
+
+	// The box is bordered and padded, and lipgloss measures narrow, so the
+	// width it is given has to carry the excess or the box is wider than the
+	// terminal on a wide-ambiguous one. That makes the width depend on the
+	// text, and the text budget depend on the width, so the text is cut to a
+	// generous budget, the excess measured, and only then padded to the width
+	// the box will actually have. Cutting cannot raise the excess, so one pass
+	// is enough. See cells.go.
+	excess := excessCells(title) + excessCells(text) + excessCells(failure) + excessCells(hint)
+	content := max(m.width-composeBorderCells-excess, 1)
 	lines := []string{
-		modalTitleStyle.Render(termtext.Truncate(termtext.SanitizeLine(m.context), m.width-6, "")),
-		// Sanitized like every other draw site, and not only because the text
-		// is untrusted: a paste arrives as a tea.PasteMsg that nothing handles,
-		// so what reaches the box is not necessarily keystrokes.
-		pad(termtext.Truncate(termtext.SanitizeLine(m.caret()), m.width-6, ""), m.width-6),
-		m.errLine(),
-		modalHintStyle.Render("Enter to send - Esc to cancel"),
+		modalTitleStyle.Render(pad(truncateCells(title, content, ""), content)),
+		pad(truncateCells(text, content, ""), content),
+		modalErrorStyle.Render(pad(truncateCells(failure, content, ""), content)),
+		modalHintStyle.Render(pad(truncateCells(hint, content, ""), content)),
 	}
 	return lipgloss.NewStyle().
 		Border(asciiBorder).
 		BorderForeground(modalBorder).
 		Foreground(modalFg).
 		Padding(0, 2).
-		Width(m.width - 2).
+		Width(content).
 		Render(strings.Join(lines, "\n"))
 }
 
-func (m composeModel) errLine() string {
-	if m.err == "" {
-		return ""
-	}
-	return modalErrorStyle.Render(m.err)
-}
+// composeTextBudget is the cells the box leaves for its border and its one-cell
+// horizontal padding, and composeBorderCells is the subset of those that the
+// box's own width must pay for before its content is laid out.
+const (
+	composeTextBudget  = 6
+	composeBorderCells = 2
+)

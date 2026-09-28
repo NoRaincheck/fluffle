@@ -51,6 +51,7 @@ internal/tui/
 ├── tui.go        Run(): daemon ensure, tea.Program, exit codes
 ├── model.go      model, Init, Update, handleKey, View, geometry, the clock
 ├── rows.go       the width constants, rowLine, renderRows, pad
+├── cells.go     the width policy: the widest reading of ambiguous width
 ├── thread.go     renderThread — the one thread renderer
 ├── compose.go    the one compose mode
 ├── api.go        ListRows, ListMessages, SendReply, get, readAPIError
@@ -64,6 +65,7 @@ internal/tui/
 | `tui.go` | `Run()` entry point, daemon ensure, `tea.Program` with the alt screen, exit codes (0 success, 1 client/local, 2 daemon or transport) |
 | `model.go` | The model, `Update`, `handleKey`, `View`, `bodyView`, the chrome lines including `statusBand`, the split/stacked decision, the tick, and the fetch commands |
 | `rows.go` | Every width constant, the one row renderer, the empty-state placeholder, `formatTime`/`formatClock`, and `pad` |
+| `cells.go` | The width policy: `excessCells`, `pad`'s measurement, `truncateCells`, `wrapCells`, `cellSlice`, and `overlayCentered` |
 | `thread.go` | `renderThread` at any width, the per-message block, and `padLines` |
 | `compose.go` | The reply box: open, close, rune-indexed editing, the caret, the error line |
 | `api.go` | The three endpoints the TUI uses, plus `get`, `readAPIError`, and the strict decoder |
@@ -157,22 +159,44 @@ and took the title band with it.
 
 The content column is bounded in cells, by `termtext.Truncate`. The four fixed columns are bounded in cells and then padded to `ColW` **cells** by `cell`, so a column holding a wide grapheme cannot render wider than its cell.
 
-**No drawn glyph may be East Asian Ambiguous.** Every line of the view is
-written at exactly the terminal's width, so the render has no slack: a line the
-app measures at `width` and the terminal measures at `width + 1` wraps, and the
-frame loses a row. The glyphs the two can measure differently are the
-Ambiguous ones — one cell narrow, two wide — and which one a terminal uses is a
-user setting, not a terminfo capability, so nothing at startup can negotiate it.
-iTerm2 and Ghostty can both be set to render them wide, and with the chrome
-drawn from box-drawing characters a 74-cell rule becomes a 148-cell rule.
+**Every budget is measured for the widest reading of East Asian Ambiguous
+width.** The app cannot ask the terminal which reading it uses — it is a user
+setting, not a terminfo capability — and a line the app measures at the
+terminal's width and the terminal measures at width+1 wraps. A wrapped line
+makes the emulator consume a row the renderer does not know about, so every
+line after it is written one row off: the chrome is re-rendered correctly and
+lands in the wrong place, which is what a "redraw issue" looks like from
+outside.
 
-So the chrome is ASCII: `-` for a rule, `|` for the pane and footer dividers,
-`+` for the reply box's corners, `...` for a truncation, `-` for a separator.
-`▸` and `›` are the two non-ASCII glyphs left, and both are Narrow in UAX #11 —
-one cell either way. `TestNoDrawnGlyphIsEastAsianAmbiguous` derives the
-ambiguous set from the Unicode table and audits every view the TUI can draw, so
-a new one cannot slip in. The `...` tail costs two cells against `…`, which is
-why the truncated content column is two cells shorter than it was. Padding measured in runes is what used to break it: `fmt`'s `%*s` counts runes, a wide grapheme is worth two cells, and a name the rules would never accept — typed straight into the database — overran the column and shifted every column after it, measured at 79 cells against `w = 71`.
+The text is untrusted, so the characters that do it arrive in **message
+content**, not in the chrome: curly quotes, em dashes, ellipses, arrows,
+middots, degrees, primes and multiplication signs are all Ambiguous and all
+ordinary in prose. Auditing the app's own glyphs is therefore not enough — it
+was the first attempt, and it fixed fourteen glyphs and left the bug.
+
+So `cells.go` owns the policy, and it is the widest reading:
+
+| Function | What it does |
+|---|---|
+| `excessCells` | how many more cells a string costs wide than narrow, measured over the string so a grapheme cluster is charged once |
+| `pad` | right-fills to `w` on the wide reading |
+| `truncateCells` | cuts to `w` on the wide reading, keeping `ansi.Truncate`'s ANSI and grapheme handling |
+| `wrapCells` | wraps at `w` minus the block's whole excess, an upper bound on any one line's |
+| `cellSlice` | the cells of a line in a range, taking only graphemes that fit entirely inside it |
+| `overlayCentered` | the app's own composition, because `screen.Splice` pads a replacement to the width its caller asked for |
+
+The cost is one cell of budget per ambiguous character on the line, so a row of
+ASCII is unaffected and a row with three curly quotes shows three fewer
+characters. `TestNoLineIsWiderThanTheTerminalUnderEitherAmbiguousWidth` is the
+invariant, measured independently of the app's own width layer.
+
+**The chrome is ASCII anyway** — `-` for a rule, `|` for the pane and footer
+dividers, `+` for the reply box's corners, `...` for a truncation, `-` for a
+separator — and `▸` and `›` are the two non-ASCII glyphs left, both Narrow in
+UAX #11. That is a quality decision, not the safety one:
+`TestNoDrawnGlyphIsEastAsianAmbiguous` derives the ambiguous set from the
+Unicode table and audits the app's own glyphs, which keeps the chrome honest
+about what it is spending.
 
 **There is one column width, and there is no drop ladder.** Every text column is `MaxSlug` or `MaxName` wide, and both are 12, so `ColW` is a single constant and `rowPrefixW` is arithmetic on it. Before, the widths were per-column (time 12, channel 12, thread 16, name 12) and narrow terminals shed columns one at a time — `NAME` → `CHANNEL` → `THREAD` → `TIME` — until the content column had room, which made the *meaning* of a row depend on the terminal's width and needed a rule for what each column looks like at every step of the ladder. Now a row is either drawn whole or the terminal is too narrow to draw it at all, which is `tooNarrow()` and a single line of text.
 
@@ -293,7 +317,7 @@ Message content, author names, channel and thread names, and the daemon's error 
 - `termtext.SanitizeLine` for a single line, `termtext.SanitizeBlock` for a message body. Both remove every terminal escape sequence — not just the SGR runs a regexp for — plus Unicode control and format characters, and replace invalid UTF-8. `SanitizeLine` also flattens tabs and newlines to one space.
 - `termtext.Truncate` then bounds the cell width, and `pad` right-fills to the width the line was promised. A styled string's length in bytes is not its width in cells, so `termtext.DisplayWidth` is how anything here is measured.
 
-Sanitize first, then measure: the width of a column must be decided from the text that will be drawn in it, not from the text that arrived. `formatTime` is the exception and it is deliberate — an unparseable timestamp is drawn as-is through `cell`, so a hand-edited database cannot silently shift a row.
+Sanitize first, then measure: the width of a column must be decided from the text that will be drawn in it, not from the text that arrived. The measurement itself is the widest reading of ambiguous width, for the reason above. `formatTime` is the exception and it is deliberate — an unparseable timestamp is drawn as-is through `cell`, so a hand-edited database cannot silently shift a row.
 
 `screen` and `termtext` are copied verbatim, without upstream tests, from `go.kenn.io/kit/tui/` (Apache-2.0, Copyright 2026 Kenn Software LLC) into `internal/tui/`, each directory carrying the `NOTICE` that says so and pins the commit. They are a fork rather than a module requirement for two reasons: `kit`'s `go.mod` declares `go 1.27.0` and this module is on 1.26, and the module graph behind `kit` is far larger than these two packages. Keeping the copies verbatim means they can be diffed against upstream. Each has one smoke test, so the fork is exercised rather than assumed.
 
@@ -387,6 +411,7 @@ sentMsg ──▶ status, fetchRows + fetchThread
 | `tui` (footer, chrome, header) | See the rows above; the status band is one row at every width either side of the content-width boundary, and a note too long to show is cut to an ellipsis rather than wrapped |
 | `tui` (scroll window) | `clamp` bounds `scroll` at both ends of the list at four heights and five offsets; a resize across eight sizes keeps the cursor inside the window, the window at or before the last full page, and every drawable row filled |
 | `tui` (glyphs) | No drawn glyph is East Asian Ambiguous, audited across every view the TUI can draw — the stacked list, the split panes, the fullscreen thread, the reply box, both empty states, a status note, and the too-narrow notice |
+| `tui` (width) | No line is wider than the terminal under **either** reading of ambiguous width, with message content full of curly quotes, em dashes, ellipses, arrows, middots, degrees and primes — the invariant that keeps a wrapped line from costing the frame a row |
 | `tui` (clock) | A tick arms its successor; four rounds produce four ticks, not more; a clock round leaves exactly one tick in flight and `g` adds none; a rows error arms no tick and does not starve the clock; a tick keeps the cursor on the same row; a tick shows an appended reply with no keypress; a refresh re-reads the thread already on screen; a late thread error does not blank the thread on screen |
 | `tui` (api) | `ListRows` decodes the feed, defaults the limit, and rejects a `null` body; `ListMessages`; the error envelope surfaces; an envelope-free 4xx is `DAEMON_ERROR`; `SendReply` posts the text with no parent, and a missing sequence is `DELIVERY_UNKNOWN`; a pre-dispatch connection failure is `DAEMON_DOWN`; a dispatched timeout is `DELIVERY_UNKNOWN`; a context cancellation returns promptly; the strict decoder rejects a second value, a `null`, and trailing bytes |
 | `termtext` | The format characters that join one grapheme into one glyph — ZWJ, ZWNJ, and the emoji tag range — survive sanitizing unchanged and measure zero; the bidi controls, the Trojan Source vector the `Cf` strip exists to stop, still do not; truncation does not cut a joined sequence in half |
@@ -415,6 +440,7 @@ sentMsg ──▶ status, fetchRows + fetchThread
 17. **No pane for a run, no create flow, no reactions, no filter.** A row is a group, so the trigger-message mapping the pane relied on is gone; creating from a screen would put an agent-reachable create path on a route that is human-only by design; and a filter needs a filter model and a sort order, which `g` and `v` between them do not want to have.
 18. **The scroll window is bounded by the list, not paginated.** `clamp` states `scroll ∈ [0, len(rows)-listWindowH]` and a resize re-clamps. A page size, a page number, and keys to move between them would be three more fields and a second scroll concept, for a bound one line of arithmetic already carries — and the list has no page to be on.
 19. **The chrome is ASCII, because every line is drawn at exactly the terminal's width.** The view has no horizontal slack, so a glyph the app and the emulator measure differently wraps the row and costs the frame a row. East Asian Ambiguous glyphs are exactly the glyphs they can measure differently, and which width a terminal uses is a user setting rather than something to negotiate, so the app declines to draw them.
+20. **Every budget is the widest reading of East Asian Ambiguous width, and the chrome is ASCII besides.** The view has no horizontal slack, so a glyph the app and the emulator measure differently wraps the row and costs the frame a row. Ambiguous width is a user setting rather than something to negotiate, so the app measures for the widest case and every line fits every terminal. The characters that trigger it are in untrusted message content, not in the chrome, so the policy lives at the measurement layer rather than in a list of glyphs to avoid.
 
 ## Deferred
 

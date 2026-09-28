@@ -515,8 +515,17 @@ func TestThePreviewPaneRendersJoinedEmojiAsOneGrapheme(t *testing.T) {
 			if strings.Contains(line, "\U0001F468") {
 				joined = line
 			}
-			if got := termtext.DisplayWidth(line); got != w {
-				t.Errorf("at %d cells a body line is %d cells: %q", w, got, line)
+			// The pane's lines are budgeted for the widest reading of ambiguous
+			// width, so a line is at most w cells on every terminal. The content
+			// here carries an em dash, so on a narrow-ambiguous terminal the line
+			// is one cell shorter than w rather than one cell wider — the
+			// invariant is "fits either way", not "exactly w under one reading".
+			// See cells.go and TestNoLineIsWiderThanTheTerminalUnderEitherAmbiguousWidth.
+			if got := wideCells.String(line); got > w {
+				t.Errorf("at %d cells a body line is %d cells on a wide-ambiguous terminal: %q", w, got, line)
+			}
+			if got := narrowCells.String(line); got > w {
+				t.Errorf("at %d cells a body line is %d cells on a narrow-ambiguous terminal: %q", w, got, line)
 			}
 		}
 		if joined == "" {

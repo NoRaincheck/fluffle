@@ -1,10 +1,6 @@
 package tui
 
-import (
-	"strings"
-
-	"github.com/NoRaincheck/fluffle/internal/tui/termtext"
-)
+import "strings"
 
 // The footer is the keymap, said out loud. It is items rather than one line
 // because a run-on line bounded by the narrowest terminal can only afford
@@ -47,11 +43,14 @@ func helpItems() []helpItem {
 	}
 }
 
-// helpItemWidth is the cells an item occupies before column alignment.
+// helpItemWidth is the cells an item occupies before column alignment. It is
+// the wide reading of ambiguous width like every other budget here, so a
+// description carrying a curly quote cannot make a footer column one cell
+// wider than the space the reflow measured. See cells.go.
 func helpItemWidth(it helpItem) int {
-	n := termtext.DisplayWidth(it.key)
+	n := wideCells.String(it.key)
 	if it.description != "" {
-		n += 1 + termtext.DisplayWidth(it.description)
+		n += 1 + wideCells.String(it.description)
 	}
 	return n
 }
