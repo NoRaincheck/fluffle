@@ -70,6 +70,42 @@ func TestTheViewIsExactlyTheTerminal(t *testing.T) {
 	}
 }
 
+// The status band is one row, whatever the note in it. A note long enough to
+// wrap is not a two-row band: it makes the view a row taller than the terminal,
+// and the renderer resolves that by dropping the top line, so the title band
+// goes and the footer lands in the status band's row. The note is budgeted to
+// the band's content width, which is narrower than its block width because the
+// style pads a cell each side, so the lengths either side of that boundary are
+// the ones that matter.
+func TestTheStatusBandIsExactlyOneRow(t *testing.T) {
+	for _, w := range []int{MinWidth, MinWidth + 1, 80, 100, 110, 120, 200} {
+		for _, n := range []int{0, 10, 60, 80, 90, 96, 97, 98, 99, 100, 120, 400} {
+			m := sizedModel(w, MinHeight, 30)
+			m.status = strings.Repeat("e", n)
+			if got := len(plainLines(m.statusBand())); got != 1 {
+				t.Errorf("at %d columns a %d-cell note drew a %d-row status band", w, n, got)
+			}
+			if got := len(plainLines(m.View())); got != MinHeight {
+				t.Errorf("at %d columns a %d-cell note made the view %d rows, want %d", w, n, got, MinHeight)
+			}
+		}
+	}
+}
+
+// The note the band cannot show is cut rather than wrapped, so the band still
+// ends in an ellipsis and the row under the footer is still the status.
+func TestTheStatusBandCutsRatherThanWraps(t *testing.T) {
+	m := sizedModel(MinWidth, MinHeight, 30)
+	m.status = strings.Repeat("e", 300)
+	got := plainLines(m.statusBand())
+	if len(got) != 1 {
+		t.Fatalf("a 300-cell note drew a %d-row status band", len(got))
+	}
+	if !strings.HasSuffix(strings.TrimRight(got[0], " "), "…") {
+		t.Errorf("status band = %q, want it cut to an ellipsis", got[0])
+	}
+}
+
 // The footer is the last band above the status, and the status is the last row:
 // the view's shape is a contract the bands have to keep together.
 func TestTheFooterSitsAboveTheStatus(t *testing.T) {

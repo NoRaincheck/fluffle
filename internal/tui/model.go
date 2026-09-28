@@ -55,6 +55,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.compose.resize(m.width)
+		// The scroll window's height is derived from the terminal, so a resize
+		// moves the last full page and can leave an offset that was legal a
+		// moment ago past the end of the list. clamp is the only thing that
+		// knows the bound, and nothing else re-derives it: the tick's
+		// applyRows clamps too, but only once every couple of seconds, which is
+		// a list of blank rows and an undrawn cursor until it lands.
+		m.clamp()
 		return m, nil
 	case rowsFetchedMsg:
 		// No tick is armed here, on either outcome, and that is the whole
@@ -148,8 +155,31 @@ func (m model) bodyView() string {
 		m.titleLine(),
 		body,
 		renderHelp(helpItems(), m.width),
-		statusStyle.Width(m.width - 2).Render(termtext.Truncate(termtext.SanitizeLine(m.statusLine()), m.width-2, "…")),
+		m.statusBand(),
 	}, "\n")
+}
+
+// statusBlockPad is the width the status band leaves unpainted at the right of
+// the terminal, so the band is a band and not the whole row.
+const statusBlockPad = 2
+
+// statusBand is the last row of the view, and it is one row whatever the note
+// in it. The note is budgeted to the band's *content* width, which is narrower
+// than its block width because the style pads a cell each side and lipgloss
+// wraps at the content width.
+//
+// Budgeted to the block width instead, any note longer than the content width
+// wraps onto a second row, and that is not a cosmetic fault: the view is now a
+// row taller than the terminal, and a renderer cannot reach into a terminal's
+// scrollback, so it drops the top line to fit. The title band disappears, the
+// column header moves up into its row, and the footer lands in the status
+// band's row. The padding is read from the style rather than stated beside it
+// so the two cannot drift.
+func (m model) statusBand() string {
+	block := m.width - statusBlockPad
+	content := block - statusStyle.GetPaddingLeft() - statusStyle.GetPaddingRight()
+	return statusStyle.Width(block).Render(
+		termtext.Truncate(termtext.SanitizeLine(m.statusLine()), content, "…"))
 }
 
 // chromeH is the title band, the footer, and the status band. The footer is
@@ -275,6 +305,16 @@ func (m *model) clamp() {
 	}
 	m.cursor = min(max(m.cursor, 0), len(m.rows)-1)
 	visible := m.listWindowH()
+	// The window is bounded by the list at both ends, and stating the bottom
+	// of it is the whole point. `visible` comes from the terminal, so an
+	// offset that was the last full page at one height is past the end at
+	// another: the rows above it become unreachable by scrolling and the rows
+	// below it are blank. The bound used to hold only as a consequence of the
+	// offset always being derived from the cursor with the same height, which a
+	// resize breaks and nothing else repairs until the next tick.
+	m.scroll = min(max(m.scroll, 0), max(0, len(m.rows)-visible))
+	// The cursor is inside the window, and the window moves as little as the
+	// cursor needs it to.
 	if top := m.cursor - visible + 1; m.scroll > top {
 		m.scroll = top
 	}

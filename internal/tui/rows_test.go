@@ -446,6 +446,82 @@ func TestClampBoundsTheCursorToTheList(t *testing.T) {
 	}
 }
 
+// The window is bounded by the *list*, not only by the cursor. The window's
+// height comes from the terminal, so an offset that was the last full page at
+// one height is past the end at another: the rows above it become unreachable
+// by scrolling and the rows below it are blank. clamp follows from the
+// arithmetic that produced the offset, which is why the bound is stated here
+// rather than trusted to it.
+func TestClampNeverParksTheWindowPastTheLastFullPage(t *testing.T) {
+	for _, rows := range []int{1, 5, 20, 49, 200} {
+		for _, h := range []int{13, MinHeight, 30, 60} {
+			for _, scroll := range []int{0, 3, 25, 100, 4000} {
+				m := toModel(New("http://127.0.0.1:1"))
+				m.width, m.height = 100, h
+				m.rows = make([]store.Row, rows)
+				m.scroll = scroll
+				m.clamp()
+				if last := max(0, rows-m.listWindowH()); m.scroll > last {
+					t.Errorf("%d rows at %d rows tall, scroll %d: clamp left it at %d, past the last full page %d",
+						rows, h, scroll, m.scroll, last)
+				}
+				if m.scroll < 0 {
+					t.Errorf("%d rows at %d rows tall: clamp left scroll at %d, before the first row",
+						rows, h, m.scroll)
+				}
+			}
+		}
+	}
+}
+
+// A resize changes the window's height, and the offset has to be re-derived
+// with it — the cursor below the window is a selected row that is not drawn,
+// and the offset past the end is a screen of blank rows. Nothing else in the
+// model re-clamps, so the resize is the one place that has to.
+func TestAResizeReclampsTheWindow(t *testing.T) {
+	for _, rows := range []int{5, 20, 49, 200} {
+		for _, from := range [][2]int{{100, 30}, {100, MinHeight}, {140, 26}} {
+			for _, to := range [][2]int{{100, 60}, {100, MinHeight}, {100, 26}, {200, 50}, {80, 24}} {
+				m := toModel(New("http://127.0.0.1:1"))
+				m.width, m.height = from[0], from[1]
+				m.rows = make([]store.Row, rows)
+				for i := range m.rows {
+					m.rows[i] = store.Row{ID: int64(i), Content: fmt.Sprintf("row-%d", i)}
+				}
+				m.cursor = rows - 1
+				m.clamp()
+				next, _ := m.Update(tea.WindowSizeMsg{Width: to[0], Height: to[1]})
+				m = toModel(next)
+
+				if m.cursor < m.scroll || m.cursor >= m.scroll+m.listWindowH() {
+					t.Errorf("%d rows %dx%d -> %dx%d: the cursor %d is outside the window [%d,%d)",
+						rows, from[0], from[1], to[0], to[1], m.cursor, m.scroll, m.scroll+m.listWindowH())
+				}
+				if last := max(0, rows-m.listWindowH()); m.scroll > last {
+					t.Errorf("%d rows %dx%d -> %dx%d: the window sits at %d, past the last full page %d",
+						rows, from[0], from[1], to[0], to[1], m.scroll, last)
+				}
+				if drawn := drawnRowCount(m); drawn != min(rows, m.listWindowH()) {
+					t.Errorf("%d rows %dx%d -> %dx%d: the window drew %d rows, want %d",
+						rows, from[0], from[1], to[0], to[1], drawn, min(rows, m.listWindowH()))
+				}
+			}
+		}
+	}
+}
+
+// drawnRowCount is how many body rows renderRows filled with a row, which is
+// what a window parked past the end gives away: the rest are blank.
+func drawnRowCount(m model) int {
+	drawn := 0
+	for _, line := range plainLines(renderRows(m.width, m.height-m.chromeH(), m.rows, m.cursor, m.scroll))[listHeaderH:] {
+		if strings.TrimSpace(line) != "" {
+			drawn++
+		}
+	}
+	return drawn
+}
+
 // selectedModel drives the production path to a loaded thread: it feeds a
 // rowsFetchedMsg through Update rather than assigning fields, so it cannot mask
 // a model that never records the selection.

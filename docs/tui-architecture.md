@@ -62,7 +62,7 @@ internal/tui/
 | File | Responsibility |
 |------|----------------|
 | `tui.go` | `Run()` entry point, daemon ensure, `tea.Program` with the alt screen, exit codes (0 success, 1 client/local, 2 daemon or transport) |
-| `model.go` | The model, `Update`, `handleKey`, `View`, `bodyView`, the chrome lines, the split/stacked decision, the tick, and the fetch commands |
+| `model.go` | The model, `Update`, `handleKey`, `View`, `bodyView`, the chrome lines including `statusBand`, the split/stacked decision, the tick, and the fetch commands |
 | `rows.go` | Every width constant, the one row renderer, the empty-state placeholder, `formatTime`/`formatClock`, and `pad` |
 | `thread.go` | `renderThread` at any width, the per-message block, and `padLines` |
 | `compose.go` | The reply box: open, close, rune-indexed editing, the caret, the error line |
@@ -82,7 +82,7 @@ Dependencies are `internal/store` for the wire types, `internal/client` for daem
 | `detail` | The thread replaces the list instead of sitting beside it |
 | `rows` | The feed at the current granularity, already reversed if `reversed` |
 | `cursor` | Index into `rows`, carried across a refresh by `Row.ID` |
-| `scroll` | First visible row; `clamp` moves it only as far as the cursor needs |
+| `scroll` | First visible row; `clamp` keeps it inside `[0, len(rows)-listWindowH()]` and moves it only as far as the cursor needs |
 | `threadID` | The thread whose messages are loaded, or 0 for a channel row and for no row |
 | `thread` | Those messages |
 | `status` | The status band: errors, `sent`, and the two refusals |
@@ -139,6 +139,20 @@ scroll window are both derived from it, and `clamp` sizes the window by
 `listWindowH` so the cursor can never be scrolled one row past the last row
 `renderRows` actually draws.
 
+**Every band is exactly the rows it budgeted, and that is load-bearing rather
+than cosmetic.** A view one row taller than the terminal does not scroll: a
+renderer cannot reach into a terminal's scrollback, so Bubble Tea drops the
+*top* line to fit, and the title band goes while the column header moves up
+into its row and the footer lands in the status band's row. The bands that
+grow — the footer and the list window — size themselves by counting, so they
+cannot. The status band is the one that has to be told: it is a single row by
+contract, and `model.statusBand` gets there by budgeting the note to the
+band's *content* width, which is `statusBlockW` less the style's horizontal
+padding, because lipgloss wraps at the content width. Budgeted to the block
+width instead, a note longer than the content width — every `DAEMON_DOWN` from
+the tick, which carries the URL it failed to reach — wrapped onto a second row
+and took the title band with it.
+
 `rowLine` emits the cursor, four `ColW` cells separated by `ColGap`, and a `CountW` count, then as much content as the remaining width holds, then padding. For an ASCII row it is exactly `w` cells wide, which is what lets a row sit beside a thread without either one shifting the other.
 
 The content column is bounded in cells, by `termtext.Truncate`. The four fixed columns are bounded in cells and then padded to `ColW` **cells** by `cell`, so a column holding a wide grapheme cannot render wider than its cell. Padding measured in runes is what used to break it: `fmt`'s `%*s` counts runes, a wide grapheme is worth two cells, and a name the rules would never accept — typed straight into the database — overran the column and shifted every column after it, measured at 79 cells against `w = 71`.
@@ -169,12 +183,37 @@ View()
 
 `renderRows` draws the column header, a rule, and then the scrolling window. The header is **outside** the window: the window scrolls under it, which is the only thing that makes a scrolled list readable, and it is why `clamp` scrolls by `listWindowH` rather than by the whole body. The content column carries no label — the count sits in its last three cells with no gap before the content, so a label there would read as one word, and the text column is the one thing on a row that needs no explaining.
 
+### The window cannot scroll off the bottom
+
+`clamp` bounds `scroll` at both ends: not before the first row, and never past
+`len(rows) - listWindowH`, the last full window. There is no pagination and no
+page field — a page size, a page number, and keys to move between them are
+three more pieces of state for a bound one line of arithmetic already carries,
+and the list has no notion of a page to be on.
+
+Stating the lower bound is what keeps the cursor drawn, and stating the upper
+one is what keeps the window full. The upper bound used to be a *consequence*
+of the offset always being derived from the cursor with the same height it was
+derived for, and `listWindowH` comes from the terminal — so a resize moved the
+last full page and left the offset behind it:
+
+| After | Before this bound | After this bound |
+|---|---|---|
+| 100×30 → 100×50, 49 rows | 24 rows drawn, 20 blank below them, and the 25 rows above unreachable by scrolling | 44 rows drawn, none blank |
+| 100×30 → 100×25, 49 rows | the cursor at row 48 below the window, never drawn | the window moves, the cursor is drawn |
+
+`tea.WindowSizeMsg` is the one other place that calls `clamp`, because it is
+the only place `listWindowH` changes without `j`, `k` or a response doing it.
+The tick's `applyRows` clamps too, so the two states above lasted at most one
+tick — but "at most two seconds of a half-empty list" is the state the user
+sees, and a resize is exactly when a user is looking at the list.
+
 | Line | Content |
 |------|---------|
 | `titleLine` | `flf · <granularity> · <n> rows · newest first`, or `oldest first` under `v` |
 | list header | `TIME CHANNEL THREAD NAME CNT` in the same cells `rowLine` draws them in, above a `────` rule |
 | footer | `↑↓ j k move the cursor · Enter read the thread · Esc back to the list · g group the rows · v reverse the order · r reply · q quit · ctrl+c quit`, reflowed into as many aligned columns as the width holds. There is no `?` overlay and no context-sensitive text. |
-| status | `error: <CODE>: <message>`, `sent`, `no row selected`, `no thread on this row — press g`, or an appended `cannot reply — the thread is not loaded` |
+| status | `error: <CODE>: <message>`, `sent`, `no row selected`, `no thread on this row — press g`, or an appended `cannot reply — the thread is not loaded`. Cut to the band's content width, never wrapped: the band is one row, and a second one costs the title band |
 
 ### The footer is items, not a line
 
@@ -327,8 +366,9 @@ sentMsg ──▶ status, fetchRows + fetchThread
 
 | Package | Covers |
 |---|---|
-| `tui` | `rowLine` at 71, 80, and 200 columns; a 40-byte channel and a 40-byte author truncated into a 12-cell column without breaking the row width; only the content's first line is drawn; sanitizing the name, the content, the thread header, the author, and the status; `renderThread` at every width, the empty state, the tail cut, the narrow pane, an overlong author; `g` cycles and resets; `v` reverses and keeps the cursor; `Enter`/`Esc` in both geometries; the view is never wider than the terminal and is exactly the terminal's height; `r` on a channel row; a refused send keeps the reason it was refused; the footer names every bound key, reflows to the greatest column count that fits, never truncates an item, and draws the gap it budgets; the chrome is the title, the footer, and the status, and it grows and shrinks with the footer; the list names its columns, the header holds its row while the list scrolls, and the cursor is never scrolled past the last drawn row; a split separates its panes with a divider; a joined emoji sequence reaches the preview pane intact; `l p s n C e f c` are not bound; a stale rows and a stale thread response are both dropped; a failed thread fetch clears the pane and retries |
-| `tui` (footer, chrome, header) | See the rows above |
+| `tui` | `rowLine` at 71, 80, and 200 columns; a 40-byte channel and a 40-byte author truncated into a 12-cell column without breaking the row width; only the content's first line is drawn; sanitizing the name, the content, the thread header, the author, and the status; `renderThread` at every width, the empty state, the tail cut, the narrow pane, an overlong author; `g` cycles and resets; `v` reverses and keeps the cursor; `Enter`/`Esc` in both geometries; the view is never wider than the terminal and is exactly the terminal's height; `r` on a channel row; a refused send keeps the reason it was refused; the footer names every bound key, reflows to the greatest column count that fits, never truncates an item, and draws the gap it budgets; the chrome is the title, the footer, and the status, and it grows and shrinks with the footer; the list names its columns, the header holds its row while the list scrolls, and the cursor is never scrolled past the last drawn row; `clamp` never parks the window past the last full page and a resize re-clamps it, so the cursor is always drawn and the window is always full; a split separates its panes with a divider; a joined emoji sequence reaches the preview pane intact; `l p s n C e f c` are not bound; a stale rows and a stale thread response are both dropped; a failed thread fetch clears the pane and retries |
+| `tui` (footer, chrome, header) | See the rows above; the status band is one row at every width either side of the content-width boundary, and a note too long to show is cut to an ellipsis rather than wrapped |
+| `tui` (scroll window) | `clamp` bounds `scroll` at both ends of the list at four heights and five offsets; a resize across eight sizes keeps the cursor inside the window, the window at or before the last full page, and every drawable row filled |
 | `tui` (clock) | A tick arms its successor; four rounds produce four ticks, not more; a clock round leaves exactly one tick in flight and `g` adds none; a rows error arms no tick and does not starve the clock; a tick keeps the cursor on the same row; a tick shows an appended reply with no keypress; a refresh re-reads the thread already on screen; a late thread error does not blank the thread on screen |
 | `tui` (api) | `ListRows` decodes the feed, defaults the limit, and rejects a `null` body; `ListMessages`; the error envelope surfaces; an envelope-free 4xx is `DAEMON_ERROR`; `SendReply` posts the text with no parent, and a missing sequence is `DELIVERY_UNKNOWN`; a pre-dispatch connection failure is `DAEMON_DOWN`; a dispatched timeout is `DELIVERY_UNKNOWN`; a context cancellation returns promptly; the strict decoder rejects a second value, a `null`, and trailing bytes |
 | `termtext` | The format characters that join one grapheme into one glyph — ZWJ, ZWNJ, and the emoji tag range — survive sanitizing unchanged and measure zero; the bidi controls, the Trojan Source vector the `Cf` strip exists to stop, still do not; truncation does not cut a joined sequence in half |
@@ -355,6 +395,7 @@ sentMsg ──▶ status, fetchRows + fetchThread
 15. **The footer is the keymap, and it reflows.** No `?` overlay — that is one more mode to render and one more key to bind. What replaced the fixed hint line is not a longer fixed line but items that reflow into as many columns as the width holds, so the 71-column floor bounds the footer's *height* rather than how much of the keymap can be said out loud. A key is either named with what it does or it is a key the user has to guess at.
 16. **A column header, and a divider between the panes.** Both exist for the same reason: the list is four fixed 12-cell columns and two panes share a row. The header is drawn *above* the scrolling window rather than inside it, and `clamp` sizes the window by `listHeaderH` so the cursor is never scrolled past the last drawn row.
 17. **No pane for a run, no create flow, no reactions, no filter.** A row is a group, so the trigger-message mapping the pane relied on is gone; creating from a screen would put an agent-reachable create path on a route that is human-only by design; and a filter needs a filter model and a sort order, which `g` and `v` between them do not want to have.
+18. **The scroll window is bounded by the list, not paginated.** `clamp` states `scroll ∈ [0, len(rows)-listWindowH]` and a resize re-clamps. A page size, a page number, and keys to move between them would be three more fields and a second scroll concept, for a bound one line of arithmetic already carries — and the list has no page to be on.
 
 ## Deferred
 
