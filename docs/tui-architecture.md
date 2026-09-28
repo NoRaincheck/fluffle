@@ -49,7 +49,7 @@ and every key but `ctrl+c` is inert — including `q`, because a terminal too sm
 ```
 internal/tui/
 ├── tui.go        Run(): daemon ensure, tea.Program, exit codes
-├── model.go      model, Init, Update, handleKey, View, geometry, the clock
+├── model.go      model, Init, Update, handleKey, View, geometry, the clock, model.slack
 ├── rows.go       the width constants, rowLine, renderRows, pad
 ├── cells.go     the width policy: the widest reading of ambiguous width
 ├── thread.go     renderThread — the one thread renderer
@@ -158,6 +158,28 @@ and took the title band with it.
 `rowLine` emits the cursor, four `ColW` cells separated by `ColGap`, and a `CountW` count, then as much content as the remaining width holds, then padding. For an ASCII row it is exactly `w` cells wide, which is what lets a row sit beside a thread without either one shifting the other.
 
 The content column is bounded in cells, by `termtext.Truncate`. The four fixed columns are bounded in cells and then padded to `ColW` **cells** by `cell`, so a column holding a wide grapheme cannot render wider than its cell.
+
+**The view never touches the terminal's edges.** It is drawn to
+`width - 1` and `height - 1` (`model.slack`), one column and one row short of
+what the terminal reported. Everything else here depends on that, because a view
+that reaches an edge is correct only while the terminal measures that edge
+exactly as this app does.
+
+If it does not — the terminal is one cell narrower than it said, or one font
+disagrees by a cell, or a wide-ambiguous reading adds one — then the row the app
+believes is the terminal's width is one cell over, the terminal wraps it, and
+**the emulator consumes a row the renderer does not know about**. Every row after
+it is then written one row lower while the renderer still believes it skipped
+them, so the frame is drawn *correctly* and lands in the *wrong place*: the title
+band scrolls off the top, the footer and the status band off the bottom, and a
+row of the list is left behind at the top. The app cannot detect that, because
+the only evidence is a screen it never reads, and it cannot undo it.
+
+One column of content and one blank row buy immunity to a one-cell
+disagreement, which is the only size that occurs in practice. A larger
+disagreement is a resize, and the app hears about that from
+`tea.WindowSizeMsg`. `TestSlackSurvivesAOneCellTerminalDisagreement` is the
+invariant; `TestTheViewFillsTheTerminalLessSlack` pins the arithmetic.
 
 **Every budget is measured for the widest reading of East Asian Ambiguous
 width.** The app cannot ask the terminal which reading it uses — it is a user
@@ -412,6 +434,7 @@ sentMsg ──▶ status, fetchRows + fetchThread
 | `tui` (scroll window) | `clamp` bounds `scroll` at both ends of the list at four heights and five offsets; a resize across eight sizes keeps the cursor inside the window, the window at or before the last full page, and every drawable row filled |
 | `tui` (glyphs) | No drawn glyph is East Asian Ambiguous, audited across every view the TUI can draw — the stacked list, the split panes, the fullscreen thread, the reply box, both empty states, a status note, and the too-narrow notice |
 | `tui` (width) | No line is wider than the terminal under **either** reading of ambiguous width, with message content full of curly quotes, em dashes, ellipses, arrows, middots, degrees and primes — the invariant that keeps a wrapped line from costing the frame a row |
+| `tui` (slack) | The view is the terminal less one cell and one row, and a terminal one cell narrower than the app was told still fits every line — the failure being that one wrapped row strands a list row at the top and scrolls the bands off |
 | `tui` (clock) | A tick arms its successor; four rounds produce four ticks, not more; a clock round leaves exactly one tick in flight and `g` adds none; a rows error arms no tick and does not starve the clock; a tick keeps the cursor on the same row; a tick shows an appended reply with no keypress; a refresh re-reads the thread already on screen; a late thread error does not blank the thread on screen |
 | `tui` (api) | `ListRows` decodes the feed, defaults the limit, and rejects a `null` body; `ListMessages`; the error envelope surfaces; an envelope-free 4xx is `DAEMON_ERROR`; `SendReply` posts the text with no parent, and a missing sequence is `DELIVERY_UNKNOWN`; a pre-dispatch connection failure is `DAEMON_DOWN`; a dispatched timeout is `DELIVERY_UNKNOWN`; a context cancellation returns promptly; the strict decoder rejects a second value, a `null`, and trailing bytes |
 | `termtext` | The format characters that join one grapheme into one glyph — ZWJ, ZWNJ, and the emoji tag range — survive sanitizing unchanged and measure zero; the bidi controls, the Trojan Source vector the `Cf` strip exists to stop, still do not; truncation does not cut a joined sequence in half |
@@ -441,6 +464,7 @@ sentMsg ──▶ status, fetchRows + fetchThread
 18. **The scroll window is bounded by the list, not paginated.** `clamp` states `scroll ∈ [0, len(rows)-listWindowH]` and a resize re-clamps. A page size, a page number, and keys to move between them would be three more fields and a second scroll concept, for a bound one line of arithmetic already carries — and the list has no page to be on.
 19. **The chrome is ASCII, because every line is drawn at exactly the terminal's width.** The view has no horizontal slack, so a glyph the app and the emulator measure differently wraps the row and costs the frame a row. East Asian Ambiguous glyphs are exactly the glyphs they can measure differently, and which width a terminal uses is a user setting rather than something to negotiate, so the app declines to draw them.
 20. **Every budget is the widest reading of East Asian Ambiguous width, and the chrome is ASCII besides.** The view has no horizontal slack, so a glyph the app and the emulator measure differently wraps the row and costs the frame a row. Ambiguous width is a user setting rather than something to negotiate, so the app measures for the widest case and every line fits every terminal. The characters that trigger it are in untrusted message content, not in the chrome, so the policy lives at the measurement layer rather than in a list of glyphs to avoid.
+21. **The view is drawn one cell and one row inside the terminal.** Reaching an edge is only correct while the terminal measures that edge exactly as the app does, and when it does not, one wrapped row desynchronises the frame permanently: the bands scroll off and a list row is stranded at the top, with nothing in the app able to detect or undo it. The margin is one column of content and one blank row.
 
 ## Deferred
 

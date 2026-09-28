@@ -134,11 +134,41 @@ func (m model) View() string {
 	return m.bodyView()
 }
 
+// slack is the margin the view leaves on its right and bottom edges, and it is
+// the last line of defence against a viewport the app cannot see.
+//
+// Everything here is drawn to *exactly* the size the terminal reported, which
+// leaves no room for disagreement. If the terminal is one cell narrower than it
+// said, or measures one cell differently — a font, an ambiguous-width setting,
+// anything — then the row the app believes is the terminal's width is one cell
+// over, the terminal wraps it, and the emulator consumes a row the renderer
+// does not know about. Every row after it is then written one row lower while
+// the renderer still believes it skipped them, so the frame is drawn correctly
+// and lands in the wrong place: the title band scrolls off the top, the footer
+// and the status band off the bottom, and a row of the list is left behind at
+// the top. Nothing in the app can detect that, and nothing in the app can undo
+// it, because the only evidence is a screen the app never reads.
+//
+// A row the terminal can measure one cell differently from the app is the
+// ordinary case, not the exotic one, so the view is drawn a cell narrower and a
+// row shorter than the terminal and never touches an edge. One column of
+// content and one blank row are the whole cost; the bands become unreachable
+// for a one-cell disagreement, which is the only size that occurs.
+const slack = 1
+
+// viewW is the width the view is drawn at, one cell inside the terminal.
+func (m model) viewW() int { return max(m.width-slack, 1) }
+
+// bodyH is the height the body is drawn at: the terminal less the chrome and
+// one spare row. chromeH, listWindowH and bodyView all read it, so the bands and
+// the scroll window cannot disagree about how many rows the body has.
+func (m model) bodyH() int { return max(m.height-m.chromeH()-slack, 1) }
+
 // bodyView is title, body, footer, and status: the chrome around exactly the
 // rest. In a split terminal the thread sits beside the list; in a stacked one it
 // replaces the list; either way it is the same renderThread.
 func (m model) bodyView() string {
-	h := m.height - m.chromeH()
+	h := m.bodyH()
 	var body string
 	switch {
 	case m.detail:
@@ -148,12 +178,12 @@ func (m model) bodyView() string {
 			renderRows(ListW, h, m.rows, m.cursor, m.scroll),
 			renderThread(m.paneWidth(), h, m.threadTitle(), m.thread))
 	default:
-		body = renderRows(m.width, h, m.rows, m.cursor, m.scroll)
+		body = renderRows(m.viewW(), h, m.rows, m.cursor, m.scroll)
 	}
 	return strings.Join([]string{
 		m.titleLine(),
 		body,
-		renderHelp(helpItems(), m.width),
+		renderHelp(helpItems(), m.viewW()),
 		m.statusBand(),
 	}, "\n")
 }
@@ -178,7 +208,7 @@ const statusBlockPad = 2
 // without it the padded band is a cell or two wider than the terminal on a
 // wide-ambiguous one. See cells.go.
 func (m model) statusBand() string {
-	block := m.width - statusBlockPad
+	block := m.viewW() - statusBlockPad
 	note := termtext.SanitizeLine(m.statusLine())
 	content := block - statusStyle.GetPaddingLeft() - statusStyle.GetPaddingRight()
 	band := max(block-excessCells(note), 0)
@@ -194,7 +224,7 @@ func (m model) chromeH() int {
 }
 
 func (m model) footerH() int {
-	return max(len(strings.Split(renderHelp(helpItems(), m.width), "\n")), 1)
+	return max(len(strings.Split(renderHelp(helpItems(), m.viewW()), "\n")), 1)
 }
 
 // paneWidth is the width the thread is drawn at, whether it sits beside the
@@ -202,9 +232,9 @@ func (m model) footerH() int {
 // both placements cannot drift apart.
 func (m model) paneWidth() int {
 	if m.split() && !m.detail {
-		return m.width - ListW - PaneDividerW
+		return m.viewW() - ListW - PaneDividerW
 	}
-	return m.width
+	return m.viewW()
 }
 
 // sideBySide puts the thread pane to the right of the list, one list row and
@@ -334,7 +364,7 @@ func (m *model) clamp() {
 // the height clamp believes in: sizing it by the whole body let the cursor be
 // pushed one row past the last drawn row, which is a cursor you cannot see.
 func (m model) listWindowH() int {
-	return max(m.height-m.chromeH()-listHeaderH, 1)
+	return max(m.bodyH()-listHeaderH, 1)
 }
 
 func (m model) selectedRow() (store.Row, bool) {

@@ -353,17 +353,17 @@ func TestSplitPutsTheThreadBesideTheList(t *testing.T) {
 	m.width, m.height = 200, 40
 	m.rows = []store.Row{testRow()}
 	m.thread = loneThread()
-	if got, want := m.paneWidth(), m.width-ListW-PaneDividerW; got != want {
+	if got, want := m.paneWidth(), m.viewW()-ListW-PaneDividerW; got != want {
 		t.Fatalf("a split thread pane is %d cells, want %d", got, want)
 	}
 	rows := strings.Split(m.View(), "\n")
-	body := rows[1 : 1+m.height-m.chromeH()]
-	if len(body) != m.height-m.chromeH() {
-		t.Fatalf("a split body is %d rows, want %d", len(body), m.height-m.chromeH())
+	body := rows[titleH : titleH+m.bodyH()]
+	if len(body) != m.bodyH() {
+		t.Fatalf("a split body is %d rows, want %d", len(body), m.bodyH())
 	}
 	for i, line := range body {
-		if got := termtext.DisplayWidth(line); got != m.width {
-			t.Fatalf("body row %d is %d cells, want the %d-cell terminal", i, got, m.width)
+		if got := wideCells.String(line); got != m.viewW() {
+			t.Fatalf("body row %d is %d cells, want the %d the view may draw", i, got, m.viewW())
 		}
 	}
 	// The panes stay row-for-row aligned: the list's pinned header shares the
@@ -391,11 +391,11 @@ func TestViewNeverWiderThanTheTerminalInEitherGeometry(t *testing.T) {
 			m.rows = []store.Row{testRow()}
 			m.thread, m.detail = threadFixture(), detail
 			view := m.View()
-			if n := strings.Count(view, "\n") + 1; n != m.height {
-				t.Errorf("%d columns, detail %v: View is %d lines, want %d", w, detail, n, m.height)
+			if n, want := strings.Count(view, "\n")+1, m.height-slack; n != want {
+				t.Errorf("%d columns, detail %v: View is %d lines, want %d", w, detail, n, want)
 			}
 			for i, line := range strings.Split(view, "\n") {
-				if got := termtext.DisplayWidth(line); got > w {
+				if got := wideCells.String(line); got > m.viewW() {
 					t.Errorf("%d columns, detail %v: line %d is %d cells", w, detail, i, got)
 				}
 			}
@@ -411,19 +411,19 @@ func TestTheThreadTakesTheWholeWidthWhenTheListCannotShareIt(t *testing.T) {
 	if m.split() {
 		t.Fatalf("%d columns must not split", m.width)
 	}
-	if got := m.paneWidth(); got != m.width {
-		t.Fatalf("a stacked thread is %d cells wide, want the %d-cell terminal", got, m.width)
+	if got := m.paneWidth(); got != m.viewW() {
+		t.Fatalf("a stacked thread is %d cells wide, want the %d the view may draw", got, m.viewW())
 	}
 	if strings.Contains(plain(m.bodyView()), "eng › pr-review") {
 		t.Fatal("a stacked terminal must show the list until Enter")
 	}
 	next, _ := m.handleKey(key("enter"))
 	mm := toModel(next)
-	if got := mm.paneWidth(); got != mm.width {
+	if got := mm.paneWidth(); got != mm.viewW() {
 		t.Fatalf("Enter must not narrow the thread: %d cells at %d columns", got, mm.width)
 	}
-	if n := strings.Count(mm.View(), "\n") + 1; n != mm.height {
-		t.Fatalf("the fullscreen thread is %d lines, want %d", n, mm.height)
+	if n, want := strings.Count(mm.View(), "\n")+1, mm.height-slack; n != want {
+		t.Fatalf("the fullscreen thread is %d lines, want %d", n, want)
 	}
 	body := plain(mm.bodyView())
 	if !strings.Contains(body, "only in the thread") {
@@ -448,8 +448,8 @@ func TestEnterAndEscMeanTheSameThingWhenSplit(t *testing.T) {
 	if !mm.detail {
 		t.Fatal("Enter did not open the thread")
 	}
-	if got := mm.paneWidth(); got != mm.width {
-		t.Errorf("Enter in a split terminal is %d cells, want the %d-cell terminal", got, mm.width)
+	if got := mm.paneWidth(); got != mm.viewW() {
+		t.Errorf("Enter in a split terminal is %d cells, want the %d the view may draw", got, mm.viewW())
 	}
 	// A split terminal must go fullscreen too, or Enter means two different
 	// things in the two geometries, which is the whole point of one renderer.
