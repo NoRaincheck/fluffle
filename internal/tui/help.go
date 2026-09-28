@@ -1,10 +1,6 @@
 package tui
 
-import (
-	"strings"
-
-	"github.com/NoRaincheck/fluffle/internal/tui/termtext"
-)
+import "strings"
 
 // The footer is the keymap, said out loud. It is items rather than one line
 // because a run-on line bounded by the narrowest terminal can only afford
@@ -24,14 +20,19 @@ const helpColumnGap = 2
 // helpDivider separates two columns of the footer. It is the same cell
 // splitlayout uses between panes, so one rule describes every division on
 // screen.
-const helpDivider = "▕"
+const helpDivider = "|"
 
 // helpItems is the whole keymap, in the order handleKey reads it. `q` and
 // ctrl+c both quit and both say so: the footer is the only place a key is
 // documented, and a key that is not on it is a key the user has to guess at.
+//
+// The arrow keys are named in the description rather than drawn as U+2191 and
+// U+2193, because those are East Asian Ambiguous and a footer that names them
+// with glyphs is a footer that wraps on a terminal which renders them wide.
+// The keys are still bound and still named; only the spelling changed.
 func helpItems() []helpItem {
 	return []helpItem{
-		{key: "↑↓ j k", description: "move the cursor"},
+		{key: "j k", description: "move the cursor, or the arrows"},
 		{key: "Enter", description: "read the thread"},
 		{key: "Esc", description: "back to the list"},
 		{key: "g", description: "group the rows"},
@@ -42,11 +43,14 @@ func helpItems() []helpItem {
 	}
 }
 
-// helpItemWidth is the cells an item occupies before column alignment.
+// helpItemWidth is the cells an item occupies before column alignment. It is
+// the wide reading of ambiguous width like every other budget here, so a
+// description carrying a curly quote cannot make a footer column one cell
+// wider than the space the reflow measured. See cells.go.
 func helpItemWidth(it helpItem) int {
-	n := termtext.DisplayWidth(it.key)
+	n := wideCells.String(it.key)
 	if it.description != "" {
-		n += 1 + termtext.DisplayWidth(it.description)
+		n += 1 + wideCells.String(it.description)
 	}
 	return n
 }

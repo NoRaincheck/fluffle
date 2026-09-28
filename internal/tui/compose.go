@@ -88,37 +88,74 @@ func (m *composeModel) update(msg tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
-// caret is the text with the cursor glyph drawn between the two halves at the
+// caretRune is the box's text cursor. It is a plain bar rather than the block
+// element a text cursor would rather be, because U+258F is East Asian
+// Ambiguous. See TestNoDrawnGlyphIsEastAsianAmbiguous.
+const caretRune = '|'
+
+// caret is the text with the cursor drawn between the two halves at the
 // cursor, so the box shows where the next keystroke lands. The cursor is a rune
 // index and is clamped, so a stale one splits nothing and overruns nothing.
 func (m composeModel) caret() string {
 	r := []rune(m.text)
 	at := min(max(m.cursor, 0), len(r))
-	return string(r[:at]) + "▏" + string(r[at:])
+	return string(r[:at]) + string(caretRune) + string(r[at:])
+}
+
+// asciiBorder is the reply box's border. lipgloss's RoundedBorder and
+// NormalBorder are both drawn from East Asian Ambiguous box-drawing glyphs, and
+// a box is four rules and four corners: eight cells per line the app and the
+// emulator can disagree about, on the one surface drawn over the list.
+var asciiBorder = lipgloss.Border{
+	Top:         string(ruleRune),
+	Bottom:      string(ruleRune),
+	Left:        string(paneDividerRune),
+	Right:       string(paneDividerRune),
+	TopLeft:     "+",
+	TopRight:    "+",
+	BottomLeft:  "+",
+	BottomRight: "+",
 }
 
 func (m composeModel) view() string {
+	// Sanitized like every other draw site, and not only because the text is
+	// untrusted: a paste arrives as a tea.PasteMsg that nothing handles, so what
+	// reaches the box is not necessarily keystrokes.
+	// See composeTextBudget for the 6.
+	budget := max(m.width-composeTextBudget, 1)
+	title := truncateCells(termtext.SanitizeLine(m.context), budget, "")
+	text := truncateCells(termtext.SanitizeLine(m.caret()), budget, "")
+	failure := truncateCells(termtext.SanitizeLine(m.err), budget, "")
+	hint := "Enter to send - Esc to cancel"
+
+	// The box is bordered and padded, and lipgloss measures narrow, so the
+	// width it is given has to carry the excess or the box is wider than the
+	// terminal on a wide-ambiguous one. That makes the width depend on the
+	// text, and the text budget depend on the width, so the text is cut to a
+	// generous budget, the excess measured, and only then padded to the width
+	// the box will actually have. Cutting cannot raise the excess, so one pass
+	// is enough. See cells.go.
+	excess := excessCells(title) + excessCells(text) + excessCells(failure) + excessCells(hint)
+	content := max(m.width-composeBorderCells-excess, 1)
 	lines := []string{
-		modalTitleStyle.Render(termtext.Truncate(termtext.SanitizeLine(m.context), m.width-6, "")),
-		// Sanitized like every other draw site, and not only because the text
-		// is untrusted: a paste arrives as a tea.PasteMsg that nothing handles,
-		// so what reaches the box is not necessarily keystrokes.
-		pad(termtext.Truncate(termtext.SanitizeLine(m.caret()), m.width-6, ""), m.width-6),
-		m.errLine(),
-		modalHintStyle.Render("Enter to send · Esc to cancel"),
+		modalTitleStyle.Render(pad(truncateCells(title, content, ""), content)),
+		pad(truncateCells(text, content, ""), content),
+		modalErrorStyle.Render(pad(truncateCells(failure, content, ""), content)),
+		modalHintStyle.Render(pad(truncateCells(hint, content, ""), content)),
 	}
 	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
+		Border(asciiBorder).
 		BorderForeground(modalBorder).
 		Foreground(modalFg).
 		Padding(0, 2).
-		Width(m.width - 2).
+		Width(content).
 		Render(strings.Join(lines, "\n"))
 }
 
-func (m composeModel) errLine() string {
-	if m.err == "" {
-		return ""
-	}
-	return modalErrorStyle.Render(m.err)
-}
+// composeTextBudget is the cells the box leaves for its border and its one-cell
+// horizontal padding, and composeBorderCells is the subset of those that the
+// box's own width must pay for before its content is laid out.
+const (
+	composeTextBudget  = 6
+	composeBorderCells = 2
+)

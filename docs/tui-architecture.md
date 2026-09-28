@@ -9,37 +9,37 @@ For the keys see [tui-keybindings.md](tui-keybindings.md). For how to extend it 
 A terminal at least `MinSplitWidth` columns wide shows two panes. The list is a fixed `ListW` cells and the thread takes the rest:
 
 ```
-flf · message · 2 rows · newest first
+flf - message - 2 rows - newest first
 ▸ Sep 23 15:04  eng           pr-review     ci.bot          3build passed eng › pr-review
-  Sep 23 09:12  eng           hello         bob              ship it      ────────────────────────────────────
+  Sep 23 09:12  eng           hello         bob              ship it      ----------------------------------------
                                                                             09:12 bob
                                                                                   ship it
                                                                             15:04 ci.bot
                                                                                   build passed
-↑↓ nav · g group · v sort · Enter read · Esc back · r reply · q quit
+j k move the cursor, or the arrows| Enter read the thread| Esc back to the list
  sent
 ```
 
 `Enter` gives the thread the whole terminal and drops the list:
 
 ```
-flf · message · 3 rows · newest first
+flf - message - 3 rows - newest first
 eng › pr-review
-────────────────────────────────────────────────────────────────────────────────
+-------------------------------------------------------------------------------------
   09:12 bob
         ship it
   11:00 alice
         looks great!
   15:04 ci.bot
         build passed
-↑↓ nav · g group · v sort · Enter read · Esc back · r reply · q quit
+j k move the cursor, or the arrows| Enter read the thread| Esc back to the list
  sent
 ```
 
 `Esc` puts the list back with the cursor where it was. Below `MinWidth` columns or `MinHeight` rows there is no layout to draw, so the whole screen is one line:
 
 ```
-flf needs 71 columns and 24 rows (got 60x24) — resize the terminal
+flf needs 71 columns and 24 rows (got 60x24) - resize the terminal
 ```
 
 and every key but `ctrl+c` is inert — including `q`, because a terminal too small for the list is a terminal the user has to leave by the key that always works.
@@ -51,6 +51,7 @@ internal/tui/
 ├── tui.go        Run(): daemon ensure, tea.Program, exit codes
 ├── model.go      model, Init, Update, handleKey, View, geometry, the clock
 ├── rows.go       the width constants, rowLine, renderRows, pad
+├── cells.go     the width policy: the widest reading of ambiguous width
 ├── thread.go     renderThread — the one thread renderer
 ├── compose.go    the one compose mode
 ├── api.go        ListRows, ListMessages, SendReply, get, readAPIError
@@ -62,8 +63,9 @@ internal/tui/
 | File | Responsibility |
 |------|----------------|
 | `tui.go` | `Run()` entry point, daemon ensure, `tea.Program` with the alt screen, exit codes (0 success, 1 client/local, 2 daemon or transport) |
-| `model.go` | The model, `Update`, `handleKey`, `View`, `bodyView`, the chrome lines, the split/stacked decision, the tick, and the fetch commands |
+| `model.go` | The model, `Update`, `handleKey`, `View`, `bodyView`, the chrome lines including `statusBand`, the split/stacked decision, the tick, and the fetch commands |
 | `rows.go` | Every width constant, the one row renderer, the empty-state placeholder, `formatTime`/`formatClock`, and `pad` |
+| `cells.go` | The width policy: `excessCells`, `pad`'s measurement, `truncateCells`, `wrapCells`, `cellSlice`, and `overlayCentered` |
 | `thread.go` | `renderThread` at any width, the per-message block, and `padLines` |
 | `compose.go` | The reply box: open, close, rune-indexed editing, the caret, the error line |
 | `api.go` | The three endpoints the TUI uses, plus `get`, `readAPIError`, and the strict decoder |
@@ -82,7 +84,7 @@ Dependencies are `internal/store` for the wire types, `internal/client` for daem
 | `detail` | The thread replaces the list instead of sitting beside it |
 | `rows` | The feed at the current granularity, already reversed if `reversed` |
 | `cursor` | Index into `rows`, carried across a refresh by `Row.ID` |
-| `scroll` | First visible row; `clamp` moves it only as far as the cursor needs |
+| `scroll` | First visible row; `clamp` keeps it inside `[0, len(rows)-listWindowH()]` and moves it only as far as the cursor needs |
 | `threadID` | The thread whose messages are loaded, or 0 for a channel row and for no row |
 | `thread` | Those messages |
 | `status` | The status band: errors, `sent`, and the two refusals |
@@ -108,7 +110,7 @@ Two invariants live in the fields rather than in a method:
 
 `Content` is the whole representative message and the row renderer takes its first line, because choosing a line is a rendering decision and doing it in SQL would put presentation in the query layer. `Count` is blank when it is 1, so message rows do not carry a column of `1`s and `rowLine` never has to know the granularity.
 
-`Row.ID` is the message, thread, or channel id by granularity, which is what makes cursor carry-by-id a two-line operation. A channel row has no thread, and that is the only place a row and a thread disagree: `syncThread` loads nothing, the pane says `no thread — press g`, and `Enter` or `r` on it says `no thread on this row — press g`.
+`Row.ID` is the message, thread, or channel id by granularity, which is what makes cursor carry-by-id a two-line operation. A channel row has no thread, and that is the only place a row and a thread disagree: `syncThread` loads nothing, the pane says `no thread - press g`, and `Enter` or `r` on it says `no thread on this row - press g`.
 
 `GET /v1/rows?g=<granularity>&limit=<n>` is the feed. The flat inbox route it replaced is gone, along with the message-joined row type it returned. The limit defaults to 200 and the store caps it at 500; the TUI asks for 200 on every fetch, so the list is the newest 200 rows and nothing is paged. An unknown or missing `g` is `400 BAD_ARGS` in the standard envelope. `flf inbox --limit N --json` asks for `g=message` and prints `[]Row`; it no longer carries a per-thread `seq`, because a row is no longer a message record. `flf message send --reply-to-seq` is unaffected — `seq` still comes from `/v1/threads/:id/messages`.
 
@@ -139,9 +141,62 @@ scroll window are both derived from it, and `clamp` sizes the window by
 `listWindowH` so the cursor can never be scrolled one row past the last row
 `renderRows` actually draws.
 
+**Every band is exactly the rows it budgeted, and that is load-bearing rather
+than cosmetic.** A view one row taller than the terminal does not scroll: a
+renderer cannot reach into a terminal's scrollback, so Bubble Tea drops the
+*top* line to fit, and the title band goes while the column header moves up
+into its row and the footer lands in the status band's row. The bands that
+grow — the footer and the list window — size themselves by counting, so they
+cannot. The status band is the one that has to be told: it is a single row by
+contract, and `model.statusBand` gets there by budgeting the note to the
+band's *content* width, which is `statusBlockW` less the style's horizontal
+padding, because lipgloss wraps at the content width. Budgeted to the block
+width instead, a note longer than the content width — every `DAEMON_DOWN` from
+the tick, which carries the URL it failed to reach — wrapped onto a second row
+and took the title band with it.
+
 `rowLine` emits the cursor, four `ColW` cells separated by `ColGap`, and a `CountW` count, then as much content as the remaining width holds, then padding. For an ASCII row it is exactly `w` cells wide, which is what lets a row sit beside a thread without either one shifting the other.
 
-The content column is bounded in cells, by `termtext.Truncate`. The four fixed columns are bounded in cells and then padded to `ColW` **cells** by `cell`, so a column holding a wide grapheme cannot render wider than its cell. Padding measured in runes is what used to break it: `fmt`'s `%*s` counts runes, a wide grapheme is worth two cells, and a name the rules would never accept — typed straight into the database — overran the column and shifted every column after it, measured at 79 cells against `w = 71`.
+The content column is bounded in cells, by `termtext.Truncate`. The four fixed columns are bounded in cells and then padded to `ColW` **cells** by `cell`, so a column holding a wide grapheme cannot render wider than its cell.
+
+**Every budget is measured for the widest reading of East Asian Ambiguous
+width.** The app cannot ask the terminal which reading it uses — it is a user
+setting, not a terminfo capability — and a line the app measures at the
+terminal's width and the terminal measures at width+1 wraps. A wrapped line
+makes the emulator consume a row the renderer does not know about, so every
+line after it is written one row off: the chrome is re-rendered correctly and
+lands in the wrong place, which is what a "redraw issue" looks like from
+outside.
+
+The text is untrusted, so the characters that do it arrive in **message
+content**, not in the chrome: curly quotes, em dashes, ellipses, arrows,
+middots, degrees, primes and multiplication signs are all Ambiguous and all
+ordinary in prose. Auditing the app's own glyphs is therefore not enough — it
+was the first attempt, and it fixed fourteen glyphs and left the bug.
+
+So `cells.go` owns the policy, and it is the widest reading:
+
+| Function | What it does |
+|---|---|
+| `excessCells` | how many more cells a string costs wide than narrow, measured over the string so a grapheme cluster is charged once |
+| `pad` | right-fills to `w` on the wide reading |
+| `truncateCells` | cuts to `w` on the wide reading, keeping `ansi.Truncate`'s ANSI and grapheme handling |
+| `wrapCells` | wraps at `w` minus the block's whole excess, an upper bound on any one line's |
+| `cellSlice` | the cells of a line in a range, taking only graphemes that fit entirely inside it |
+| `overlayCentered` | the app's own composition, because `screen.Splice` pads a replacement to the width its caller asked for |
+
+The cost is one cell of budget per ambiguous character on the line, so a row of
+ASCII is unaffected and a row with three curly quotes shows three fewer
+characters. `TestNoLineIsWiderThanTheTerminalUnderEitherAmbiguousWidth` is the
+invariant, measured independently of the app's own width layer.
+
+**The chrome is ASCII anyway** — `-` for a rule, `|` for the pane and footer
+dividers, `+` for the reply box's corners, `...` for a truncation, `-` for a
+separator — and `▸` and `›` are the two non-ASCII glyphs left, both Narrow in
+UAX #11. That is a quality decision, not the safety one:
+`TestNoDrawnGlyphIsEastAsianAmbiguous` derives the ambiguous set from the
+Unicode table and audits the app's own glyphs, which keeps the chrome honest
+about what it is spending.
 
 **There is one column width, and there is no drop ladder.** Every text column is `MaxSlug` or `MaxName` wide, and both are 12, so `ColW` is a single constant and `rowPrefixW` is arithmetic on it. Before, the widths were per-column (time 12, channel 12, thread 16, name 12) and narrow terminals shed columns one at a time — `NAME` → `CHANNEL` → `THREAD` → `TIME` — until the content column had room, which made the *meaning* of a row depend on the terminal's width and needed a rule for what each column looks like at every step of the ladder. Now a row is either drawn whole or the terminal is too narrow to draw it at all, which is `tooNarrow()` and a single line of text.
 
@@ -169,12 +224,37 @@ View()
 
 `renderRows` draws the column header, a rule, and then the scrolling window. The header is **outside** the window: the window scrolls under it, which is the only thing that makes a scrolled list readable, and it is why `clamp` scrolls by `listWindowH` rather than by the whole body. The content column carries no label — the count sits in its last three cells with no gap before the content, so a label there would read as one word, and the text column is the one thing on a row that needs no explaining.
 
+### The window cannot scroll off the bottom
+
+`clamp` bounds `scroll` at both ends: not before the first row, and never past
+`len(rows) - listWindowH`, the last full window. There is no pagination and no
+page field — a page size, a page number, and keys to move between them are
+three more pieces of state for a bound one line of arithmetic already carries,
+and the list has no notion of a page to be on.
+
+Stating the lower bound is what keeps the cursor drawn, and stating the upper
+one is what keeps the window full. The upper bound used to be a *consequence*
+of the offset always being derived from the cursor with the same height it was
+derived for, and `listWindowH` comes from the terminal — so a resize moved the
+last full page and left the offset behind it:
+
+| After | Before this bound | After this bound |
+|---|---|---|
+| 100×30 → 100×50, 49 rows | 24 rows drawn, 20 blank below them, and the 25 rows above unreachable by scrolling | 44 rows drawn, none blank |
+| 100×30 → 100×25, 49 rows | the cursor at row 48 below the window, never drawn | the window moves, the cursor is drawn |
+
+`tea.WindowSizeMsg` is the one other place that calls `clamp`, because it is
+the only place `listWindowH` changes without `j`, `k` or a response doing it.
+The tick's `applyRows` clamps too, so the two states above lasted at most one
+tick — but "at most two seconds of a half-empty list" is the state the user
+sees, and a resize is exactly when a user is looking at the list.
+
 | Line | Content |
 |------|---------|
 | `titleLine` | `flf · <granularity> · <n> rows · newest first`, or `oldest first` under `v` |
 | list header | `TIME CHANNEL THREAD NAME CNT` in the same cells `rowLine` draws them in, above a `────` rule |
 | footer | `↑↓ j k move the cursor · Enter read the thread · Esc back to the list · g group the rows · v reverse the order · r reply · q quit · ctrl+c quit`, reflowed into as many aligned columns as the width holds. There is no `?` overlay and no context-sensitive text. |
-| status | `error: <CODE>: <message>`, `sent`, `no row selected`, `no thread on this row — press g`, or an appended `cannot reply — the thread is not loaded` |
+| status | `error: <CODE>: <message>`, `sent`, `no row selected`, `no thread on this row - press g`, or an appended `cannot reply - the thread is not loaded`. Cut to the band's content width, never wrapped: the band is one row, and a second one costs the title band |
 
 ### The footer is items, not a line
 
@@ -199,7 +279,7 @@ the wrong thing; an overwide width falls back to one item per row.
 
 The body column is exactly what is left after the indent, with no floor. A floor wider than that space wraps at one width and truncates at a narrower one, which silently drops words: with an 8-cell floor, `a b c d e f g h` wrapped at 8 and was truncated at 4, and rendered as `a b` / `e f` with `c d` and `g h` gone and nothing to show for it. Below the indent the body is blank, which is the one width at which content cannot be shown at all.
 
-A thread longer than the pane is cut from the top, so the newest messages are the ones on screen. An empty pane says `no thread — press g`, truncated to the pane before it is padded, because `pad` only right-fills and a 19-cell placeholder would overrun a narrower pane and break the invariant that no line `renderThread` emits exceeds the width it was given.
+A thread longer than the pane is cut from the top, so the newest messages are the ones on screen. An empty pane says `no thread - press g`, truncated to the pane before it is padded, because `pad` only right-fills and a 19-cell placeholder would overrun a narrower pane and break the invariant that no line `renderThread` emits exceeds the width it was given.
 
 ### Compose
 
@@ -237,7 +317,7 @@ Message content, author names, channel and thread names, and the daemon's error 
 - `termtext.SanitizeLine` for a single line, `termtext.SanitizeBlock` for a message body. Both remove every terminal escape sequence — not just the SGR runs a regexp for — plus Unicode control and format characters, and replace invalid UTF-8. `SanitizeLine` also flattens tabs and newlines to one space.
 - `termtext.Truncate` then bounds the cell width, and `pad` right-fills to the width the line was promised. A styled string's length in bytes is not its width in cells, so `termtext.DisplayWidth` is how anything here is measured.
 
-Sanitize first, then measure: the width of a column must be decided from the text that will be drawn in it, not from the text that arrived. `formatTime` is the exception and it is deliberate — an unparseable timestamp is drawn as-is through `cell`, so a hand-edited database cannot silently shift a row.
+Sanitize first, then measure: the width of a column must be decided from the text that will be drawn in it, not from the text that arrived. The measurement itself is the widest reading of ambiguous width, for the reason above. `formatTime` is the exception and it is deliberate — an unparseable timestamp is drawn as-is through `cell`, so a hand-edited database cannot silently shift a row.
 
 `screen` and `termtext` are copied verbatim, without upstream tests, from `go.kenn.io/kit/tui/` (Apache-2.0, Copyright 2026 Kenn Software LLC) into `internal/tui/`, each directory carrying the `NOTICE` that says so and pins the commit. They are a fork rather than a module requirement for two reasons: `kit`'s `go.mod` declares `go 1.27.0` and this module is on 1.26, and the module graph behind `kit` is far larger than these two packages. Keeping the copies verbatim means they can be diffed against upstream. Each has one smoke test, so the fork is exercised rather than assumed.
 
@@ -327,8 +407,11 @@ sentMsg ──▶ status, fetchRows + fetchThread
 
 | Package | Covers |
 |---|---|
-| `tui` | `rowLine` at 71, 80, and 200 columns; a 40-byte channel and a 40-byte author truncated into a 12-cell column without breaking the row width; only the content's first line is drawn; sanitizing the name, the content, the thread header, the author, and the status; `renderThread` at every width, the empty state, the tail cut, the narrow pane, an overlong author; `g` cycles and resets; `v` reverses and keeps the cursor; `Enter`/`Esc` in both geometries; the view is never wider than the terminal and is exactly the terminal's height; `r` on a channel row; a refused send keeps the reason it was refused; the footer names every bound key, reflows to the greatest column count that fits, never truncates an item, and draws the gap it budgets; the chrome is the title, the footer, and the status, and it grows and shrinks with the footer; the list names its columns, the header holds its row while the list scrolls, and the cursor is never scrolled past the last drawn row; a split separates its panes with a divider; a joined emoji sequence reaches the preview pane intact; `l p s n C e f c` are not bound; a stale rows and a stale thread response are both dropped; a failed thread fetch clears the pane and retries |
-| `tui` (footer, chrome, header) | See the rows above |
+| `tui` | `rowLine` at 71, 80, and 200 columns; a 40-byte channel and a 40-byte author truncated into a 12-cell column without breaking the row width; only the content's first line is drawn; sanitizing the name, the content, the thread header, the author, and the status; `renderThread` at every width, the empty state, the tail cut, the narrow pane, an overlong author; `g` cycles and resets; `v` reverses and keeps the cursor; `Enter`/`Esc` in both geometries; the view is never wider than the terminal and is exactly the terminal's height; `r` on a channel row; a refused send keeps the reason it was refused; the footer names every bound key, reflows to the greatest column count that fits, never truncates an item, and draws the gap it budgets; the chrome is the title, the footer, and the status, and it grows and shrinks with the footer; the list names its columns, the header holds its row while the list scrolls, and the cursor is never scrolled past the last drawn row; `clamp` never parks the window past the last full page and a resize re-clamps it, so the cursor is always drawn and the window is always full; a split separates its panes with a divider; a joined emoji sequence reaches the preview pane intact; `l p s n C e f c` are not bound; a stale rows and a stale thread response are both dropped; a failed thread fetch clears the pane and retries |
+| `tui` (footer, chrome, header) | See the rows above; the status band is one row at every width either side of the content-width boundary, and a note too long to show is cut to an ellipsis rather than wrapped |
+| `tui` (scroll window) | `clamp` bounds `scroll` at both ends of the list at four heights and five offsets; a resize across eight sizes keeps the cursor inside the window, the window at or before the last full page, and every drawable row filled |
+| `tui` (glyphs) | No drawn glyph is East Asian Ambiguous, audited across every view the TUI can draw — the stacked list, the split panes, the fullscreen thread, the reply box, both empty states, a status note, and the too-narrow notice |
+| `tui` (width) | No line is wider than the terminal under **either** reading of ambiguous width, with message content full of curly quotes, em dashes, ellipses, arrows, middots, degrees and primes — the invariant that keeps a wrapped line from costing the frame a row |
 | `tui` (clock) | A tick arms its successor; four rounds produce four ticks, not more; a clock round leaves exactly one tick in flight and `g` adds none; a rows error arms no tick and does not starve the clock; a tick keeps the cursor on the same row; a tick shows an appended reply with no keypress; a refresh re-reads the thread already on screen; a late thread error does not blank the thread on screen |
 | `tui` (api) | `ListRows` decodes the feed, defaults the limit, and rejects a `null` body; `ListMessages`; the error envelope surfaces; an envelope-free 4xx is `DAEMON_ERROR`; `SendReply` posts the text with no parent, and a missing sequence is `DELIVERY_UNKNOWN`; a pre-dispatch connection failure is `DAEMON_DOWN`; a dispatched timeout is `DELIVERY_UNKNOWN`; a context cancellation returns promptly; the strict decoder rejects a second value, a `null`, and trailing bytes |
 | `termtext` | The format characters that join one grapheme into one glyph — ZWJ, ZWNJ, and the emoji tag range — survive sanitizing unchanged and measure zero; the bidi controls, the Trojan Source vector the `Cf` strip exists to stop, still do not; truncation does not cut a joined sequence in half |
@@ -348,13 +431,16 @@ sentMsg ──▶ status, fetchRows + fetchThread
 8. **The clock refetches the thread; the cursor does not.** `refetchThread` and `syncThread` are different calls because the reasons are different, and sharing one would have kept the pane frozen exactly when it mattered.
 9. **The cursor is carried by `Row.ID`, and `g` drops the rows entirely.** Messages prepend, so a refreshed feed still holds the row the cursor was on; a different granularity is a different list, where a message row has no counterpart and the id namespaces overlap, so `g` clears `m.rows` rather than leaving an id for the next response to match.
 10. **Reply is the only compose mode.** The TUI creates nothing, so there is one box, and it appends to the thread without setting `parent_id`.
-11. **A channel row has no thread, and says so.** `r` and `Enter` refuse with `no thread on this row — press g` rather than opening a pane or a box with nothing behind them. It is the one place a row and a thread disagree, so it is one `if`.
+11. **A channel row has no thread, and says so.** `r` and `Enter` refuse with `no thread on this row - press g` rather than opening a pane or a box with nothing behind them. It is the one place a row and a thread disagree, so it is one `if`.
 12. **Names are bounded to the column that draws them.** Two rules in `internal/names`, enforced in Go with no schema change, so a rendered author is never truncated into a different person.
 13. **The vendored primitives measure in cells.** A styled string's byte length is not its cell width; sanitize, then truncate, then pad.
 14. **The status band joins, never overwrites.** A note that explains an action must not erase the reason the action was refused.
 15. **The footer is the keymap, and it reflows.** No `?` overlay — that is one more mode to render and one more key to bind. What replaced the fixed hint line is not a longer fixed line but items that reflow into as many columns as the width holds, so the 71-column floor bounds the footer's *height* rather than how much of the keymap can be said out loud. A key is either named with what it does or it is a key the user has to guess at.
 16. **A column header, and a divider between the panes.** Both exist for the same reason: the list is four fixed 12-cell columns and two panes share a row. The header is drawn *above* the scrolling window rather than inside it, and `clamp` sizes the window by `listHeaderH` so the cursor is never scrolled past the last drawn row.
 17. **No pane for a run, no create flow, no reactions, no filter.** A row is a group, so the trigger-message mapping the pane relied on is gone; creating from a screen would put an agent-reachable create path on a route that is human-only by design; and a filter needs a filter model and a sort order, which `g` and `v` between them do not want to have.
+18. **The scroll window is bounded by the list, not paginated.** `clamp` states `scroll ∈ [0, len(rows)-listWindowH]` and a resize re-clamps. A page size, a page number, and keys to move between them would be three more fields and a second scroll concept, for a bound one line of arithmetic already carries — and the list has no page to be on.
+19. **The chrome is ASCII, because every line is drawn at exactly the terminal's width.** The view has no horizontal slack, so a glyph the app and the emulator measure differently wraps the row and costs the frame a row. East Asian Ambiguous glyphs are exactly the glyphs they can measure differently, and which width a terminal uses is a user setting rather than something to negotiate, so the app declines to draw them.
+20. **Every budget is the widest reading of East Asian Ambiguous width, and the chrome is ASCII besides.** The view has no horizontal slack, so a glyph the app and the emulator measure differently wraps the row and costs the frame a row. Ambiguous width is a user setting rather than something to negotiate, so the app measures for the widest case and every line fits every terminal. The characters that trigger it are in untrusted message content, not in the chrome, so the policy lives at the measurement layer rather than in a list of glyphs to avoid.
 
 ## Deferred
 

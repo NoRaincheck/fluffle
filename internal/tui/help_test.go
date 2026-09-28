@@ -67,9 +67,14 @@ func TestHelpReflowKeepsEveryItemOnceInOrder(t *testing.T) {
 // Every bound key has to be named, or it is a key the user has to guess at. The
 // footer is now several rows, so completeness is no longer bounded by the
 // narrowest terminal and this list is the whole keymap.
+//
+// The arrow keys are looked for as the word "arrows" rather than as U+2191 and
+// U+2193: they are bound and named, but naming them with the glyphs would put
+// two East Asian Ambiguous characters in every frame. The invariant is that the
+// key is named, not that a particular rune spells it.
 func TestHelpNamesEveryBoundKey(t *testing.T) {
 	footer := termtext.StripANSI(renderHelp(helpItems(), 200))
-	for _, want := range []string{"↑↓", "Enter", "Esc", "g", "v", "r", "q", "ctrl+c"} {
+	for _, want := range []string{"arrows", "Enter", "Esc", "g", "v", "r", "q", "ctrl+c"} {
 		if !strings.Contains(footer, want) {
 			t.Errorf("the footer does not name %q:\n%s", want, footer)
 		}
