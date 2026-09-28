@@ -15,7 +15,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/NoRaincheck/fluffle/internal/store"
-	"github.com/NoRaincheck/fluffle/internal/tui/termtext"
 )
 
 func TestGCyclesGranularity(t *testing.T) {
@@ -450,10 +449,10 @@ func TestTheTickKeepsTheCursorOnTheSameRow(t *testing.T) {
 	if got := mm.rows[mm.cursor].ID; got != 21 {
 		t.Errorf("cursor = %d on row %d, want the row the user was on", mm.cursor, got)
 	}
-	if mm.scroll != 1 {
-		t.Errorf("scroll = %d, want 1: the prepended row pushed the cursor to the last visible line", mm.scroll)
+	visible := mm.listWindowH()
+	if want := mm.cursor - visible + 1; mm.scroll != want {
+		t.Errorf("scroll = %d, want %d: the prepended row pushed the cursor to the last visible line", mm.scroll, want)
 	}
-	visible := max(mm.height-chromeH, 1)
 	if mm.cursor < mm.scroll || mm.cursor >= mm.scroll+visible {
 		t.Errorf("cursor %d is outside the window [%d,%d): a refetch must not lose the user's place",
 			mm.cursor, mm.scroll, mm.scroll+visible)
@@ -572,21 +571,6 @@ func TestALateThreadErrorDoesNotBlankTheThreadOnScreen(t *testing.T) {
 	}
 	if mm.threadID != 5 {
 		t.Errorf("threadID = %d, want 5: the thread on screen is still loaded", mm.threadID)
-	}
-}
-
-// Every key the TUI answers has to be on the line, or it is a key the user has
-// to guess at. The line is one row of a 71-column floor, so completeness is
-// bounded by the narrowest terminal the TUI admits to supporting.
-func TestTheHintNamesEveryBoundKey(t *testing.T) {
-	hint := plain(hintLine())
-	for _, want := range []string{"↑↓", "g group", "v sort", "Enter read", "Esc back", "r reply", "q quit"} {
-		if !strings.Contains(hint, want) {
-			t.Errorf("the hint does not name %q: %q", want, hint)
-		}
-	}
-	if n := termtext.DisplayWidth(hintLine()); n > MinWidth {
-		t.Errorf("the hint is %d cells and the narrowest terminal is %d: %q", n, MinWidth, hint)
 	}
 }
 

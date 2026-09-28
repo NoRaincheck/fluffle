@@ -33,7 +33,8 @@ var (
 	modalHintStyle    = lipgloss.NewStyle().Foreground(dim)
 	modalErrorStyle   = lipgloss.NewStyle().Foreground(errColor)
 	statusStyle       = lipgloss.NewStyle().Background(statusBg).Foreground(accent).Padding(0, 1)
-	hintKeyStyle      = lipgloss.NewStyle().Foreground(accent).Bold(true)
+	helpKeyStyle      = lipgloss.NewStyle().Foreground(accent).Bold(true)
+	helpDescStyle     = lipgloss.NewStyle().Foreground(dim)
 )
 
 // nameStyle colours an author by author_type. This is the only colour rule

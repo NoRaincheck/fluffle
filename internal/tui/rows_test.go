@@ -249,12 +249,14 @@ func TestRenderRowsWindowFollowsScroll(t *testing.T) {
 
 func TestRenderRowsMarksOnlyTheCursorRow(t *testing.T) {
 	rows := []store.Row{{ID: 1, Content: "a"}, {ID: 2, Content: "b"}}
-	got := plain(renderRows(80, 2, rows, 1, 0))
-	if n := strings.Count(got, "▸"); n != 1 {
-		t.Errorf("%d cursor markers rendered, want 1: %q", n, got)
+	// The header and its rule are pinned above the window, so a body of h rows
+	// holds h-listHeaderH rows of list.
+	body := plainLines(renderRows(80, listHeaderH+2, rows, 1, 0))[listHeaderH:]
+	if n := strings.Count(strings.Join(body, "\n"), "▸"); n != 1 {
+		t.Errorf("%d cursor markers rendered, want 1: %q", n, body)
 	}
-	if !strings.HasPrefix(got, "  ") {
-		t.Errorf("the unselected row must not carry the cursor: %q", got)
+	if !strings.HasPrefix(body[0], "  ") {
+		t.Errorf("the unselected row must not carry the cursor: %q", body[0])
 	}
 }
 
@@ -382,7 +384,7 @@ func TestDownKeyKeepsTheCursorVisible(t *testing.T) {
 	if m.cursor != 40 {
 		t.Fatalf("cursor = %d, want 40", m.cursor)
 	}
-	visible := max(m.height-chromeH, 1)
+	visible := max(m.height-m.chromeH(), 1)
 	if m.cursor < m.scroll || m.cursor >= m.scroll+visible {
 		t.Fatalf("cursor %d is outside the window [%d,%d)", m.cursor, m.scroll, m.scroll+visible)
 	}
@@ -419,7 +421,7 @@ func TestClampKeepsTheCursorInsideTheVisibleWindow(t *testing.T) {
 	if m.cursor != 99 {
 		t.Fatalf("cursor = %d, want 99", m.cursor)
 	}
-	if want := 99 - (13 - chromeH) + 1; m.scroll != want {
+	if want := 99 - m.listWindowH() + 1; m.scroll != want {
 		t.Fatalf("scroll = %d, want %d so the cursor is the last visible row", m.scroll, want)
 	}
 }
