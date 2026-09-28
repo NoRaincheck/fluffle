@@ -123,14 +123,25 @@ rowPrefixW  = CursorW + ColW + ColGap + ColW + ColGap + ColW + ColGap + ColW + C
 MinContentW = 10
 MinWidth    = rowPrefixW + MinContentW   // 71
 MinHeight   = 24
-chromeH     = 3   // title, hint, status
 MinSplitWidth = 110
 ListW         = 74
+PaneDividerW  = 1
+titleH        = 1   // the title band
+statusH       = 1   // the status band
+listHeaderH   = 2   // the column labels and their rule
 ```
+
+The chrome is not a constant. It is `titleH + footerH + statusH`, and `footerH`
+is however many rows the footer reflowed to at the current terminal width
+(`model.chromeH`). A 71-column terminal gets a 3-row footer and 19 rows of
+body; a 200-column one gets a 1-row footer and 21. The body and the list's
+scroll window are both derived from it, and `clamp` sizes the window by
+`listWindowH` so the cursor can never be scrolled one row past the last row
+`renderRows` actually draws.
 
 `rowLine` emits the cursor, four `ColW` cells separated by `ColGap`, and a `CountW` count, then as much content as the remaining width holds, then padding. For an ASCII row it is exactly `w` cells wide, which is what lets a row sit beside a thread without either one shifting the other.
 
-The content column is bounded in cells, by `termtext.Truncate`. The four fixed columns are bounded in cells too and then padded to `ColW` **runes** by `cell`'s `%-*s`, so a column holding a wide grapheme renders wider than `ColW` cells and the row overruns `w` — measured: 79 cells at `w = 71`. Nothing the store writes can do that, because both name rules are ASCII and a parsed timestamp formats as ASCII, so the invariant rests on `internal/names` rather than on the renderer. A hand-edited database can break it, and `pad` will not notice, because `pad` only right-fills.
+The content column is bounded in cells, by `termtext.Truncate`. The four fixed columns are bounded in cells and then padded to `ColW` **cells** by `cell`, so a column holding a wide grapheme cannot render wider than its cell. Padding measured in runes is what used to break it: `fmt`'s `%*s` counts runes, a wide grapheme is worth two cells, and a name the rules would never accept — typed straight into the database — overran the column and shifted every column after it, measured at 79 cells against `w = 71`.
 
 **There is one column width, and there is no drop ladder.** Every text column is `MaxSlug` or `MaxName` wide, and both are 12, so `ColW` is a single constant and `rowPrefixW` is arithmetic on it. Before, the widths were per-column (time 12, channel 12, thread 16, name 12) and narrow terminals shed columns one at a time — `NAME` → `CHANNEL` → `THREAD` → `TIME` — until the content column had room, which made the *meaning* of a row depend on the terminal's width and needed a rule for what each column looks like at every step of the ladder. Now a row is either drawn whole or the terminal is too narrow to draw it at all, which is `tooNarrow()` and a single line of text.
 
@@ -138,7 +149,7 @@ The content column is bounded in cells, by `termtext.Truncate`. The four fixed c
 
 The count is right-aligned in its three cells against the content, which is why it is drawn `3build passed` with no gap and blank at 1. The columns are fixed, so the content starts at the same cell on every row; a gap would have to come out of the content width.
 
-`split()` is `width >= MinSplitWidth`, and nothing else. At or above 110 the thread takes `width - ListW` cells beside a list of exactly 74; below it the list takes the whole width and `Enter` shows the thread in its place. `paneWidth()` is the only place that arithmetic lives, so the pane beside the list and the pane that fills the terminal cannot drift apart, and `Enter` and `Esc` mean the same thing in both geometries.
+`split()` is `width >= MinSplitWidth`, and nothing else. At or above 110 the thread takes `width - ListW - PaneDividerW` cells beside a list of exactly 74, with one cell between them; below it the list takes the whole width and `Enter` shows the thread in its place. The divider is there because without it a list row's truncated content cell runs straight into the thread's first line, and the only cue that they are two panes is that one of them stopped mid-word. `paneWidth()` is the only place that arithmetic lives, so the pane beside the list and the pane that fills the terminal cannot drift apart, and `Enter` and `Esc` mean the same thing in both geometries.
 
 ## Rendering
 
@@ -152,15 +163,33 @@ View()
        └─ stacked ──▶ renderRows(width, h, …)                              // list only
 ```
 
-`bodyView` is `titleLine`, the body, `hintLine`, and the status line: `chromeH` rows of chrome around exactly the rest, and both renderers pad to exactly `h` rows so the three bands keep their places.
+`bodyView` is `titleLine`, the body, the footer, and the status line: `chromeH` rows of chrome around exactly the rest, and both renderers pad to exactly `h` rows so the bands keep their places.
 
-`sideBySide` joins the two blocks row by row, one list row to one thread row. Joining them as blocks would stack them, which costs a row and is not a split.
+`sideBySide` joins the two blocks row by row, one list row to one thread row, with the divider column between them. Joining them as blocks would stack them, which costs a row and is not a split. Because both panes draw two header rows before their content — the list its column labels and a rule, the thread its title and a rule — the two stay row-for-row aligned.
+
+`renderRows` draws the column header, a rule, and then the scrolling window. The header is **outside** the window: the window scrolls under it, which is the only thing that makes a scrolled list readable, and it is why `clamp` scrolls by `listWindowH` rather than by the whole body. The content column carries no label — the count sits in its last three cells with no gap before the content, so a label there would read as one word, and the text column is the one thing on a row that needs no explaining.
 
 | Line | Content |
 |------|---------|
 | `titleLine` | `flf · <granularity> · <n> rows · newest first`, or `oldest first` under `v` |
-| `hintLine` | `↑↓ nav · g group · v sort · Enter read · Esc back · r reply · q quit` — 68 cells, and it has to fit the 71-column floor, which is what bounds how much of the keymap can be said out loud. `q` is on it; `ctrl+c` is left to muscle memory. There is no `?` overlay and no context-sensitive text. |
+| list header | `TIME CHANNEL THREAD NAME CNT` in the same cells `rowLine` draws them in, above a `────` rule |
+| footer | `↑↓ j k move the cursor · Enter read the thread · Esc back to the list · g group the rows · v reverse the order · r reply · q quit · ctrl+c quit`, reflowed into as many aligned columns as the width holds. There is no `?` overlay and no context-sensitive text. |
 | status | `error: <CODE>: <message>`, `sent`, `no row selected`, `no thread on this row — press g`, or an appended `cannot reply — the thread is not loaded` |
+
+### The footer is items, not a line
+
+`helpItems` is the whole keymap, each key with a description. `reflowHelp` lays
+them out in the greatest column count that fits the terminal width, chunking in
+keymap order so the footer reads the way `handleKey` does, and `renderHelp`
+draws them on one aligned grid with a `▕` divider between columns.
+
+It is items rather than one line because a run-on line bounded by the 71-column
+floor can only afford two-letter abbreviations — `g group`, `v sort` — which is
+the information the reader already has and none of what they do not. Reflowing
+moves the bound: a narrow terminal pays in **rows** and every wider one buys
+**columns** back, and a key's description is the same at every width. An item is
+never truncated to make a column fit, because a shortcut cut in half teaches
+the wrong thing; an overwide width falls back to one item per row.
 
 `appendStatus` joins rather than overwrites: a later note explains an action, and replacing the reason with it loses why the action was refused.
 
@@ -298,10 +327,12 @@ sentMsg ──▶ status, fetchRows + fetchThread
 
 | Package | Covers |
 |---|---|
-| `tui` | `rowLine` at 71, 80, and 200 columns; a 40-byte channel and a 40-byte author truncated into a 12-cell column without breaking the row width; only the content's first line is drawn; sanitizing the name, the content, the thread header, the author, and the status; `renderThread` at every width, the empty state, the tail cut, the narrow pane, an overlong author; `g` cycles and resets; `v` reverses and keeps the cursor; `Enter`/`Esc` in both geometries; the view is never wider than the terminal and is exactly `MinHeight` rows; `r` on a channel row; a refused send keeps the reason it was refused; the hint names every bound key and fits the floor; `l p s n C e f c` are not bound; a stale rows and a stale thread response are both dropped; a failed thread fetch clears the pane and retries |
+| `tui` | `rowLine` at 71, 80, and 200 columns; a 40-byte channel and a 40-byte author truncated into a 12-cell column without breaking the row width; only the content's first line is drawn; sanitizing the name, the content, the thread header, the author, and the status; `renderThread` at every width, the empty state, the tail cut, the narrow pane, an overlong author; `g` cycles and resets; `v` reverses and keeps the cursor; `Enter`/`Esc` in both geometries; the view is never wider than the terminal and is exactly the terminal's height; `r` on a channel row; a refused send keeps the reason it was refused; the footer names every bound key, reflows to the greatest column count that fits, never truncates an item, and draws the gap it budgets; the chrome is the title, the footer, and the status, and it grows and shrinks with the footer; the list names its columns, the header holds its row while the list scrolls, and the cursor is never scrolled past the last drawn row; a split separates its panes with a divider; a joined emoji sequence reaches the preview pane intact; `l p s n C e f c` are not bound; a stale rows and a stale thread response are both dropped; a failed thread fetch clears the pane and retries |
+| `tui` (footer, chrome, header) | See the rows above |
 | `tui` (clock) | A tick arms its successor; four rounds produce four ticks, not more; a clock round leaves exactly one tick in flight and `g` adds none; a rows error arms no tick and does not starve the clock; a tick keeps the cursor on the same row; a tick shows an appended reply with no keypress; a refresh re-reads the thread already on screen; a late thread error does not blank the thread on screen |
 | `tui` (api) | `ListRows` decodes the feed, defaults the limit, and rejects a `null` body; `ListMessages`; the error envelope surfaces; an envelope-free 4xx is `DAEMON_ERROR`; `SendReply` posts the text with no parent, and a missing sequence is `DELIVERY_UNKNOWN`; a pre-dispatch connection failure is `DAEMON_DOWN`; a dispatched timeout is `DELIVERY_UNKNOWN`; a context cancellation returns promptly; the strict decoder rejects a second value, a `null`, and trailing bytes |
-| `screen`, `termtext` | One smoke test each, so the fork is exercised rather than assumed |
+| `termtext` | The format characters that join one grapheme into one glyph — ZWJ, ZWNJ, and the emoji tag range — survive sanitizing unchanged and measure zero; the bidi controls, the Trojan Source vector the `Cf` strip exists to stop, still do not; truncation does not cut a joined sequence in half |
+| `screen` | One smoke test, so the fork is exercised rather than assumed |
 | `store` | `ListRows` per granularity: counts, newest-first order, original-post content, a channel row carrying no thread, and an unknown granularity |
 | `apiserver` | `/v1/rows` per `g`, `400` on a bad `g`, `500` on a store failure, and an empty result as `[]` rather than `null` |
 
@@ -321,8 +352,9 @@ sentMsg ──▶ status, fetchRows + fetchThread
 12. **Names are bounded to the column that draws them.** Two rules in `internal/names`, enforced in Go with no schema change, so a rendered author is never truncated into a different person.
 13. **The vendored primitives measure in cells.** A styled string's byte length is not its cell width; sanitize, then truncate, then pad.
 14. **The status band joins, never overwrites.** A note that explains an action must not erase the reason the action was refused.
-15. **One fixed hint line.** A `?` overlay is one more mode to render and one more key to bind; the floor is 71 columns, which bounds what can be said out loud anyway.
-16. **No pane for a run, no create flow, no reactions, no filter.** A row is a group, so the trigger-message mapping the pane relied on is gone; creating from a screen would put an agent-reachable create path on a route that is human-only by design; and a filter needs a filter model and a sort order, which `g` and `v` between them do not want to have.
+15. **The footer is the keymap, and it reflows.** No `?` overlay — that is one more mode to render and one more key to bind. What replaced the fixed hint line is not a longer fixed line but items that reflow into as many columns as the width holds, so the 71-column floor bounds the footer's *height* rather than how much of the keymap can be said out loud. A key is either named with what it does or it is a key the user has to guess at.
+16. **A column header, and a divider between the panes.** Both exist for the same reason: the list is four fixed 12-cell columns and two panes share a row. The header is drawn *above* the scrolling window rather than inside it, and `clamp` sizes the window by `listHeaderH` so the cursor is never scrolled past the last drawn row.
+17. **No pane for a run, no create flow, no reactions, no filter.** A row is a group, so the trigger-message mapping the pane relied on is gone; creating from a screen would put an agent-reachable create path on a route that is human-only by design; and a filter needs a filter model and a sort order, which `g` and `v` between them do not want to have.
 
 ## Deferred
 

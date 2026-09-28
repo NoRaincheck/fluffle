@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -352,26 +353,30 @@ func TestSplitPutsTheThreadBesideTheList(t *testing.T) {
 	m.width, m.height = 200, 40
 	m.rows = []store.Row{testRow()}
 	m.thread = loneThread()
-	if got, want := m.paneWidth(), m.width-ListW; got != want {
+	if got, want := m.paneWidth(), m.width-ListW-PaneDividerW; got != want {
 		t.Fatalf("a split thread pane is %d cells, want %d", got, want)
 	}
 	rows := strings.Split(m.View(), "\n")
-	body := rows[1 : 1+m.height-chromeH]
-	if len(body) != m.height-chromeH {
-		t.Fatalf("a split body is %d rows, want %d", len(body), m.height-chromeH)
+	body := rows[1 : 1+m.height-m.chromeH()]
+	if len(body) != m.height-m.chromeH() {
+		t.Fatalf("a split body is %d rows, want %d", len(body), m.height-m.chromeH())
 	}
 	for i, line := range body {
 		if got := termtext.DisplayWidth(line); got != m.width {
 			t.Fatalf("body row %d is %d cells, want the %d-cell terminal", i, got, m.width)
 		}
 	}
-	// The first body row shares the list with the thread's title and its rule,
-	// so it must carry both panes. The message itself is further down.
-	first := plain(body[0])
-	for _, want := range []string{"build passed", "eng › pr-review"} {
-		if !strings.Contains(first, want) {
-			t.Errorf("a split body row must carry both panes, missing %q: %q", want, first)
+	// The panes stay row-for-row aligned: the list's pinned header shares the
+	// first body row with the thread's title, and the list's first message sits
+	// just under its own header.
+	top := plain(body[0])
+	for _, want := range []string{"CHANNEL", "eng › pr-review"} {
+		if !strings.Contains(top, want) {
+			t.Errorf("the top body row must carry the list header and the thread title, missing %q: %q", want, top)
 		}
+	}
+	if got := plain(body[listHeaderH]); !strings.Contains(got, "build passed") {
+		t.Errorf("the first list message must sit below its header: %q", got)
 	}
 	if got := plain(strings.Join(body, "\n")); !strings.Contains(got, "only in the thread") {
 		t.Errorf("the thread pane lost its message:\n%s", got)
@@ -485,5 +490,42 @@ func TestThreadColoursAnAuthorByItsAuthorType(t *testing.T) {
 	}
 	if plain(human) != plain(agent) {
 		t.Errorf("colour must not change the text: %q vs %q", plain(human), plain(agent))
+	}
+}
+
+// The glyph-check thread exists to prove that a fixed-width column counts cells
+// and not bytes. Sanitizing used to strip the zero-width joiner out of an emoji
+// sequence, which turned one glyph into several and doubled the width the pane
+// then measured, so the preview pane drew the wrong thing at the wrong size.
+func TestThePreviewPaneRendersJoinedEmojiAsOneGrapheme(t *testing.T) {
+	const family = "\U0001F468‍\U0001F469‍\U0001F467‍\U0001F466"
+	thread := []store.Message{{
+		ID: 1, Name: "graphemes", AuthorType: "human",
+		Content:   "emoji and ZWJ sequences: " + family + " — one grapheme, two cells.",
+		CreatedAt: time.Now().Format(time.RFC3339),
+	}}
+	for _, w := range []int{40, 74, 110, 200} {
+		rows := plainLines(renderThread(w, 20, "glyph-check › wide-content", thread))
+		if got, want := termtext.DisplayWidth(rows[2]), w; got != want {
+			t.Errorf("at %d cells the message header is %d cells", w, got)
+		}
+		body := rows[3:]
+		var joined string
+		for _, line := range body {
+			if strings.Contains(line, "\U0001F468") {
+				joined = line
+			}
+			if got := termtext.DisplayWidth(line); got != w {
+				t.Errorf("at %d cells a body line is %d cells: %q", w, got, line)
+			}
+		}
+		if joined == "" {
+			t.Fatalf("at %d cells the sequence did not survive into the pane: %v", w, body)
+		}
+		// The joiner is still there, so the terminal draws one family glyph
+		// rather than four separate people.
+		if !strings.Contains(joined, family) {
+			t.Errorf("at %d cells the pane broke the sequence: %q", w, joined)
+		}
 	}
 }

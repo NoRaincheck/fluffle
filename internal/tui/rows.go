@@ -22,14 +22,47 @@ const (
 	MinContentW = 10
 	MinWidth    = rowPrefixW + MinContentW
 	MinHeight   = 24
-	chromeH     = 3
+
+	// titleH and statusH are fixed bands; the footer between them is reflowed
+	// to the terminal width and so is however many rows it needs. See
+	// model.chromeH, which is the only place the three are added up.
+	titleH  = 1
+	statusH = 1
+
+	// listHeaderH is the column header and the rule under it, pinned above the
+	// list's scrolling window.
+	listHeaderH = 2
 
 	// MinSplitWidth is the width at which the list and the thread can sit
 	// side by side. Below it the list takes the whole width and Enter shows
 	// the thread in its place.
 	MinSplitWidth = 110
 	ListW         = 74
+
+	// PaneDividerW is the one column between the list and the thread in a
+	// split. Without it the list's truncated content cell runs straight into
+	// the thread's first line and the only cue is that one of them stopped
+	// mid-word.
+	PaneDividerW    = 1
+	paneDividerRune = '│'
 )
+
+// rowHeader labels the four fixed columns and the count, in the same cells
+// rowLine draws them in. It is the only legend a scrolled list has, so it is
+// drawn above the scrolling window rather than inside it.
+//
+// The content column is not labelled. The count sits in its last three cells
+// with no gap before the content, so a label there would read as one word
+// ("CNTCONTENT") and the text column is the one thing on a row that needs no
+// explaining.
+func rowHeader(w int) string {
+	return pad(dimStyle.Render(strings.Repeat(" ", CursorW)+
+		cell("TIME")+strings.Repeat(" ", ColGap)+
+		cell("CHANNEL")+strings.Repeat(" ", ColGap)+
+		cell("THREAD")+strings.Repeat(" ", ColGap)+
+		cell("NAME")+strings.Repeat(" ", ColGap)+
+		fmt.Sprintf("%*s", CountW, "CNT")), w)
+}
 
 // contentWidth is a row's content column width, or zero when the pane is too
 // narrow to draw one.
@@ -79,13 +112,15 @@ func rowLine(w int, row store.Row, selected bool) string {
 		fmt.Sprintf("%*s", CountW, count)+content, w)
 }
 
-// renderRows draws the visible window and pads to exactly h rows so the
-// title, hint, and status bands keep their places.
+// renderRows draws the column header, a rule, and the visible window, then pads
+// to exactly h rows so the title, footer, and status bands keep their places.
+// The header and the rule are outside the window on purpose: the window scrolls
+// under them, which is what keeps a scrolled list readable.
 func renderRows(w, h int, rows []store.Row, cursor, scroll int) string {
 	if h <= 0 || w <= 0 {
 		return ""
 	}
-	lines := make([]string, 0, h)
+	lines := []string{rowHeader(w), pad(sepStyle.Render(strings.Repeat("─", w)), w)}
 	if len(rows) == 0 {
 		// clamp has already zeroed scroll, so the window below cannot read
 		// before the start of an empty list.
@@ -97,7 +132,9 @@ func renderRows(w, h int, rows []store.Row, cursor, scroll int) string {
 	for len(lines) < h {
 		lines = append(lines, strings.Repeat(" ", w))
 	}
-	return strings.Join(lines, "\n")
+	// A body shorter than the header keeps the header and drops the rest, so a
+	// caller always gets h rows and a rule is better than a stray data row.
+	return strings.Join(lines[:min(len(lines), h)], "\n")
 }
 
 // pad right-fills a rendered line to w cells, measuring cells rather than

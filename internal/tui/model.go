@@ -128,11 +128,11 @@ func (m model) View() string {
 	return m.bodyView()
 }
 
-// bodyView is title, body, hint, and status: chromeH rows of chrome around
-// exactly the rest. In a split terminal the thread sits beside the list; in a
-// stacked one it replaces the list; either way it is the same renderThread.
+// bodyView is title, body, footer, and status: the chrome around exactly the
+// rest. In a split terminal the thread sits beside the list; in a stacked one it
+// replaces the list; either way it is the same renderThread.
 func (m model) bodyView() string {
-	h := m.height - chromeH
+	h := m.height - m.chromeH()
 	var body string
 	switch {
 	case m.detail:
@@ -147,17 +147,21 @@ func (m model) bodyView() string {
 	return strings.Join([]string{
 		m.titleLine(),
 		body,
-		hintLine(),
+		renderHelp(helpItems(), m.width),
 		statusStyle.Width(m.width - 2).Render(termtext.Truncate(termtext.SanitizeLine(m.statusLine()), m.width-2, "…")),
 	}, "\n")
 }
 
-// hintLine names the navigable keys, on one row, with no `?` overlay and no
-// context-sensitive text. It has to fit the 71-column floor, which is what
-// bounds how much of the keymap can be said out loud; `q` and ctrl+c are the
-// keys it leaves to muscle memory.
-func hintLine() string {
-	return dimStyle.Render("↑↓ nav · g group · v sort · Enter read · Esc back · r reply · q quit")
+// chromeH is the title band, the footer, and the status band. The footer is
+// reflowed to the terminal width, so its height is whatever that reflow chose
+// and this is the only place the arithmetic lives: the body, and the scroll
+// window that has to fit inside it, are both derived from it.
+func (m model) chromeH() int {
+	return titleH + m.footerH() + statusH
+}
+
+func (m model) footerH() int {
+	return max(len(strings.Split(renderHelp(helpItems(), m.width), "\n")), 1)
 }
 
 // paneWidth is the width the thread is drawn at, whether it sits beside the
@@ -165,19 +169,21 @@ func hintLine() string {
 // both placements cannot drift apart.
 func (m model) paneWidth() int {
 	if m.split() && !m.detail {
-		return m.width - ListW
+		return m.width - ListW - PaneDividerW
 	}
 	return m.width
 }
 
 // sideBySide puts the thread pane to the right of the list, one list row and
-// one thread row per output row. Joining the two blocks instead would stack
-// them, which costs a row and is not a split.
+// one thread row per output row, with the divider column between them. Joining
+// the two blocks instead would stack them, which costs a row and is not a
+// split.
 func sideBySide(list, thread string) string {
 	l, r := strings.Split(list, "\n"), strings.Split(thread, "\n")
+	divider := sepStyle.Render(string(paneDividerRune))
 	rows := make([]string, 0, max(len(l), len(r)))
 	for i := range max(len(l), len(r)) {
-		rows = append(rows, rowAt(l, i)+rowAt(r, i))
+		rows = append(rows, rowAt(l, i)+divider+rowAt(r, i))
 	}
 	return strings.Join(rows, "\n")
 }
@@ -268,7 +274,7 @@ func (m *model) clamp() {
 		return
 	}
 	m.cursor = min(max(m.cursor, 0), len(m.rows)-1)
-	visible := max(m.height-chromeH, 1)
+	visible := m.listWindowH()
 	if top := m.cursor - visible + 1; m.scroll > top {
 		m.scroll = top
 	}
@@ -278,6 +284,14 @@ func (m *model) clamp() {
 	if m.cursor >= m.scroll+visible {
 		m.scroll = m.cursor - visible + 1
 	}
+}
+
+// listWindowH is how many rows of the list are the scrolling window rather than
+// the header pinned above it. The window is what clamp scrolls, so it has to be
+// the height clamp believes in: sizing it by the whole body let the cursor be
+// pushed one row past the last drawn row, which is a cursor you cannot see.
+func (m model) listWindowH() int {
+	return max(m.height-m.chromeH()-listHeaderH, 1)
 }
 
 func (m model) selectedRow() (store.Row, bool) {

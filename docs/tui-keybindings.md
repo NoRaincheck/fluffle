@@ -1,6 +1,6 @@
 # TUI Key Bindings Reference
 
-Every key the TUI (`flf tui`) answers. There are no unbound-but-documented keys, no `?` overlay, and no context-sensitive help: the hint line at the bottom names the navigable ones and nothing else.
+Every key the TUI (`flf tui`) answers. There are no unbound-but-documented keys, no `?` overlay, and no context-sensitive help: the footer at the bottom names every one of them with a description, and nothing else.
 
 ## List
 
@@ -41,8 +41,10 @@ Every other key does nothing. `l`, `p`, `s`, `n`, `C`, `e`, `f`, and `c` are unb
 | Split (list beside thread) | 110 columns or wider |
 | Stacked (list, or thread on `Enter`) | 71–109 columns |
 | List width when split | 74 cells, fixed |
+| Pane divider | 1 cell between the list and the thread, so a split is 74 + 1 + the rest |
 | Row prefix | 61 cells: a 2-cell cursor, four 12-cell columns, four 2-cell gaps, a 3-cell count |
-| Hint line | 68 cells, which is what bounds how much of the keymap can be said out loud |
+| Column header | 2 rows pinned above the list: the labels, and a rule |
+| Footer | Reflowed to the terminal width. 2 rows at 120 columns, 3 at the 71-column floor; the chrome is `1 + footer + 1`, so the body is whatever is left |
 
 A row is drawn whole or not at all: there is no column dropping, and no per-width key that stops working. `Enter` and `Esc` mean the same thing in both geometries, so neither is a no-op at any width.
 

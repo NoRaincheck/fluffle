@@ -17,6 +17,8 @@ Both are pure functions of their arguments. They read no model field, take no ca
 
 **To change what a row looks like**, edit `rowLine`. It is exactly `w` cells wide for an ASCII row, and that is the invariant: sanitize, truncate, pad, in that order, all in cells. Note that `cell` pads the four fixed columns with `%-*s`, which counts runes, so a wide grapheme in a channel, thread, or author name overruns the column — the ASCII-only name rules are what keep that unreachable, not the renderer. `renderRows` supplies the window and the empty state; do not put per-row state in it.
 
+**To change what the list looks like**, edit `rowLine` for a data row or `rowHeader` for the labels above them — they share the same prefix arithmetic, so a column width change belongs in `ColW` and reaches both. `renderRows` keeps the header outside the scrolling window, so anything added there costs the window a row and `listWindowH` has to follow.
+
 **To change what a thread looks like**, edit `threadLines` or the header in `renderThread`. The uniform-block rule is the one to keep: the original post is not special-cased, so a change to "the first message" is a change to every message.
 
 **To add a third pane**, add a case to `bodyView` and a width rule next to `paneWidth()`, which is the only place the thread's width is computed. If the new pane has its own scroll offset, the model is growing a mode field again — check whether the list's `cursor`/`scroll` can be shared before adding one.
@@ -74,7 +76,7 @@ A granularity whose rows have no thread is the `channel` case, and it is already
 
 ## Adding a key
 
-`handleKey` in `model.go` is the whole list keymap, one `switch` on `msg.String()`. Add a case, and update `hintLine` in the same commit: it must name the new key, and it must still fit `MinWidth` cells, which is a bound a test enforces. If the key does not fit, the keymap is too big — cut something rather than wrapping the hint.
+`handleKey` in `model.go` is the whole list keymap, one `switch` on `msg.String()`. Add a case, and add the key to `helpItems` in the same commit: the footer is the only place a key is documented, and a key that is not on it is a key the user has to guess at. The item needs a description, not an abbreviation — the footer reflows into as many columns as the width holds, so a longer description costs rows only at the narrow floor and buys nothing anywhere else. `TestHelpNamesEveryBoundKey` and `TestHelpNeverExceedsTheTerminal` are the bounds.
 
 Three things to know before you bind one:
 

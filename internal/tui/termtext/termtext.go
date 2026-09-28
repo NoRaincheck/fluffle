@@ -115,12 +115,30 @@ func writeSafeText(b *strings.Builder, s string, singleLine bool) {
 				b.WriteRune(r)
 			}
 		default:
-			if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			if unicode.IsControl(r) || (unicode.Is(unicode.Cf, r) && !isGraphemeFormat(r)) {
 				continue
 			}
 			b.WriteRune(r)
 		}
 	}
+}
+
+// isGraphemeFormat reports whether r is a zero-width format character that
+// belongs to a grapheme cluster rather than to the text around it. ZWJ joins
+// emoji into one glyph, ZWNJ suppresses one joining in scripts that shape
+// across it, and the tag characters spell out a subdivision flag. Dropping any
+// of them splits one glyph into several and doubles the cells the caller then
+// measures the line against, so they are kept. Every other Cf is invisible, a
+// bidi control that reorders what follows it, or an annotation — and removing
+// those is what this package is for.
+func isGraphemeFormat(r rune) bool {
+	switch {
+	case r == '\u200c' || r == '\u200d' || r == '\U000e0001':
+		return true
+	case r >= '\U000e0020' && r <= '\U000e007f':
+		return true
+	}
+	return false
 }
 
 // DisplayWidth reports the number of terminal cells occupied by the
