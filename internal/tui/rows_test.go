@@ -864,11 +864,14 @@ func TestViewIsNarrowNoticeWhenTooNarrow(t *testing.T) {
 	}
 }
 
-func TestViewIsExactlyTerminalHeight(t *testing.T) {
+// The view leaves the terminal's last row and last column alone, so a
+// disagreement of one cell between the app and the terminal cannot wrap a row.
+// See model.slack, which is why this is 39 and not 40.
+func TestViewIsTerminalHeightLessSlack(t *testing.T) {
 	m := toModel(New("http://127.0.0.1:1"))
 	m.width, m.height = 200, 40
 	m.rows = []store.Row{testRow()}
-	if n := strings.Count(m.View(), "\n") + 1; n != 40 {
-		t.Errorf("View is %d lines, want 40", n)
+	if n, want := strings.Count(m.View(), "\n")+1, m.height-slack; n != want {
+		t.Errorf("View is %d lines, want %d", n, want)
 	}
 }

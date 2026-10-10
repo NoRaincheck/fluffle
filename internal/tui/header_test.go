@@ -75,7 +75,7 @@ func TestAnEmptyListKeepsItsHeader(t *testing.T) {
 // cue was that one of them stopped mid-word.
 func TestASplitSeparatesTheTwoPanes(t *testing.T) {
 	m := sizedModel(200, 40, 5)
-	body := plainLines(m.bodyView())[1 : 1+m.height-m.chromeH()]
+	body := plainLines(m.bodyView())[titleH : titleH+m.bodyH()]
 	if len(body) == 0 {
 		t.Fatal("the split body is empty")
 	}
@@ -87,10 +87,10 @@ func TestASplitSeparatesTheTwoPanes(t *testing.T) {
 }
 
 // The divider is a column, so the thread pane is one cell narrower than it was
-// and the split still fills the terminal exactly.
+// and the split still fills the width the view is drawn at.
 func TestTheDividerCostsTheThreadPaneOneCell(t *testing.T) {
 	m := sizedModel(200, 40, 5)
-	if got, want := m.paneWidth(), m.width-ListW-PaneDividerW; got != want {
+	if got, want := m.paneWidth(), m.viewW()-ListW-PaneDividerW; got != want {
 		t.Errorf("paneWidth = %d, want %d", got, want)
 	}
 }
@@ -117,7 +117,7 @@ func TestTheDetailViewHasNoDivider(t *testing.T) {
 	m.threadID = 1
 	m.thread = []store.Message{{ID: 1, Name: "alice", AuthorType: "human", Content: "hello"}}
 	body := plainLines(m.bodyView())
-	for i, line := range body[titleH : titleH+m.height-m.chromeH()] {
+	for i, line := range body[titleH : titleH+m.bodyH()] {
 		if strings.ContainsRune(line, paneDividerRune) {
 			t.Errorf("detail body row %d carries a pane divider: %q", i, line)
 		}

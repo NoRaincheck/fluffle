@@ -49,10 +49,14 @@ func TestChromeGrowsAndShrinksWithTheFooter(t *testing.T) {
 	}
 }
 
-// Whatever the reflow chose, the view fills the terminal exactly: one row per
-// row, none of them wrapping. A view that is a row too tall loses its title to
-// the renderer's top-truncation, and a row too short leaves the last band off.
-func TestTheViewIsExactlyTheTerminal(t *testing.T) {
+// The view fills every row and column it is allowed, and stops one short of the
+// terminal on both axes. The stopping is the point: a view that reaches an edge
+// is correct only while the terminal measures that edge exactly as the app
+// does, and a terminal one cell narrower than it reported — or one cell
+// different in a font, or under an ambiguous-width setting — wraps the row and
+// desynchronises the frame permanently. slack buys that immunity for one column
+// of content and one blank row. See model.slack.
+func TestTheViewFillsTheTerminalLessSlack(t *testing.T) {
 	for _, size := range [][2]int{{MinWidth, MinHeight}, {80, 24}, {100, 30}, {110, 30}, {120, 40}, {200, 50}} {
 		for _, rows := range []int{0, 1, 5, 200} {
 			for _, detail := range []bool{false, true} {
@@ -61,12 +65,16 @@ func TestTheViewIsExactlyTheTerminal(t *testing.T) {
 				m.thread = []store.Message{{ID: 1, Name: "alice", AuthorType: "human", Content: "hello"}}
 				m.threadID = 1
 				lines := strings.Split(m.View(), "\n")
-				if len(lines) != size[1] {
-					t.Fatalf("%dx%d, %d rows, detail=%v: the view is %d rows", size[0], size[1], rows, detail, len(lines))
+				if want := size[1] - slack; len(lines) != want {
+					t.Fatalf("%dx%d, %d rows, detail=%v: the view is %d rows, want %d",
+						size[0], size[1], rows, detail, len(lines), want)
 				}
+				// Two cells of margin, because a line the terminal measures one
+				// cell over is a row the app cannot recover.
 				for i, line := range lines {
-					if n := termtext.DisplayWidth(line); n > size[0] {
-						t.Errorf("%dx%d: view row %d is %d cells", size[0], size[1], i, n)
+					if n := wideCells.String(line); n > m.viewW() {
+						t.Errorf("%dx%d: view row %d is %d cells, over the %d the view may draw",
+							size[0], size[1], i, n, m.viewW())
 					}
 				}
 			}
@@ -89,8 +97,8 @@ func TestTheStatusBandIsExactlyOneRow(t *testing.T) {
 			if got := len(plainLines(m.statusBand())); got != 1 {
 				t.Errorf("at %d columns a %d-cell note drew a %d-row status band", w, n, got)
 			}
-			if got := len(plainLines(m.View())); got != MinHeight {
-				t.Errorf("at %d columns a %d-cell note made the view %d rows, want %d", w, n, got, MinHeight)
+			if got, want := len(plainLines(m.View())), MinHeight-slack; got != want {
+				t.Errorf("at %d columns a %d-cell note made the view %d rows, want %d", w, n, got, want)
 			}
 		}
 	}
@@ -237,6 +245,47 @@ func TestNoLineIsWiderThanTheTerminalUnderEitherAmbiguousWidth(t *testing.T) {
 						t.Errorf("%dx%d %s row %d is %d cells on a wide-ambiguous terminal and %d narrow, over a %d-cell terminal",
 							size[0], size[1], view.what, i, n, narrow.String(line), size[0])
 					}
+				}
+			}
+		}
+	}
+}
+
+// Slack is the whole point of not drawing to the edge, and this is what it
+// buys: a terminal one cell narrower than the size the app was told does not
+// wrap a row, so the frame cannot desynchronise. Without slack every line is
+// exactly the terminal's width, one cell is one too many, the row wraps, and
+// the emulator consumes a row the renderer does not know about — the title
+// band scrolls off the top, the footer and status off the bottom, and a row of
+// the list is left behind at the top. The app cannot detect that, because the
+// only evidence is a screen it never reads.
+//
+// A disagreement of more than one cell is a resize, and the app learns about
+// that from `tea.WindowSizeMsg`. This is the case where the app is told a size
+// and the terminal is not that size, which no message reports.
+func TestSlackSurvivesAOneCellTerminalDisagreement(t *testing.T) {
+	rows := []store.Row{
+		{ID: 1, ThreadID: 1, Channel: "general", Thread: "welcome", Name: "alice", Count: 3,
+			Content: "it\u2019s the \u201cbest\u201d release \u2014 the \u2026 one",
+			Time:    time.Now().Format(time.RFC3339)},
+		{ID: 2, ThreadID: 2, Channel: "glyph-check", Thread: "wide-content", Name: "graphemes", Count: 9,
+			Content: "\U0001F468\u200d\U0001F469\u200d\U0001F467\u200d\U0001F466 \uff46\uff55\uff4c\uff4c\uff57\uff69\uff64\uff74\uff68 \u5168\u89d2",
+			Time:    time.Now().Format(time.RFC3339)},
+	}
+	thread := []store.Message{{ID: 1, ThreadID: 1, Name: "alice", AuthorType: "human",
+		Content:   "curly \u201cquotes\u201d, an em \u2014 dash, an ellipsis\u2026 and an arrow \u2192",
+		CreatedAt: time.Now().Format(time.RFC3339)}}
+
+	for _, told := range []int{80, 120, 173} {
+		for _, delta := range []int{-1, 0, 1} {
+			terminal := told + delta
+			m := model{width: told, height: 49, granularity: store.GranularityMessage,
+				rows: rows, thread: thread, threadID: 1}
+			m.clamp()
+			for i, line := range strings.Split(m.View(), "\n") {
+				if got := wideCells.String(line); got > terminal {
+					t.Errorf("told %d columns, terminal is %d: view row %d is %d cells and would wrap",
+						told, terminal, i, got)
 				}
 			}
 		}
